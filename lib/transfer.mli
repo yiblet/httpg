@@ -119,6 +119,8 @@ type transfer_writer = {
   tw_trailer : Header.t option;
   tw_is_response : bool;
   tw_at_least_http11 : bool;
+  tw_close : bool;  (** mirrors transferWriter.Close *)
+  tw_header : Header.t;  (** the message Header (for the Connection check) *)
 }
 
 (** [make_transfer_writer ...] is [newTransferWriter]'s sanitization of the
@@ -130,11 +132,25 @@ val make_transfer_writer :
   ?response_to_head:bool ->
   ?trailer:Header.t option ->
   ?at_least_http11:bool ->
+  ?close:bool ->
+  ?header:Header.t ->
   body:Body.t ->
   content_length:int64 ->
   transfer_encoding:string list ->
   unit ->
   transfer_writer
+
+(** [should_send_content_length t] is [transferWriter.shouldSendContentLength]. *)
+val should_send_content_length : transfer_writer -> bool
+
+(** [write_transfer_header oc t] is [transferWriter.writeHeader]: write the
+    Connection / Content-Length / Transfer-Encoding / Trailer header lines that
+    derive from the sanitized field triple. Raises {!Bad_string_error} on an
+    invalid Trailer key. *)
+val write_transfer_header : Lwt_io.output_channel -> transfer_writer -> unit Lwt.t
+
+(** [has_token v token] is Go's [hasToken] (case-insensitive token search). *)
+val has_token : string -> string -> bool
 
 (** [write_body oc t] is [transferWriter.writeBody]: write the body (chunked,
     fixed content-length, or unknown-length) and any trailers to [oc]. Raises

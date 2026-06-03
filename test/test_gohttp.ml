@@ -7,4 +7,9 @@ let () =
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);
       ("Transfer", Test_transfer.tests);
+      ("Request", Test_request.tests);
+      ("ReadRequest", Test_readrequest.tests);
+      ("RequestWrite", Test_requestwrite.tests);
+      ("Response", Test_response.tests);
+      ("ResponseWrite", Test_responsewrite.tests);
     ]

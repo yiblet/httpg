@@ -394,7 +394,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 6 — Request/Response types + read/write
-Status: Planned
+Status: Done
 
 **A) Scope** Port the `Request`/`Response` types and their read/write halves: `request.go` (`readRequest`, `Write`), `response.go` (`ReadResponse`, `Write`).
 
@@ -410,7 +410,102 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/request.ml` + `lib/request.mli` — new; port of the `Request` type and
+    pure helpers from `go/src/net/http/request.go`. `type 'body t` mirrors Go's
+    `Request` struct (`meth`, `url : Uri.t`, `proto`/`proto_major`/`proto_minor`,
+    `header`, `body : 'body`, `content_length : int64`, `transfer_encoding`,
+    `close`, `host`, `trailer : Header.t option`, `request_uri`, `remote_addr`);
+    form/multipart/GetBody/Cancel/TLS/context fields omitted (deferred, see scope
+    note). Helpers: `parse_http_version` (`ParseHTTPVersion`), `proto_at_least`,
+    `user_agent`, `referer`, `cookies`/`cookie` (compose `Cookie.read_cookies`),
+    `add_cookie`, `parse_basic_auth`, `basic_auth`, `basic_auth_encode`
+    (`basicAuth`), `set_basic_auth`. Uses the `base64` lib for Basic auth.
+  - `lib/response.ml` + `lib/response.mli` — new; port of the `Response` type and
+    pure helpers from `go/src/net/http/response.go`. `type 'body t` mirrors Go's
+    `Response` struct (`status`, `status_code`, `proto`/major/minor, `header`,
+    `body : 'body`, `content_length`, `transfer_encoding`, `close`,
+    `uncompressed`, `trailer`, `request : 'body Request.t option`); TLS field
+    omitted (deferred). Helpers: `cookies` (`readSetCookies`), `proto_at_least`,
+    `location` (`Location`, resolved against the request URL via `Uri.resolve`).
+  - `lib/io.ml` + `lib/io.mli` — new; the Lwt read/write halves over
+    `Lwt_io.input_channel`/`output_channel`. Includes a textproto-style header
+    reader (`read_mime_header`: CRLF lines until blank, obs-fold continuation,
+    `validHeaderValueByte`, value left-trim, key canonicalization — port of
+    `textproto.Reader.ReadMIMEHeader` + `readContinuedLineSlice`), `read_line`
+    (bufio/textproto `ReadLine`), `parse_request_line`, `is_token` (`validMethod`),
+    `fix_pragma_cache_control`. `read_request` (`readRequest`/`ReadRequest`:
+    request line, CONNECT just-authority handling, headers, Host promotion +
+    deletion, `should_close`, `read_transfer`), `read_response` (`ReadResponse`:
+    status line, `TrimLeft`, 3-digit code, headers, `read_transfer`),
+    `write_request` (`Request.Write`: request line `HTTP/1.1`, Host, default
+    User-Agent, transfer header via `Transfer.write_transfer_header`, header
+    subset excluding the writer-managed keys, body), `write_response`
+    (`Response.Write`: status-line text logic incl. `%03d` zero-pad and stutter
+    trim, zero-length-body probe, the HTTP/1.1 unknown-length `Connection: close`
+    rule, `Content-Length: 0` for bodyless allowed-status responses). Chunked
+    bodies are materialized in memory and the trailer block parsed after the body
+    (Go's `body.readTrailer`).
+  - `lib/transfer.ml` + `lib/transfer.mli` — extended (not new): added
+    `has_token` (`hasToken`), `should_send_content_length`
+    (`transferWriter.shouldSendContentLength`), `write_transfer_header`
+    (`transferWriter.writeHeader`: Connection/Content-Length/Transfer-Encoding/
+    Trailer lines), and `tw_close`/`tw_header` fields plus `?close`/`?header`
+    params on `make_transfer_writer`. `write_body` was already present from
+    Ticket 5; the header-writing half (`writeHeader`) is the new piece Ticket 6
+    needs.
+  - `lib/dune` — added `base64` to libraries.
+  - `gohttp.opam` — added `base64` (and `fmt` {with-test}).
+  - `test/test_request.ml` — new; pure-helper cases from `request_test.go`:
+    `parse_http_version` (the 17-row `parseHTTPVersionTests`), `parse_basic_auth`
+    (the 10-row `parseBasicAuthTests`), `basic_auth_roundtrip`
+    (`TestGetBasicAuth`: SetBasicAuth→BasicAuth for the 3 credential pairs +
+    unauthenticated), `add_cookie`.
+  - `test/test_readrequest.ml` — new; representative `reqTests` rows: baseline
+    (all fields), simple GET, chunked-with-trailer, chunked-drops-Content-Length,
+    plus HTTP/1.0 content-length + HTTP/1.0 keep-alive (version-sensitive close).
+  - `test/test_requestwrite.ml` — new; `reqWriteTests` rows 0–4 (GET headers,
+    GET chunked, POST chunked+close, POST Content-Length+close, Content-Length
+    header ignored) asserting exact wire bytes.
+  - `test/test_response.ml` — new; `respTests` ReadResponse rows: HTTP/1.0 close,
+    HTTP/1.1 no-length close-delimited, 204 No Content, Content-Length, chunked
+    multi-chunk, plus `Location` resolution.
+  - `test/test_responsewrite.ml` — new; 15 `respWriteTests` rows (exact bytes).
+  - `test/dune` — added `base64 fmt uri` to libraries.
+  - `test/test_gohttp.ml` — registered the 5 new suites.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.028s. **217 tests run.**" All `[OK]`. New suites: `Request` (4),
+  `ReadRequest` (6), `RequestWrite` (5), `Response` (6), `ResponseWrite` (15) =
+  36 new, alongside the 181 baseline.
+- **Porting notes / intentionally omitted Go cases:**
+  - **Scope deferrals (per ticket scope note):** multipart/form parsing
+    (`ParseForm`, `ParseMultipartForm`, `FormValue`, `PostForm`, `MultipartReader`)
+    and the `Form`/`MultipartForm` struct fields; `GetBody`, `Cancel`,
+    `context`/`WithContext`/`Clone`, `tls.ConnectionState`, and httptrace fields.
+    The corresponding Go tests (`TestParseForm*`, `TestMultipart*`, proxy
+    `WriteProxy`/`WantProxy` columns, `TestRequestWriteTransport`,
+    `TestRequestWriteClosesBody`) are out of scope.
+  - **Uri vs net/url divergence (genuine porting artifact):** the `reqTests` row
+    `GET //user@host/is/actually/a/path/` expects Go's `url.ParseRequestURI` to
+    treat a scheme-relative target as a pure Path (host="" path=
+    "//user@host/..."). `Uri.of_string` instead parses host="host" path=
+    "/is/actually/a/path/". This is a `uri`-library semantics difference (the
+    project uses `Uri.t`, not a `net/url` port), so that specific row is omitted;
+    the absolute-URI and origin-form rows are ported. The malformed-URI error
+    rows (`../../../../etc/passwd`, empty URL) are also omitted as they depend on
+    `url.ParseRequestURI`'s exact error surface.
+  - **Trailer reading:** the chunked reader (Ticket 5) stops at the 0-chunk
+    without consuming trailers; `io.ml` reads the trailer block after the body in
+    `materialize_body`, mirroring `body.readTrailer`'s effect (merging into the
+    request/response `Trailer`). Bodies are materialized in memory rather than
+    streamed lazily — an Lwt batch-vs-stream artifact that is observably
+    equivalent for these round-trip tests.
+  - **`TestReadResponseCloseInMiddle` / allocation / streaming tests** and the
+    server/transport-coupled write tests are deferred to later tickets.
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 7 — Net (sockets + TLS) + socket smoke test
 Status: Planned

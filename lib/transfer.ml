@@ -237,6 +237,43 @@ let chunked (te : string list) : bool =
 let is_identity (te : string list) : bool =
   match te with [ "identity" ] -> true | _ -> false
 
+(* isTokenBoundary (header.go). *)
+let is_token_boundary b = b = ' ' || b = ',' || b = '\t'
+
+(* hasToken(v, token) (header.go): case-insensitive token search on boundaries. *)
+let has_token v token =
+  let lv = String.length v and lt = String.length token in
+  if lt > lv || lt = 0 then false
+  else if v = token then true
+  else begin
+    let eq_fold a b =
+      String.length a = String.length b
+      && (let ok = ref true in
+          String.iteri
+            (fun i ca ->
+              let cb = b.[i] in
+              let lower c = if c >= 'A' && c <= 'Z' then Char.chr (Char.code c + 32) else c in
+              if lower ca <> lower cb then ok := false)
+            a;
+          !ok)
+    in
+    let found = ref false in
+    let sp = ref 0 in
+    while (not !found) && !sp <= lv - lt do
+      let b = v.[!sp] in
+      let lower_b = Char.chr (Char.code b lor 0x20) in
+      if b <> token.[0] && lower_b <> token.[0] then incr sp
+      else if !sp > 0 && not (is_token_boundary v.[!sp - 1]) then incr sp
+      else begin
+        let end_pos = !sp + lt in
+        if end_pos <> lv && not (is_token_boundary v.[end_pos]) then incr sp
+        else if eq_fold (String.sub v !sp lt) token then found := true
+        else incr sp
+      end
+    done;
+    !found
+  end
+
 (* noResponseBodyExpected. *)
 let no_response_body_expected request_method = request_method = "HEAD"
 
@@ -504,13 +541,16 @@ type transfer_writer = {
   tw_trailer : Header.t option;
   tw_is_response : bool;
   tw_at_least_http11 : bool;
+  tw_close : bool;
+  tw_header : Header.t;
 }
 
 (* newTransferWriter's Body/ContentLength/TransferEncoding sanitization, the
    pure part (no probeRequestBody async sniffing). *)
 let make_transfer_writer ?(is_response = false) ?(method_ = "GET") ?(response_to_head = false)
-    ?(trailer = None) ?(at_least_http11 = true) ~(body : Body.t) ~(content_length : int64)
-    ~(transfer_encoding : string list) () : transfer_writer =
+    ?(trailer = None) ?(at_least_http11 = true) ?(close = false) ?header ~(body : Body.t)
+    ~(content_length : int64) ~(transfer_encoding : string list) () : transfer_writer =
+  let header = match header with Some h -> h | None -> Header.create () in
   let body_is_nil = body = Body.Empty in
   let te = ref transfer_encoding in
   let cl = ref content_length in
@@ -533,7 +573,52 @@ let make_transfer_writer ?(is_response = false) ?(method_ = "GET") ?(response_to
     tw_trailer = trailer;
     tw_is_response = is_response;
     tw_at_least_http11 = at_least_http11;
+    tw_close = close;
+    tw_header = header;
   }
+
+(* shouldSendContentLength (transfer.go). *)
+let should_send_content_length (t : transfer_writer) : bool =
+  if chunked t.tw_transfer_encoding then false
+  else if Int64.compare t.tw_content_length 0L > 0 then true
+  else if Int64.compare t.tw_content_length 0L < 0 then false
+  else if t.tw_method = "POST" || t.tw_method = "PUT" || t.tw_method = "PATCH" then true
+  else if Int64.compare t.tw_content_length 0L = 0 && is_identity t.tw_transfer_encoding then
+    if t.tw_method = "GET" || t.tw_method = "HEAD" then false else true
+  else false
+
+(* transferWriter.writeHeader: write Connection/Content-Length/Transfer-Encoding/
+   Trailer header lines derived from the sanitized triple. Raises Bad_string_error
+   on an invalid Trailer key. *)
+let write_transfer_header (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
+  let open Lwt.Infix in
+  (if t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close") then
+     Lwt_io.write oc "Connection: close\r\n"
+   else Lwt.return_unit)
+  >>= fun () ->
+  (if should_send_content_length t then
+     Lwt_io.write oc (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
+   else if chunked t.tw_transfer_encoding then Lwt_io.write oc "Transfer-Encoding: chunked\r\n"
+   else Lwt.return_unit)
+  >>= fun () ->
+  match t.tw_trailer with
+  | None -> Lwt.return_unit
+  | Some tr ->
+    let keys =
+      Hashtbl.fold
+        (fun k _ acc ->
+          let k = Header.canonical_header_key k in
+          (match k with
+          | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
+            raise (bad_string_error "invalid Trailer key" k)
+          | _ -> ());
+          k :: acc)
+        tr []
+    in
+    if keys = [] then Lwt.return_unit
+    else
+      let keys = List.sort String.compare keys in
+      Lwt_io.write oc ("Trailer: " ^ String.concat "," keys ^ "\r\n")
 
 (* writeBody: write the body (and trailers) to [oc] in wire format. Raises
    Chunk_error on a ContentLength/body-length mismatch. *)
