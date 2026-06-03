@@ -678,7 +678,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 9 — Server + ServeMux dispatch
-Status: Planned
+Status: Done
 
 **A) Scope** Port `server.go` (HTTP/1.x subset): `Handler`, `handler_func`, `ResponseWriter`, the per-conn serve loop, `Server`, `listen_and_serve`, `ServeMux` dispatch.
 
@@ -692,7 +692,124 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; serve tests bounded by timeout.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/server.ml` + `lib/server.mli` — new; port of the HTTP/1.x subset of
+    `go/src/net/http/server.go`.
+    - `type response_writer = { header; write_header; write }` models Go's
+      `ResponseWriter` interface as a record of operations; `type handler =
+      { serve_http : response_writer -> Body.t Request.t -> unit Lwt.t }` is
+      Go's `Handler`, and `handler_func` is Go's `HandlerFunc`.
+    - **ResponseWriter impl** (`serve_one`): buffers the body until the handler
+      returns, then emits the status line with the request's protocol
+      (`HTTP/1.1` if `proto_at_least 1 1` else `HTTP/1.0`), an exact
+      `Content-Length` for body-allowed statuses (the common Go buffered path),
+      Content-Type sniffing via `Sniff.detect_content_type` when unset and
+      `X-Content-Type-Options: nosniff` absent, a `Date` header, and the
+      version-sensitive `Connection` header (see keep-alive note). Implicit
+      `WriteHeader(200)` on first `write`/at finish; `body_allowed_for_status`
+      (1xx/204/304 carry no body); HEAD suppresses the body. Managed framing
+      headers (`Content-Length`/`Transfer-Encoding`/`Connection`) are excluded
+      from the handler header block, the rest written sorted via
+      `Header.write_subset`.
+    - **Helpers:** `error` (Go `Error`: reset Content-Type to
+      `text/plain; charset=utf-8`, drop Content-Length, set nosniff, write
+      code + message + "\n"), `not_found`/`not_found_handler` (Go `NotFound`/
+      `NotFoundHandler`), `redirect`/`redirect_handler` (Go `Redirect`/
+      `RedirectHandler`, incl. relative-target resolution against the request
+      path, `path.Clean`, the trailing-slash preserve, `html_escape`, and the
+      GET-only HTML body), `html_escape` (Go `htmlReplacer`).
+    - **ServeMux:** `serve_mux` backed by `Routing_tree` (handler-polymorphic
+      tree from Ticket 8) + `Pattern`. `new_serve_mux`, `handle`/`handle_func`
+      (Go `Handle`/`HandleFunc` → `register`: parse, conflict-check via
+      `Pattern.conflicts_with`/`describe_conflict` over a linear pattern list —
+      Go's `registerErr` minus the `routingIndex` pre-filter — raising
+      `Register_error` instead of panicking), `serve_mux_serve_http`
+      (Go `ServeMux.ServeHTTP`: the `RequestURI == "*"` 400 case, then
+      `find_handler`). `find_handler` ports Go's `findHandler`:
+      `clean_path` (Go `cleanPath`), `strip_host_port` (Go `stripHostPort`),
+      `match_or_redirect` + `exact_match` (trailing-slash 307 redirect),
+      the cleaned-path 307 redirect, the CONNECT no-canonicalization branch,
+      and the `matching_methods` → 405-with-Allow vs 404 distinction.
+    - **Server:** `type t` (addr/port/handler + an internal stop promise +
+      listening fd), `create`, minimal `close` (Go `Server.Close`: resolve the
+      stop promise + close the listener), `serve` (Go `Server.Serve`: accept
+      loop racing against the stop promise, each connection handled in its own
+      `Lwt.async` fiber running the per-conn keep-alive loop via
+      `Io.read_request`/`serve_one`), `listen_and_serve` (Go `ListenAndServe`),
+      and `listen_and_serve_started` (binds first, returns
+      `(t, bound_port, serve_loop)` so tests can target an ephemeral port and
+      `close`).
+  - `lib/pattern.mli` — exposed `path_clean` (already implemented in
+    `pattern.ml`; `ServeMux.clean_path`/`redirect` reuse it as Go's `cleanPath`/
+    `path.Clean`).
+  - `test/test_serve.ml` — new; alcotest suite `val tests` (4 cases), a ported
+    subset of `serve_test.go`. Each starts a real loopback server on an
+    ephemeral port via `listen_and_serve_started`, drives it with a raw client
+    (`Net.connect` + raw `Lwt_io`, since the gohttp Client is Ticket 10), and
+    asserts on raw response bytes; the whole run is bounded by
+    `Net.with_timeout 10.` and driven by `Lwt_main.run`, so a hang fails.
+    - `hello_handler` (TestServeMux/handler-writes-body analogue): GET `/`,
+      assert `200 OK` status line + body `"hello"`.
+    - `not_found` (TestServeMuxHandler 404 path): unregistered path → 404 with
+      `"404 page not found"` body.
+    - `mux_routing`: patterns `/a`, `/b`, `POST /c` dispatch by path; GET `/c`
+      → `405 Method Not Allowed` with `Allow: POST`; POST `/c` → its handler.
+    - `http10_close` (version-sensitive connection mgmt): an HTTP/1.0 request
+      gets an `HTTP/1.0 200` response and the server closes (no
+      `Connection: keep-alive`, `read_to_eof` terminates with the body); an
+      HTTP/1.0 `Connection: keep-alive` request gets `Connection: keep-alive`
+      and a second request is served on the same socket.
+  - `test/test_gohttp.ml` — registered `("Serve", Test_serve.tests)`.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.032s. **242 tests run.**" All `[OK]`. New suite `Serve` = 4 cases
+  (`hello_handler`, `not_found`, `mux_routing`, `http10_close`), alongside the
+  238 baseline. Re-ran the executable 3× with identical results (242, ~0.03s),
+  confirming the networked tests terminate (each bounded by
+  `Net.with_timeout 10.`).
+- **Keep-alive / version handling verification:** `serve_one` computes
+  `keep_alive = (not req_should_close) && not handler_conn_close`, where
+  `req_should_close` is `Request.close` as set by `Io.read_request`'s
+  `Transfer.should_close` (HTTP/1.0 close-by-default unless `keep-alive`;
+  HTTP/1.1 keep-alive unless `close`). On the wire: a closing response emits
+  `Connection: close`; an HTTP/1.0 kept-alive response emits the explicit
+  `Connection: keep-alive` Go requires (HTTP/1.1 kept-alive emits neither). The
+  per-conn loop only iterates while `keep_alive` holds. The `http10_close` test
+  asserts both directions end-to-end (default-1.0 closes + omits keep-alive;
+  explicit-keep-alive advertises it and serves a second request on the same
+  socket). The status line always carries the request's protocol.
+- **Porting notes / intentionally omitted Go cases:**
+  - Bodies are buffered (not streamed) before flush, so responses always carry
+    an exact `Content-Length` — Go's common buffered path. The chunked-encoding
+    fallback for unknown-length HTTP/1.1 streaming output is therefore not
+    exercised by this ticket's writer (no streaming `ResponseWriter` yet); the
+    chunked *framing* is ported in `Transfer` (Ticket 5). Flagged as a
+    buffer-vs-stream narrowing.
+  - `Server.Close` is intentionally minimal (resolve stop promise + close
+    listener); graceful shutdown / connection tracking / `Shutdown`,
+    `ConnState`/state hooks, `ReadTimeout`/`WriteTimeout`/`IdleTimeout`,
+    `Hijack`, `Flush`, `Expect: 100-continue` handling, the `100 Continue`
+    auto-send, and HTTP/2 / unencrypted-h2 / TLS-NPN paths are out of scope per
+    the ticket. `relevantCaller`/superfluous-WriteHeader logging is omitted
+    (no `log` analog).
+  - `registerErr` is ported without the `routingIndex` `possiblyConflictingPatterns`
+    pre-filter (Ticket 8 already noted `routing_index.go` is a perf-only
+    optimization): conflict detection scans all registered patterns linearly,
+    which is behaviorally identical. `register` raises `Register_error` rather
+    than `panic`. `DefaultServeMux` and the package-level `Handle`/`HandleFunc`
+    are omitted (no global mutable default; callers create a `serve_mux`).
+  - `Redirect`'s non-ASCII `hexEscapeNonASCII` of the Location URL is narrowed
+    to a pass-through (faithful for ASCII targets, the only ones tested);
+    `StripPrefix` is omitted (not in the required surface, depends on
+    `URL.RawPath` which `Uri.t` does not expose distinctly).
+  - The networked `serve_test.go` tables (`TestServerContentTypeSniff`,
+    `TestHostHandlers`, the large `TestServeMux*` route tables, timeout/idle
+    tests, etc.) are not ported wholesale; the four representative cases above
+    cover the required behaviors (200+body, 404, path/method dispatch, and the
+    HTTP/1.0 vs keep-alive connection rules).
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 10 — Client + Transport
 Status: Planned

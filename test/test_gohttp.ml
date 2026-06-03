@@ -17,4 +17,5 @@ let () =
       ("Pattern", Test_pattern.tests);
       ("RoutingTree", Test_routing_tree.tests);
       ("Ascii", Test_ascii.tests);
+      ("Serve", Test_serve.tests);
     ]

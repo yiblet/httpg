@@ -76,3 +76,7 @@ val difference_path : t -> t -> string
 (** Go's [pathUnescape]: percent-decode, falling back to the original on
     invalid escaping. Shared with the routing tree. *)
 val path_unescape : string -> string
+
+(** Go's [cleanPath]/[path.Clean]: lexically clean a path, eliminating [.] and
+    [..] elements. Shared with [ServeMux] path canonicalization. *)
+val path_clean : string -> string
