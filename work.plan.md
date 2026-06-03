@@ -508,7 +508,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 7 — Net (sockets + TLS) + socket smoke test
-Status: Planned
+Status: Done
 
 **A) Scope** `lib/net.ml`: Lwt_unix listen/accept/connect, `Lwt_io` channel creation, optional `tls-lwt` wrap.
 
@@ -522,7 +522,55 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean (test must not hang — bounded with `Lwt_unix.with_timeout`).
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/net.ml` + `lib/net.mli` — new. No direct 1:1 Go source counterpart
+    (Go's `net/http` builds on the stdlib `net` package + `crypto/tls`); this is
+    the socket/TLS substrate the server (Ticket 9) and client (Ticket 10)
+    tickets build on. Public surface (hand-written `net.mli`):
+    - `listen : ?backlog:int -> string -> int -> Lwt_unix.file_descr Lwt.t` —
+      resolves host/port via `Lwt_unix.getaddrinfo` (TCP), creates a socket,
+      sets `SO_REUSEADDR`, binds, and `listen`s (`backlog` default 128, Go's
+      `net.Listen` default). Host used as given (`0.0.0.0`/`127.0.0.1`); port 0
+      yields an ephemeral port.
+    - `accept : Lwt_unix.file_descr -> (Lwt_unix.file_descr * Unix.sockaddr) Lwt.t`
+      — `Lwt_unix.accept` (one connection + peer addr).
+    - `channels_of_fd : Lwt_unix.file_descr -> (Lwt_io.input_channel * Lwt_io.output_channel)`
+      — wraps an fd in buffered `Lwt_io` channels (the `bufio` analogue used by
+      `Io`).
+    - `connect : host:string -> port:int -> ?tls:bool -> unit -> (ic * oc) Lwt.t`
+      — resolves + connects a client TCP socket; when `tls:true`, builds a
+      `Tls.Config.client` with the null authenticator and upgrades via
+      `Tls_lwt.Unix.client_of_fd` (peer name from `Domain_name.host` when the
+      host parses as a hostname), then `Tls_lwt.of_t` to `Lwt_io` channels.
+    - `local_addr` / `bound_port` (extract the bound ephemeral port for tests),
+      `sockaddr_to_string` (Go `host:port`, IPv6 bracketed — for
+      `Request.remote_addr`), `with_timeout : float -> 'a Lwt.t -> 'a Lwt.t`
+      (wraps `Lwt_unix.with_timeout` for bounded tests), and
+      `null_authenticator : X509.Authenticator.t` (exposed + documented).
+  - `test/test_net.ml` — new; alcotest suite `val tests` (1 case).
+    `Net.loopback_roundtrip`: `listen "127.0.0.1" 0`, read the ephemeral port,
+    one server fiber `accept`s + echoes a line, one client fiber `connect`s,
+    writes `"PING"`, reads the echo, asserts equality. Whole run wrapped in
+    `Net.with_timeout 5.` and driven by `Lwt_main.run` so a hang fails rather
+    than blocks. (TLS path is smoke-only — not exercised here, see note.)
+  - `test/test_gohttp.ml` — added `("Net", Test_net.tests)`.
+    (`lib/dune` already had `tls-lwt`; `test/dune` already had `lwt lwt.unix`.)
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.031s. **218 tests run.**" All `[OK]`. New suite `Net` = 1 case
+  (`loopback_roundtrip`), completes far under its 5s timeout (suite runs in
+  ~0.03s total), confirming it terminates. Baseline before ticket: 217.
+- **TLS verification note (documented deviation):** `connect ~tls:true` uses a
+  **null authenticator** (`null_authenticator = fun ?ip:_ ~host:_ _ -> Ok None`)
+  that accepts any server certificate without verification. This is acceptable
+  for the smoke-test substrate only; a production client must supply a real
+  authenticator (e.g. `X509` system trust). The policy is exposed and documented
+  on `Net.null_authenticator` and in the `connect` doc comment so it is not
+  mistaken for verified TLS. The TLS path itself is smoke-only (no local TLS
+  server in the test); it is wired and type-checked but not exercised by a test.
+- **Commit:** `(see below)`
 
 ### Ticket 8 — ServeMux internals (pattern, routing_tree, mapping)
 Status: Planned

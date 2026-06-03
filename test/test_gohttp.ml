@@ -12,4 +12,5 @@ let () =
       ("RequestWrite", Test_requestwrite.tests);
       ("Response", Test_response.tests);
       ("ResponseWrite", Test_responsewrite.tests);
+      ("Net", Test_net.tests);
     ]
