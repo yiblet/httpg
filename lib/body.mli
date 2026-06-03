@@ -21,5 +21,11 @@ val of_stream : (unit -> string option Lwt.t) -> t
 (** Read the entire body to a string. *)
 val read_all : t -> string Lwt.t
 
+(** [drain b] reads and discards the body until EOF. [Empty]/[String] are
+    no-ops. For a [Stream] it pulls every chunk until [None] — the analogue of
+    Go's [body.Close] consuming the body to EOF (and any chunked trailer),
+    leaving a kept-alive connection at the next message boundary. *)
+val drain : t -> unit Lwt.t
+
 (** [write oc b] writes the raw body bytes to [oc] with no transfer framing. *)
 val write : Lwt_io.output_channel -> t -> unit Lwt.t

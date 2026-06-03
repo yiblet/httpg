@@ -110,27 +110,53 @@ let fix_pragma_cache_control (h : Header.t) =
 (* Body / trailer materialization helpers.                             *)
 (* ------------------------------------------------------------------ *)
 
-(* After read_transfer hands back the body framing, fully read the body to a
-   String (so callers get an in-memory body, as the tests expect) and, for a
-   chunked body, parse the trailing trailer block (Go's body.readTrailer). *)
-let materialize_body ~(is_chunked : bool) ~(trailer : Header.t option) (ic : Lwt_io.input_channel)
-    (b : Body.t) : (Body.t * Header.t option) Lwt.t =
-  Body.read_all b >>= fun data ->
-  let body = if data = "" then Body.Empty else Body.String data in
-  if not is_chunked then Lwt.return (body, trailer)
-  else
-    (* Read the trailer: either a bare CRLF (already consumed as a blank line) or
-       a MIME header block. Our chunked reader stops at the 0-chunk without
-       consuming the trailing CRLF, so read the trailer block now. *)
-    read_mime_header ic >>= fun hdr ->
-    let merged =
-      match trailer with
-      | None -> if Hashtbl.length hdr = 0 then None else Some hdr
-      | Some t ->
-        Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
-        Some t
-    in
-    Lwt.return (body, merged)
+(* mergeSetHeader (transfer.go): merge [hdr] into the trailer cell. The
+   declared trailer (parsed from the Trailer header, keys with empty values) is
+   the starting point; the actual trailer values read after the chunked body
+   overwrite it. *)
+let merge_trailer (declared : Header.t option) (hdr : Header.t) : Header.t option =
+  match declared with
+  | None -> if Hashtbl.length hdr = 0 then None else Some hdr
+  | Some t ->
+    Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
+    Some t
+
+(* The non-buffering replacement for materialize_body: wrap [read_transfer]'s
+   incremental reader as a [Body.Stream] without collapsing it to a String.
+
+   Faithful to Go's [body.Read]/[body.readTrailer]/[body.Close] lifecycle: the
+   underlying reader yields chunks until it returns [None] (io.EOF). On that
+   first EOF, for a chunked body, we read the trailing trailer block (the bare
+   CRLF or a MIME header) and merge it into the trailer cell ([set_trailer],
+   which mutates the message's [trailer] field — Go's [mergeSetHeader] onto
+   rr.Trailer). The [eof] flag is then set so the connection is positioned at
+   the next message boundary; a second call after EOF keeps returning [None]
+   (gating keep-alive reuse — the caller, e.g. the server serve loop, runs
+   {!Body.drain} to reach this point before reading the next message). *)
+let stream_body ~(is_chunked : bool) ~(declared_trailer : Header.t option)
+    ~(set_trailer : Header.t option -> unit) (ic : Lwt_io.input_channel)
+    (reader : unit -> string option Lwt.t) : Body.t =
+  let eof = ref false in
+  let next () : string option Lwt.t =
+    if !eof then Lwt.return_none
+    else
+      reader () >>= function
+      | Some _ as chunk -> Lwt.return chunk
+      | None ->
+        eof := true;
+        (* On EOF, read & merge the chunked trailer (Go's body.readTrailer).
+           Our chunked reader stops at the 0-chunk without consuming the
+           trailing CRLF, so the trailer block (possibly a bare CRLF) is read
+           here. *)
+        if is_chunked then
+          read_mime_header ic >|= fun hdr ->
+          set_trailer (merge_trailer declared_trailer hdr);
+          None
+        else (
+          set_trailer declared_trailer;
+          Lwt.return_none)
+  in
+  Body.Stream next
 
 (* ------------------------------------------------------------------ *)
 (* read_request (readRequest / ReadRequest).                           *)
@@ -205,12 +231,12 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
               }
             in
             Transfer.read_transfer msg ic >>= fun res ->
-            materialize_body ~is_chunked:res.Transfer.is_chunked ~trailer:res.Transfer.trailer ic
-              res.Transfer.body
-            >>= fun (body, trailer) ->
             (* ReadRequest deletes the Host header. *)
             Header.del header "Host";
-            Lwt.return
+            (* Build the record first with the declared trailer; the streaming
+               body's EOF action mutates [r.trailer] (Go's mergeSetHeader onto
+               rr.Trailer) on the chunked trailer read. *)
+            let r =
               {
                 Request.meth;
                 url;
@@ -218,12 +244,12 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
                 proto_major;
                 proto_minor;
                 header;
-                body;
+                body = Body.Empty;
                 content_length = res.Transfer.content_length;
                 transfer_encoding = (if res.Transfer.is_chunked then [ "chunked" ] else []);
                 close = res.Transfer.result_close;
                 host;
-                trailer;
+                trailer = res.Transfer.trailer;
                 request_uri;
                 remote_addr = "";
                 form = None;
@@ -231,6 +257,16 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
                 multipart_form = None;
                 ctx = Context.background;
               }
+            in
+            r.Request.body <-
+              (match res.Transfer.body with
+              | Body.Stream reader ->
+                stream_body ~is_chunked:res.Transfer.is_chunked
+                  ~declared_trailer:res.Transfer.trailer
+                  ~set_trailer:(fun t -> r.Request.trailer <- t)
+                  ic reader
+              | (Body.Empty | Body.String _) as b -> b);
+            Lwt.return r
           end
       end)
     (function End_of_file -> Lwt.fail (Protocol_error "unexpected EOF") | e -> Lwt.fail e)
@@ -288,10 +324,10 @@ let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channe
           }
         in
         Transfer.read_transfer msg ic >>= fun res ->
-        materialize_body ~is_chunked:res.Transfer.is_chunked ~trailer:res.Transfer.trailer ic
-          res.Transfer.body
-        >>= fun (body, trailer) ->
-        Lwt.return
+        (* Build the record first with the declared trailer; the streaming
+           body's EOF action mutates [resp.trailer] on the chunked trailer read
+           (Go's mergeSetHeader onto rr.Trailer). *)
+        let resp =
           {
             Response.status;
             status_code;
@@ -299,14 +335,24 @@ let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channe
             proto_major;
             proto_minor;
             header;
-            body;
+            body = Body.Empty;
             content_length = res.Transfer.content_length;
             transfer_encoding = (if res.Transfer.is_chunked then [ "chunked" ] else []);
             close = res.Transfer.result_close;
             uncompressed = false;
-            trailer;
+            trailer = res.Transfer.trailer;
             request;
-          })
+          }
+        in
+        resp.Response.body <-
+          (match res.Transfer.body with
+          | Body.Stream reader ->
+            stream_body ~is_chunked:res.Transfer.is_chunked
+              ~declared_trailer:res.Transfer.trailer
+              ~set_trailer:(fun t -> resp.Response.trailer <- t)
+              ic reader
+          | (Body.Empty | Body.String _) as b -> b);
+        Lwt.return resp)
 
 (* ------------------------------------------------------------------ *)
 (* write_request (Request.Write / write).                              *)

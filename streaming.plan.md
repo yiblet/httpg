@@ -64,7 +64,7 @@
 ## Build Out
 
 ### Ticket 1 — Body lifecycle + streaming reads (HTTP/1.x)
-Status: Planned
+Status: Done
 
 **A) Scope** Stop materializing on read: `Io.read_request`/`read_response` return a `Body.Stream` wrapping `Transfer.read_transfer`'s reader. Add `Body.drain` (+ a close/on-EOF hook). Chunked trailers are read when the stream hits EOF and populate the message trailer. Server serve loop drains any unread request body before keep-alive reuse.
 
@@ -78,7 +78,30 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean; `dune build && dune test` green — **434 tests**.
+
+*Files modified (with `.mli` updates):*
+- `lib/body.ml` + `lib/body.mli` — added `Body.drain : t -> unit Lwt.t` (pulls a `Stream` to EOF discarding chunks; `Empty`/`String` are no-ops). `read_all`/`write`/the `Stream` variant unchanged.
+- `lib/io.ml` — **removed `materialize_body`** (which did `Body.read_all` → `Body.String`, collapsing the streaming reader from `Transfer.read_transfer`, and eagerly read the chunked trailer). Replaced with a non-buffering `stream_body` helper + a `merge_trailer` helper (Go's `mergeSetHeader`). `read_request`/`read_response` now build the message record first (body = `Empty`, trailer = the *declared* trailer) then set `body` to a `Body.Stream` wrapping `read_transfer`'s reader. On the reader's first `None` (io.EOF), a chunked body reads the trailing trailer block via the existing `read_mime_header` (Go's `body.readTrailer`) and merges it into the record's mutable `trailer` (`set_trailer` closure mutating `r.trailer`/`resp.trailer`). An `eof` ref guards a second post-EOF call to keep returning `None`. If `read_transfer` yields `Empty`/`String` (no body / no-body-expected statuses), it is passed through unchanged.
+- `lib/server.ml` — the plaintext serve loop and the HTTP/1.x-over-TLS serve loop now run `Body.drain r.body` (guarded by `Lwt.catch`) on a kept-alive connection **before** looping to read the next request (Go's `finishRequest` body consume/close), positioning the connection at the next message boundary and reading any chunked trailer. Stale "bodies are fully materialized" comment updated. No `.mli` change (internal serve loop).
+
+*De-materialization:* the single buffering point named in the plan (`io.ml` `materialize_body`, called by `read_response` ×2 and `read_request`) is gone; reads now stream chunk-by-chunk and the trailer is read lazily on EOF instead of eagerly.
+
+*Keep-alive draining + trailer-on-EOF mechanism:* the streaming body carries an `eof` flag set on the reader's first `None`; reaching it runs the trailer read (mutating the message trailer) — so the connection is only advanced past the body once it is fully consumed. The server serve loop calls `Body.drain` before the next `read_request`, which is what pulls a partially/never-read body to EOF (and through the trailer block) so the next message parse starts at the right offset. A second `next ()` after EOF returns `None` (no double trailer read).
+
+*Tests adapted to `read_all`:* **none required.** The existing read-path tests (`test/test_readrequest.ml`, `test/test_response.ml`) already assert body content via `Body.read_all` (their `body_of` helpers), and trailer assertions run *after* `body_of`, so the lazy trailer-on-EOF read fires before the trailer is checked. Set-body tests (`test_requestwrite`/`test_responsewrite`/`test_request`/`test_h2_transport`) only *construct* `Body.Empty`/`Body.String`, which are unaffected. No assertion was weakened.
+
+*New tests:* `test/test_stream_read.ml` (`val tests`, each bounded by `Net.with_timeout 5.0` over `Lwt_main.run`), wired into `test/test_gohttp.ml` as `("StreamRead", Test_stream_read.tests)` — **6 cases**:
+  - `first_chunk_before_eof` — pulls one chunk (`"foo"`) from the `Body.Stream` and asserts it is obtainable while more chunks remain (proves no full buffering), then the second (`"bar"`).
+  - `read_all_full_payload` — a fresh parse's `read_all` equals `"foobarbaz"`.
+  - `trailer_after_drain` / `trailer_undeclared_after_drain` — chunked body with (declared and undeclared) trailer; after `drain`/`read_all` the response `trailer` carries the trailer header.
+  - `keep_alive_two_responses` / `keep_alive_chunked_then_next` — two responses concatenated on one channel; read+drain the first (fixed-length and chunked-with-trailer respectively), then successfully read the second.
+
+*Evidence / counts:* `dune build` clean (no warnings; dev profile treats them as errors). `dune exec test/test_gohttp.exe` → **440 tests run, 0 FAIL** (440 `[OK]`), `Test Successful in ~1.37s` (terminates). New total **440** = 434 baseline + 6 StreamRead.
+
+Status: Done.
 
 ### Ticket 2 — Streaming server responses (HTTP/1.x)
 Status: Planned

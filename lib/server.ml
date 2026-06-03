@@ -451,9 +451,9 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
   Lwt_io.flush oc >>= fun () ->
   Lwt.return keep_alive
 
-(* Note: request bodies are fully materialized by Io.read_request, so a
-   kept-alive connection is already positioned at the next message boundary;
-   no separate body drain (Go's finishRequest drain) is needed here. *)
+(* Note: Io.read_request returns a streaming request body; the serve loop runs
+   Body.drain on it before reusing a kept-alive connection (Go's finishRequest
+   drain) so the connection is positioned at the next message boundary. *)
 
 (* ---- Server ---- *)
 
@@ -508,7 +508,13 @@ let serve_conn (handler : handler) (cfd, peer) =
           (fun _ -> Lwt.return false)
         >>= fun keep_alive ->
         cancel_req Context.Canceled;
-        if keep_alive then loop () else Lwt.return_unit
+        (* Go's finishRequest: consume/close the request body before reusing the
+           connection, so a kept-alive connection is positioned at the next
+           message boundary (and any chunked trailer is read). *)
+        if keep_alive then
+          Lwt.catch (fun () -> Body.drain r.Request.body) (fun _ -> Lwt.return_unit)
+          >>= loop
+        else Lwt.return_unit
   in
   Lwt.finalize loop (fun () ->
       cancel_conn Context.Canceled;
@@ -596,7 +602,10 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
               (fun _ -> Lwt.return false)
             >>= fun keep_alive ->
             cancel_req Context.Canceled;
-            if keep_alive then loop () else Lwt.return_unit
+            if keep_alive then
+              Lwt.catch (fun () -> Body.drain r.Request.body) (fun _ -> Lwt.return_unit)
+              >>= loop
+            else Lwt.return_unit
       in
       Lwt.finalize loop (fun () ->
           cancel_conn Context.Canceled;

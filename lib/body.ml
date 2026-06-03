@@ -32,6 +32,20 @@ let read_all (b : t) : string Lwt.t =
     in
     loop ()
 
+(* Read and discard the whole body until EOF. [Empty]/[String] are no-ops
+   (nothing is held on the wire). For a [Stream] this pulls every chunk until
+   [next ()] returns [None], the analogue of Go's body.Close consuming to EOF
+   so a kept-alive connection is positioned at the next message boundary. *)
+let drain (b : t) : unit Lwt.t =
+  match b with
+  | Empty | String _ -> Lwt.return_unit
+  | Stream next ->
+    let rec loop () =
+      Lwt.bind (next ()) (fun chunk ->
+          match chunk with None -> Lwt.return_unit | Some _ -> loop ())
+    in
+    loop ()
+
 (* Write the raw body bytes to [oc] (no framing). *)
 let write (oc : Lwt_io.output_channel) (b : t) : unit Lwt.t =
   match b with
