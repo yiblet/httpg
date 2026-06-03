@@ -35,33 +35,146 @@ let channels_of_fd fd =
   let oc = Lwt_io.of_fd ~mode:Lwt_io.output fd in
   (ic, oc)
 
+(* The mirage-crypto RNG must be seeded before any TLS handshake or X509 key
+   generation. [use_default] is idempotent in practice (it just (re)installs
+   the default Fortuna generator), so callers may invoke this freely. Go's
+   crypto/rand needs no such explicit init; this is the OCaml-stack analogue. *)
+let ensure_rng () = Mirage_crypto_rng_unix.use_default ()
+
 (* A null authenticator: accept any peer certificate without verification.
    Acceptable for the smoke-test substrate only -- a production client must
    supply a real authenticator (e.g. X509 system trust). *)
 let null_authenticator : X509.Authenticator.t =
   fun ?ip:_ ~host:_ _certs -> Ok None
 
-let connect ~host ~port ?(tls = false) () =
+let host_to_domain_name host =
+  match Domain_name.of_string host with
+  | Ok dn -> ( match Domain_name.host dn with Ok h -> Some h | Error _ -> None)
+  | Error _ -> None
+
+(* Dial a client TCP socket to a resolved [host]/[port]. *)
+let dial host port =
   let open Lwt.Syntax in
   let* addr = resolve host port in
   let domain = Unix.domain_of_sockaddr addr in
   let fd = Lwt_unix.socket domain Unix.SOCK_STREAM 0 in
   let* () = Lwt_unix.connect fd addr in
-  if not tls then Lwt.return (channels_of_fd fd)
-  else
-    let cfg =
-      match Tls.Config.client ~authenticator:null_authenticator () with
-      | Ok c -> c
-      | Error (`Msg m) ->
-          failwith (Printf.sprintf "Net.connect: bad TLS config: %s" m)
-    in
-    let host_dn =
-      match Domain_name.of_string host with
-      | Ok dn -> ( match Domain_name.host dn with Ok h -> Some h | Error _ -> None)
-      | Error _ -> None
-    in
+  Lwt.return fd
+
+(* Build a [Tls.Config.client] with the null authenticator and optional ALPN. *)
+let client_config ?(alpn = []) () =
+  let alpn_protocols = match alpn with [] -> None | l -> Some l in
+  match
+    Tls.Config.client ~authenticator:null_authenticator ?alpn_protocols ()
+  with
+  | Ok c -> c
+  | Error (`Msg m) ->
+      failwith (Printf.sprintf "Net.connect: bad TLS config: %s" m)
+
+(* The negotiated ALPN protocol of a completed TLS session, if any. Mirrors Go's
+   [tls.ConnectionState.NegotiatedProtocol] (read off [Tls.Core.epoch_data]). *)
+let negotiated_alpn (t : Tls_lwt.Unix.t) =
+  match Tls_lwt.Unix.epoch t with
+  | Ok ed -> ed.Tls.Core.alpn_protocol
+  | Error () -> None
+
+let connect_alpn ~host ~port ?(tls = false) ?(alpn = []) () =
+  let open Lwt.Syntax in
+  let* fd = dial host port in
+  if not tls then
+    let ic, oc = channels_of_fd fd in
+    Lwt.return (ic, oc, None)
+  else begin
+    ensure_rng ();
+    let cfg = client_config ~alpn () in
+    let host_dn = host_to_domain_name host in
     let* t = Tls_lwt.Unix.client_of_fd cfg ?host:host_dn fd in
-    Lwt.return (Tls_lwt.of_t t)
+    let proto = negotiated_alpn t in
+    let ic, oc = Tls_lwt.of_t t in
+    Lwt.return (ic, oc, proto)
+  end
+
+let connect ~host ~port ?(tls = false) () =
+  let open Lwt.Syntax in
+  let* ic, oc, _proto = connect_alpn ~host ~port ~tls () in
+  Lwt.return (ic, oc)
+
+(* ----- Server-side TLS + ALPN ----- *)
+
+(* Mint a fresh self-signed certificate + key at runtime (no files on disk),
+   the OCaml-stack analogue of Go's [net/http/internal/testcert]. Generates an
+   RSA-2048 key, builds a PKCS#10 signing request for CN=localhost, and
+   self-signs it valid for ~ten years, with SubjectAltName DNS=localhost so a
+   (non-null) verifying client could match the name. For our tests the client
+   uses {!null_authenticator}, so verification is skipped; the
+   cert exists only to satisfy the TLS handshake's server-certificate step. *)
+let test_server_certificate () : Tls.Config.certchain =
+  ensure_rng ();
+  let priv = X509.Private_key.generate ~bits:2048 `RSA in
+  let dn =
+    X509.Distinguished_name.
+      [ Relative_distinguished_name.singleton (CN "localhost") ]
+  in
+  let csr =
+    match X509.Signing_request.create dn priv with
+    | Ok r -> r
+    | Error (`Msg m) ->
+        failwith (Printf.sprintf "Net.test_server_certificate: csr: %s" m)
+  in
+  let valid_from = Ptime.epoch in
+  (* Roughly one year from the epoch is fine; the client does not verify. *)
+  let valid_until =
+    match Ptime.add_span valid_from (Ptime.Span.v (3650, 0L)) with
+    | Some t -> t
+    | None -> Ptime.max
+  in
+  let extensions =
+    let sans = X509.General_name.(singleton DNS [ "localhost" ]) in
+    X509.Extension.(
+      singleton Subject_alt_name (false, sans)
+      |> add Basic_constraints (true, (false, None)))
+  in
+  let cert =
+    match
+      X509.Signing_request.sign csr ~valid_from ~valid_until ~extensions priv dn
+    with
+    | Ok c -> c
+    | Error e ->
+        failwith
+          (Printf.sprintf "Net.test_server_certificate: sign: %s"
+             (Fmt.to_to_string X509.Validation.pp_signature_error e))
+  in
+  ([ cert ], priv)
+
+type tls_server = {
+  listen_fd : Lwt_unix.file_descr;
+  config : Tls.Config.server;
+}
+
+let listen_tls ?(backlog = default_backlog) ~certificates ~alpn host port =
+  let open Lwt.Syntax in
+  ensure_rng ();
+  let alpn_protocols = match alpn with [] -> None | l -> Some l in
+  let config =
+    match
+      Tls.Config.server ~certificates:(`Single certificates) ?alpn_protocols ()
+    with
+    | Ok c -> c
+    | Error (`Msg m) ->
+        failwith (Printf.sprintf "Net.listen_tls: bad TLS config: %s" m)
+  in
+  let* listen_fd = listen ~backlog host port in
+  Lwt.return { listen_fd; config }
+
+let tls_listen_fd s = s.listen_fd
+
+let accept_tls s =
+  let open Lwt.Syntax in
+  let* conn_fd, peer = accept s.listen_fd in
+  let* t = Tls_lwt.Unix.server_of_fd s.config conn_fd in
+  let proto = negotiated_alpn t in
+  let ic, oc = Tls_lwt.of_t t in
+  Lwt.return (ic, oc, proto, peer)
 
 let local_addr fd = Lwt_unix.getsockname fd
 

@@ -249,7 +249,7 @@ Status: Done
 - **Commit:** `feat(h2): port write framers and round-robin write scheduler (H2 Ticket 6)` (single jj change; id reported to orchestrator).
 
 ### Ticket 7 — Server TLS + ALPN in Net
-Status: Planned
+Status: Done
 
 **A) Scope** Add server-side TLS with ALPN to `Net`: `listen_tls` accepting a certificate + advertised ALPN protocols (`["h2"; "http/1.1"]`), exposing the negotiated protocol per accepted connection; and extend client `connect` with `?alpn` advertising + negotiated-protocol readout. Provide a test self-signed cert helper (mint via `x509`, or vendor Go's `internal/testcert` PEM).
 
@@ -263,7 +263,23 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; handshake tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Verified `tls`/`tls-lwt` 2.1.0 ALPN API** (inspected `_opam/lib/tls/config.mli`, `_opam/lib/tls-lwt/tls_lwt.mli`, `_opam/lib/tls/core.ml`, `_opam/lib/x509/x509.mli`):
+  - **Server config:** `Tls.Config.server ?alpn_protocols:string list ?certificates:Tls.Config.own_cert ... () : (Tls.Config.server, [> `Msg of string]) result`. ALPN list is in descending preference; the server selects the first advertised protocol the client also offers (documented in `config.mli`'s "Note on ALPN protocol selection"). Certificates passed as `` `Single (certchain) `` where `certchain = X509.Certificate.t list * X509.Private_key.t`.
+  - **Server handshake:** `Tls_lwt.Unix.server_of_fd : Tls.Config.server -> Lwt_unix.file_descr -> Tls_lwt.Unix.t Lwt.t`. Channels via `Tls_lwt.of_t : ?close -> Tls_lwt.Unix.t -> ic * oc`.
+  - **Negotiated protocol readout:** `Tls_lwt.Unix.epoch : t -> (Tls.Core.epoch_data, unit) result`; the field is `epoch_data.alpn_protocol : string option` (= Go's `tls.ConnectionState.NegotiatedProtocol`). Used identically on both client and server sessions.
+  - **Client config:** `Tls.Config.client ~authenticator ?alpn_protocols ... ()`; client handshake `Tls_lwt.Unix.client_of_fd cfg ?host fd`, then the same `epoch`/`alpn_protocol` readout.
+  - **Test cert:** minted at runtime via `X509.Private_key.generate ~bits:2048 \`RSA` + `X509.Signing_request.create` (CN=localhost) + `X509.Signing_request.sign` (self-signed, SAN DNS=localhost, BasicConstraints, ~10y validity) — no PEM files. The `mirage-crypto` RNG is seeded with `Mirage_crypto_rng_unix.use_default ()` (new `Net.ensure_rng`) before key-gen / handshake.
+- **Files modified:**
+  - `lib/net.ml` + `lib/net.mli` — added: `ensure_rng : unit -> unit` (idempotent RNG seed); `test_server_certificate : unit -> Tls.Config.certchain` (runtime self-signed cert); `type tls_server` (listening fd + `Tls.Config.server`); `listen_tls : ?backlog -> certificates:Tls.Config.certchain -> alpn:string list -> string -> int -> tls_server Lwt.t`; `tls_listen_fd : tls_server -> Lwt_unix.file_descr` (for `bound_port` on ephemeral listeners); `accept_tls : tls_server -> (ic * oc * string option * Unix.sockaddr) Lwt.t` (accept + server handshake + negotiated-ALPN readout); `connect_alpn : host:string -> port:int -> ?tls:bool -> ?alpn:string list -> unit -> (ic * oc * string option) Lwt.t` (negotiated protocol as 3rd element). Refactored the client TLS upgrade into `dial`/`client_config`/`negotiated_alpn`/`host_to_domain_name` helpers.
+  - **`connect` arity UNCHANGED** (least-disruptive path): `connect` still returns the 2-tuple `(ic, oc)` — now implemented as a thin wrapper over `connect_alpn` discarding the protocol — so the 8 existing 2-tuple call sites (`lib/transport.ml`, `test/test_serve.ml` ×6, `test/test_net.ml`) and all HTTP/1.x tests stay green untouched. The new 3-tuple readout lives on the additive `connect_alpn`.
+  - `lib/dune` — added `tls x509 ptime mirage-crypto-rng.unix fmt` to the `gohttp` library deps (alongside the existing `tls-lwt`).
+  - `test/test_h2_tls.ml` (new) — 3 cases, all bounded by `Net.with_timeout 15.` over an ephemeral loopback TLS server: `alpn_negotiates_h2` (both peers `["h2";"http/1.1"]` ⇒ client and server both read `Some "h2"`), `alpn_negotiates_http11` (server `["h2";"http/1.1"]`, client `["http/1.1"]` ⇒ both read `Some "http/1.1"`), `tls_byte_roundtrip` (client writes a line over the TLS channels, server echoes, client reads it back — proves the buffered `Lwt_io` channels over the TLS session carry data).
+  - `test/test_gohttp.ml` — wired `("H2Tls", Test_h2_tls.tests)`.
+- **Test evidence:** baseline `jj st` clean + `dune build`/`dune test` = **423** green. After: `dune build` clean, `dune test` = **426 tests run, Test Successful** (terminates in ~0.97s — handshake tests bounded, no hang). New **H2Tls** suite = **3** cases (423 + 3 = 426). Confirmed: real loopback TLS handshake completes, **ALPN negotiates `h2`** when both advertise it, falls back to `http/1.1` when the client offers only that, and a byte round-trip over the TLS channels succeeds.
+- **Go cases omitted / artifacts:** no direct Go source file (Go uses `crypto/tls`); behavior-fidelity instead of source-fidelity. The runtime self-signed cert replaces Go's vendored `internal/testcert` PEM (no files on disk; the client's `null_authenticator` skips verification). The SAN omits the IP entry (`General_name.IP` wants raw 4-byte octet strings and the client does not verify, so DNS=localhost suffices). `Net.ensure_rng` / `Mirage_crypto_rng_unix.use_default` is OCaml-stack RNG bookkeeping with no Go analogue (Go's `crypto/rand` is implicitly seeded).
+- **Commit:** `feat(h2): add server-side TLS and ALPN negotiation to Net (H2 Ticket 7)` (single jj change; id reported to orchestrator).
 
 ### Ticket 8 — HTTP/2 server connection
 Status: Planned

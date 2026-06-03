@@ -36,6 +36,67 @@ val connect :
   unit ->
   (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t
 
+(** [connect_alpn ~host ~port ?tls ?alpn ()] is like {!connect} but additionally
+    advertises the ALPN protocols [alpn] (in descending order of preference,
+    e.g. [["h2"; "http/1.1"]]) when [tls] is [true], and returns the negotiated
+    protocol as the third element (the analogue of Go's
+    [tls.ConnectionState.NegotiatedProtocol]). For a non-TLS connection, or when
+    no ALPN protocol was agreed, the negotiated protocol is [None]. *)
+val connect_alpn :
+  host:string ->
+  port:int ->
+  ?tls:bool ->
+  ?alpn:string list ->
+  unit ->
+  (Lwt_io.input_channel * Lwt_io.output_channel * string option) Lwt.t
+
+(** {1 Server-side TLS + ALPN} *)
+
+(** [ensure_rng ()] seeds the [mirage-crypto] RNG (idempotently). It MUST run
+    before any TLS handshake or X509 key generation. The TLS entry points below
+    and {!connect_alpn} call it themselves; it is exposed for callers that mint
+    keys directly. Go's [crypto/rand] needs no analogue; this is OCaml-stack
+    bookkeeping. *)
+val ensure_rng : unit -> unit
+
+(** [test_server_certificate ()] mints a fresh self-signed RSA-2048 certificate
+    + key at runtime (no files on disk), CN=localhost with SubjectAltName
+    DNS=localhost, valid for ~ten years — the OCaml-stack analogue of Go's
+    [net/http/internal/testcert]. Intended for tests/loopback servers; since the
+    matching client uses {!null_authenticator}, the cert only satisfies the
+    handshake's server-certificate step (no real trust). *)
+val test_server_certificate : unit -> Tls.Config.certchain
+
+(** A listening TLS server: a bound/listening socket plus the negotiated TLS
+    [server] configuration (certificate + advertised ALPN protocols). *)
+type tls_server
+
+(** [listen_tls ?backlog ~certificates ~alpn host port] is {!listen} plus a
+    server-side TLS configuration carrying [certificates] (a single cert chain +
+    key) and advertising the ALPN protocols [alpn] in descending order of
+    preference (e.g. [["h2"; "http/1.1"]]; [[]] disables ALPN). During the
+    handshake the server selects the first advertised protocol the client also
+    offers (per the [tls] library's selection rule). *)
+val listen_tls :
+  ?backlog:int ->
+  certificates:Tls.Config.certchain ->
+  alpn:string list ->
+  string ->
+  int ->
+  tls_server Lwt.t
+
+(** [tls_listen_fd s] is the underlying listening socket of [s] (handy for
+    {!bound_port} on an ephemeral [listen_tls ... 0] server). *)
+val tls_listen_fd : tls_server -> Lwt_unix.file_descr
+
+(** [accept_tls s] accepts one connection on [s], performs the server-side TLS
+    handshake, and returns buffered [Lwt_io] channels over the TLS session, the
+    negotiated ALPN protocol ([None] if none was agreed), and the peer address. *)
+val accept_tls :
+  tls_server ->
+  (Lwt_io.input_channel * Lwt_io.output_channel * string option * Unix.sockaddr)
+  Lwt.t
+
 (** [local_addr fd] is the socket's locally bound address. *)
 val local_addr : Lwt_unix.file_descr -> Unix.sockaddr
 
