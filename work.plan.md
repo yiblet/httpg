@@ -155,7 +155,7 @@ Status: Done
 - **Commit:** `a06fd61c` (jj change `xzyvzpmw`) — "feat: port Header with canonical keys and Write (Ticket 2)". This commit-id annotation lands in a subsequent working-copy change.
 
 ### Ticket 3 — Sniff
-Status: Planned
+Status: Done
 
 **A) Scope** Port `sniff.go` `DetectContentType` content sniffing.
 
@@ -169,7 +169,44 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/sniff.ml` — new; port of `go/src/net/http/sniff.go` +
+    `go/src/net/http/internal/sniff.go` (`DetectContentType`). Exposes
+    `val detect_content_type : string -> string` (default
+    `"application/octet-stream"`) and `val sniff_len = 512` (only the first 512
+    bytes are considered). Ports the full `sniffSignatures` table in Go's order
+    and the matcher types as closures of type
+    `sniff_sig = data:string -> first_non_ws:int -> string`:
+    `html_sig` (case-insensitive tag prefix + tag-terminating byte),
+    `exact_sig` (prefix), `masked_sig` (`mask`/`pat` with optional `skip_ws` for
+    `<?xml`), `mp4_sig` (big-endian box-size parse via bit-shifts, `ftyp` +
+    `mp4` brand scan), and `text_sig` (the binary/text heuristic, last in the
+    table). Includes HTML tags, `%PDF-`/`%!PS-Adobe-`, UTF BOMs, image
+    (ICO/BMP/GIF/WEBP/PNG/JPEG), audio/video (AIFF/ID3/OGG/MIDI/AVI/WAVE/MP4/
+    WEBM), font (ms-fontobject/TTF/OTTO/ttcf/WOFF/WOFF2), and archive
+    (GZIP/ZIP/RAR/WASM) signatures, with charset suffixes preserved
+    (`text/plain; charset=utf-8`, `text/xml; charset=utf-8`, the utf-16 BOMs).
+  - `test/test_sniff.ml` — new; alcotest suite `val tests`. Ports the
+    `sniffTests` table from `go/src/net/http/sniff_test.go`
+    (`TestDetectContentType`), all 38 rows, each asserting
+    `detect_content_type data = contentType`, including the empty-input case.
+  - `test/test_gohttp.ml` — added `("Sniff", Test_sniff.tests)` to the
+    `Alcotest.run "gohttp"` list.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.003s. 74 tests run." All `[OK]`. New suite `Sniff` = 38 cases (cases 0–37),
+  alongside `Method` (9), `Status` (7), `Header` (20) for 74 total.
+- **Porting notes:** The Go `"Empty"` fixture expects
+  `"text/plain; charset=utf-8"` (not `application/octet-stream`): on empty data
+  the whitespace-skip leaves `firstNonWS = 0`, every preceding signature fails
+  the length check, and `textSig` matches a zero-length tail. The port follows
+  the Go source faithfully and the ported test asserts the same Go value. The
+  net-based `TestServerContentTypeSniff`, `TestServerIssue5953`,
+  `TestContentTypeWithVariousSources`, and `TestSniffWriteSize` are
+  server-behavior tests, intentionally omitted (deferred to the server ticket).
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 4 — Cookie
 Status: Planned
