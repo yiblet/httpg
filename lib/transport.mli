@@ -28,8 +28,14 @@ val create : unit -> t
     request lacks them. On a keep-alive-eligible response (keep-alives enabled,
     neither request nor response asked to close) the connection is returned to
     the pool; otherwise it is closed. A failure on a recycled idle connection
-    triggers one fresh-dial retry. *)
-val round_trip : t -> Body.t Request.t -> Body.t Response.t Lwt.t
+    triggers one fresh-dial retry.
+
+    The optional [?context] (Go's per-request [context.Context]) is an
+    ergonomics layer: when supplied it is applied to [req] before the round
+    trip, so the deadline/cancellation race uses it; when omitted the request's
+    existing context is used (defaulting to {!Context.background}). *)
+val round_trip :
+  ?context:Context.t -> t -> Body.t Request.t -> Body.t Response.t Lwt.t
 
 (** The cache key for a scheme/host/port (Go's [connectMethodKey.String]:
     ["scheme|host:port"]). Exposed for tests/inspection. *)

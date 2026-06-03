@@ -165,6 +165,43 @@ let server_done_on_close () =
   Alcotest.(check string) "body" "ok" body;
   Alcotest.(check bool) "server ctx cancelled" true (err = Some Context.Canceled)
 
+(* Context.optional_arg_timeout: the [?context] ergonomics arg on Client.get,
+   exercised both ways against the same server in one run. With an explicit
+   short-timeout context the call fails with Deadline_exceeded; with the arg
+   omitted (and no client timeout) the call against a fast handler succeeds. *)
+let optional_arg_timeout () =
+  let handler =
+    Server.handler_func (fun w r ->
+        (* The slow path sleeps long enough to outlast the short context. *)
+        if Uri.path r.Request.url = "/slow" then
+          Lwt_unix.sleep 1.0 >>= fun () -> w.Server.write "too late"
+        else w.Server.write "ok")
+  in
+  let client ~port =
+    let c = Client.create () in
+    (* With ~context: a 0.2s deadline against the slow handler => Deadline. *)
+    let slow_url = Printf.sprintf "http://127.0.0.1:%d/slow" port in
+    let ctx, _cancel = Context.with_timeout Context.background 0.2 in
+    Lwt.catch
+      (fun () -> Client.get ~context:ctx c slow_url >>= fun _ -> Lwt.return `No_error)
+      (function
+        | Context.Deadline_exceeded -> Lwt.return `Deadline
+        | e -> Lwt.return (`Other (Printexc.to_string e)))
+    >>= fun with_ctx ->
+    (* Without ~context: the fast handler responds 200 OK. *)
+    let fast_url = Printf.sprintf "http://127.0.0.1:%d/fast" port in
+    Client.get c fast_url >>= fun resp ->
+    Body.read_all resp.Response.body >>= fun body ->
+    Lwt.return (with_ctx, resp.Response.status_code, body)
+  in
+  let with_ctx, status, body = with_server handler client in
+  (match with_ctx with
+  | `Deadline -> ()
+  | `No_error -> Alcotest.fail "expected Deadline_exceeded with ~context, got a response"
+  | `Other s -> Alcotest.failf "expected Deadline_exceeded with ~context, got %s" s);
+  Alcotest.(check int) "no-context status 200" 200 status;
+  Alcotest.(check string) "no-context body" "ok" body
+
 let tests =
   [
     Alcotest.test_case "with_timeout" `Quick unit_with_timeout;
@@ -175,4 +212,5 @@ let tests =
     Alcotest.test_case "deadline_aborts" `Quick deadline_aborts;
     Alcotest.test_case "cancel_aborts" `Quick cancel_aborts;
     Alcotest.test_case "server_done_on_close" `Quick server_done_on_close;
+    Alcotest.test_case "optional_arg_timeout" `Quick optional_arg_timeout;
   ]

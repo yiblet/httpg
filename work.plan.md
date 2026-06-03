@@ -1167,4 +1167,20 @@ Status: Done
     deferred (no ported test exercises a hung connect; the integration tests
     connect to a fast loopback listener). Wiring the race around `acquire` too
     would close this gap straightforwardly if a later ticket needs it.
+- **Refinement (ergonomics):** the request context is also exposed as an
+  optional labeled arg `?context:Context.t` on the public Client/Transport API:
+  `Transport.round_trip`, `Client.do_`, and the `Client.get`/`head`/`post`
+  helpers. When supplied it is applied to the request being processed (`req.ctx`
+  is set / built requests inherit it) before the round trip, so the existing
+  `Context.done_ req.ctx` race picks it up; when omitted, behavior is exactly as
+  before — the request's existing `ctx` (defaulting to `Context.background`) is
+  used, so call sites like `Client.get c url` are unchanged. With both a Client
+  `timeout` and an explicit `?context`, the timeout composes over the supplied
+  context as a deadline (`Context.with_timeout` of the now-set request ctx),
+  matching Go's `setRequestCancel` layering. `Request.with_context`/`context` and
+  the mutable field are retained for power users. New test
+  `Context.optional_arg_timeout` exercises both directions in one run
+  (`~context:(0.2s)` against a slow handler ⇒ `Deadline_exceeded`; no `~context`
+  against a fast handler ⇒ 200 "ok"). `dune test` ⇒ **262 tests run**, all `[OK]`;
+  existing 261 call sites needed no change. (See commit below.)
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_

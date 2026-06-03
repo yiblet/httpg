@@ -104,8 +104,13 @@ let set_default_headers (req : Body.t Request.t) ~host =
   if Header.get req.Request.header "User-Agent" = "" then
     Header.set req.Request.header "User-Agent" default_user_agent
 
-(* Go's Transport.RoundTrip (HTTP/1.x path). *)
-let round_trip t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+(* Go's Transport.RoundTrip (HTTP/1.x path). The optional [?context] is an API
+   ergonomics layer over Go's req.Context(): when supplied it is applied to the
+   request before the round trip (so the [Context.done_ req.ctx] race below
+   uses it); when omitted the request's existing [ctx] is used (defaulting to
+   [Context.background]). *)
+let round_trip ?context t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+  (match context with Some ctx -> req.Request.ctx <- ctx | None -> ());
   let scheme, host, port = scheme_host_port req in
   if host = "" then
     Lwt.fail (Io.Protocol_error "http: no Host in request URL")

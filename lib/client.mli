@@ -30,20 +30,34 @@ val default_client : t
     client's policy (301/302/303 rewrite the method to GET unless the original
     was GET/HEAD and drop the body; 307/308 preserve method and body), composing
     {!Transport.round_trip} for each hop. A non-2xx status is not an error.
-    Raises [Failure] when the redirect policy aborts. *)
-val do_ : t -> Body.t Request.t -> Body.t Response.t Lwt.t
+    Raises [Failure] when the redirect policy aborts.
+
+    The optional [?context] (Go's per-request [context.Context]) is applied to
+    [req] before the exchange; when omitted the request keeps its existing
+    context (defaulting to {!Context.background}). When the client carries a
+    [timeout], it composes over the effective context as a deadline (Go's
+    [setRequestCancel]). *)
+val do_ :
+  ?context:Context.t -> t -> Body.t Request.t -> Body.t Response.t Lwt.t
 
 (** [make_request ?body ?content_length meth url] builds a request from a URL
     string (Go's [NewRequest]). The default body is empty. *)
 val make_request :
   ?body:Body.t -> ?content_length:int64 -> string -> string -> Body.t Request.t
 
-(** [get c url] is Go's [Client.Get]. *)
-val get : t -> string -> Body.t Response.t Lwt.t
+(** [get ?context c url] is Go's [Client.Get]. The optional [?context] is
+    applied to the built request (defaulting to {!Context.background}). *)
+val get : ?context:Context.t -> t -> string -> Body.t Response.t Lwt.t
 
-(** [head c url] is Go's [Client.Head]. *)
-val head : t -> string -> Body.t Response.t Lwt.t
+(** [head ?context c url] is Go's [Client.Head]. *)
+val head : ?context:Context.t -> t -> string -> Body.t Response.t Lwt.t
 
-(** [post c url ~content_type body] is Go's [Client.Post]: POST [body] with the
-    given Content-Type. *)
-val post : t -> string -> content_type:string -> Body.t -> Body.t Response.t Lwt.t
+(** [post ?context c url ~content_type body] is Go's [Client.Post]: POST [body]
+    with the given Content-Type. *)
+val post :
+  ?context:Context.t ->
+  t ->
+  string ->
+  content_type:string ->
+  Body.t ->
+  Body.t Response.t Lwt.t

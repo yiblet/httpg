@@ -127,7 +127,10 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   in
   loop req [] true
 
-let do_ c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+let do_ ?context c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+  (* Apply the caller-supplied per-request context (Go's req.Context()) before
+     the exchange; when omitted the request keeps its existing [ctx]. *)
+  (match context with Some ctx -> req.Request.ctx <- ctx | None -> ());
   match c.timeout with
   | None -> do_one c req
   | Some secs ->
@@ -171,11 +174,11 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     ctx = Context.background;
   }
 
-let get c url = do_ c (make_request Method.get url)
+let get ?context c url = do_ ?context c (make_request Method.get url)
 
-let head c url = do_ c (make_request Method.head url)
+let head ?context c url = do_ ?context c (make_request Method.head url)
 
-let post c url ~content_type body =
+let post ?context c url ~content_type body =
   let len =
     match body with
     | Body.String s -> Int64.of_int (String.length s)
@@ -184,4 +187,4 @@ let post c url ~content_type body =
   in
   let req = make_request ~body ~content_length:len Method.post url in
   Header.set req.Request.header "Content-Type" content_type;
-  do_ c req
+  do_ ?context c req
