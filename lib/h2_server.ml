@@ -13,6 +13,13 @@ type handler = response_writer -> Body.t Request.t -> unit Lwt.t
 (* Go: defaultMaxStreams = 250 *)
 let default_max_concurrent_streams = 250
 
+(* Go's handlerChunkWriteSize (server.go:60): the size of the [bufio.Writer]
+   wrapping the [chunkWriter]. A handler [Write] buffers into this writer; once
+   it fills, the writer flushes whole chunks down to [chunkWriter.Write], which
+   frames a DATA frame. So DATA is emitted as the handler writes (every ~4 KiB
+   without an explicit Flush), not held until the handler returns. *)
+let handler_chunk_write_size = 4 * 1024
+
 (* Go: maxQueuedControlFrames *)
 let max_queued_control_frames = 10000
 
@@ -496,9 +503,30 @@ let new_response_writer sc (st : stream) (req : Body.t Request.t) :
       rws.status <- code
     end
   in
+  (* Mirror Go's [bufio.Writer.Write] over the [chunkWriter] of size
+     [handler_chunk_write_size]: append to the buffer, then while it holds a full
+     chunk, frame that chunk's worth of DATA (via [write_chunk]) and keep the
+     remainder buffered. This emits DATA as the handler writes (flow-controlled,
+     END_STREAM only at handler completion) rather than buffering the whole body. *)
+  let rec drain_full_chunks () : unit Lwt.t =
+    if Buffer.length rws.buf >= handler_chunk_write_size then begin
+      let all = Buffer.contents rws.buf in
+      let chunk = String.sub all 0 handler_chunk_write_size in
+      let rest =
+        String.sub all handler_chunk_write_size
+          (String.length all - handler_chunk_write_size)
+      in
+      Buffer.clear rws.buf;
+      Buffer.add_string rws.buf rest;
+      let open Lwt.Syntax in
+      let* () = write_chunk sc rws chunk in
+      drain_full_chunks ()
+    end
+    else Lwt.return_unit
+  in
   let write (data : string) : unit Lwt.t =
     Buffer.add_string rws.buf data;
-    Lwt.return_unit
+    drain_full_chunks ()
   in
   let flush () : unit Lwt.t =
     let p = Buffer.contents rws.buf in

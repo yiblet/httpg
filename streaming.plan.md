@@ -180,7 +180,7 @@ Status: Done
 Status: Done.
 
 ### Ticket 4 — HTTP/2 streaming alignment
-Status: Planned
+Status: Done
 
 **A) Scope** Ensure the h2 `response_writer` frames DATA per `write` (flow-controlled) with a `flush`, no hidden whole-body buffer; h2 client/server request+response bodies are `Stream`s over `H2_pipe` aligned with the Body lifecycle (drain/close). Confirm large bodies stream over h2 without full materialization.
 
@@ -194,7 +194,36 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean (working copy empty, parent = Ticket 3 commit `ff52a0a4`); `dune build && dune test` green — **446 tests**.
+
+*AUDIT findings (Go refs: `internal/http2/server.go`, `internal/http2/transport.go`):*
+
+- **h2 server REQUEST body — already streamed, no change.** `lib/h2_server.ml:340–362` `body_of_pipe` builds `Body.of_stream next` where `next` pulls incrementally from the per-stream `H2_pipe` (`H2_pipe.read p (1 lsl 16)`), and DATA frames feed that pipe as they arrive in `process_data` (`lib/h2_server.ml:798–804` `H2_pipe.write p data`). The body is set on the request at `build_request` (`:667` `req.body <- body_of_pipe sc st`). Nothing collects the body before handing it to the handler — mirrors Go's `requestBody.Read` over the per-stream pipe. `Body.drain` pulls this `Stream` to EOF (request-body consume), and the serve loop's `noteBodyRead` window-update path (`:1046–1053`) keeps flow control flowing while it drains. **Verification only.**
+
+- **h2 client RESPONSE body — already streamed, no change.** `lib/h2_transport.ml:301–315` `build_response` builds `Body.of_stream` reading incrementally from the per-stream `cs.buf_pipe` (`H2_pipe.read cs.buf_pipe 4096`), fed by DATA frames in `process_data` (`lib/h2_transport.ml:440` `H2_pipe.write cs.buf_pipe data`) with conn/stream flow-control refunds + WINDOW_UPDATEs (`:444–452`). HEAD / stream-already-ended responses get `Body.Empty`. No materialization — mirrors Go's `transportResponseBody`/`clientStream.Read` over `cs.bufPipe`. `Body.drain`/`read_all` pull this `Stream` to EOF, draining remaining DATA. **Verification only.**
+
+- **h2 server RESPONSE write — buffered whole body; FIXED to frame DATA per ~4 KiB.** The Ticket-9 writer (`lib/h2_server.ml:499–507`, pre-change) appended every `write` into one unbounded `rws.buf` and only framed DATA on an explicit `flush` or at handler completion (`run_handler`'s `finish`). Go instead wraps the `chunkWriter` in a `bufio.Writer` of `handlerChunkWriteSize = 4 << 10` (`go/.../server.go:60,79`): a handler `Write` (`server.go:2907→2916→2934 rws.bw.Write`) buffers into that writer, and once it fills, the writer flushes whole chunks down to `chunkWriter.Write` → `writeChunk` → a DATA frame — so DATA is emitted as the handler writes (every ~4 KiB), not held until completion. A 200 KiB single `write` with no `flush` would, under the old code, sit entirely in one buffer.
+
+*Files modified (with `.mli` review):*
+- `lib/h2_server.ml` — added the constant `handler_chunk_write_size = 4 * 1024` (Go `handlerChunkWriteSize`, server.go:60). Rewrote the writer's `write` to mirror `bufio.Writer.Write` over the `chunkWriter`: append to `rws.buf`, then `drain_full_chunks` frames each full `handler_chunk_write_size`-sized prefix via the existing `write_chunk` (= flow-controlled DATA, headers-on-first-chunk, **no** END_STREAM mid-handler since `handler_done` is still false), keeping the remainder buffered. `flush` (already present, `lib/h2_server.mli:33–38`) is unchanged: it frames the buffered remainder via `write_chunk`; `finish` (handler completion) frames the residual with `handler_done := true` carrying END_STREAM. The auto Content-Length branch (`write_chunk`, `:448`) is gated on `rws.handler_done`, so an auto-flushed mid-write response correctly sends headers **without** Content-Length and the stream stays open until `finish` — matching Go (unknown length once DATA framing has started). **No `.mli` change** — the `response_writer` type (incl. `flush`) is unchanged; the fix is internal to `new_response_writer`.
+
+- `test/test_gohttp.ml` — wired `("StreamH2", Test_stream_h2.tests)` into the runner.
+- `test/test_stream_h2.ml` — new integration suite (3 cases).
+
+*`flush` present + flushing pending DATA:* confirmed — `H2_server.response_writer.flush` (and `Server.response_writer.flush` from Ticket 2) frames the buffered bytes via `write_chunk`; the new auto-chunking does not change `flush`'s semantics.
+
+*Tests adapted + why:* **none.** No existing assertion changed; existing h2 GET/POST/concurrent (`test_h2_transport.ml`) and `H2ClientServer`/`H2Server` tests stayed green. The new ~4 KiB auto-flush is transparent to handlers that explicitly `flush` (as the existing h2 tests do).
+
+*New tests (`test/test_stream_h2.ml`, each bounded by `Net.with_timeout` over `Lwt_main.run`, `H2_server.serve` + `H2_transport` over a real loopback socket pair as `test_h2_transport.ml` does) — 3 cases:*
+  - `server_streams_multiple_data` — handler writes "alpha", flushes, then **blocks on a promise the test resolves only after it has read the first chunk** from the streaming response body, then writes "beta"/"gamma" with flushes. Asserts the first DATA (`"alpha"`) is readable **while the handler is still suspended** (`Lwt.state released = Sleep`) — DATA-per-write observable before handler completion — and the full body equals `"alphabetagamma"`.
+  - `large_body` — a single 200 KiB `write` (>> the 16384 default max frame size; exercises stream/conn flow control + WINDOW_UPDATE) auto-framed into many DATA frames; the client drains the full body and asserts it is byte-for-byte the 200 KiB payload.
+  - `incremental_client_read` — handler streams 20×8 KiB chunks with flushes; the client pulls a single chunk from the response `Body.Stream` and asserts it is non-empty (readable before EOF — not pre-materialized), then asserts the total drained length equals 20×8 KiB.
+
+*Evidence / counts:* `dune build` clean (dev profile, warnings-as-errors). `dune exec test/test_gohttp.exe` → **449 tests run, 449 `[OK]`, 0 FAIL, Test Successful in ~1.7s** (terminates). New total **449** = 446 prior + 3 StreamH2. Large-body byte-for-byte round trip asserted (`large_body`); incremental client read / first-chunk-before-EOF asserted (`incremental_client_read` + `server_streams_multiple_data`); DATA-per-write-before-handler-completion asserted (`server_streams_multiple_data`).
+
+Status: Done.
 
 ### Ticket 5 — End-to-end streaming demo + docs
 Status: Planned
