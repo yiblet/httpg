@@ -28,4 +28,6 @@ let () =
       ("H2Flow", Test_h2_flow.tests);
       ("H2DataBuffer", Test_h2_databuffer.tests);
       ("H2Pipe", Test_h2_pipe.tests);
+      ("H2Write", Test_h2_write.tests);
+      ("H2Writesched", Test_h2_writesched.tests);
     ]

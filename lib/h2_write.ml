@@ -1,0 +1,217 @@
+(* Port of go/src/net/http/internal/http2/write.go. *)
+
+type write_res_headers = {
+  rh_stream_id : int;
+  http_res_code : int;
+  h : Header.t;
+  trailers : string list option;
+  rh_end_stream : bool;
+  date : string;
+  content_type : string;
+  content_length : string;
+}
+
+type write_push_promise = {
+  pp_stream_id : int;
+  pp_promised_id : int;
+  pp_method : string;
+  pp_scheme : string;
+  pp_authority : string;
+  pp_path : string;
+  pp_h : Header.t;
+}
+
+type write_framer =
+  | Write_settings of H2.setting list
+  | Write_settings_ack
+  | Write_goaway of { max_stream_id : int; code : H2_error.err_code }
+  | Write_data of { stream_id : int; data : string; end_stream : bool }
+  | Write_handler_panic_rst of int
+  | Write_rst_stream of { stream_id : int; code : H2_error.err_code }
+  | Write_ping of string
+  | Write_ping_ack of string
+  | Write_window_update of { stream_id : int; n : int }
+  | Write_res_headers of write_res_headers
+  | Write_push_promise of write_push_promise
+  | Write_100_continue of int
+
+(* writeEndsStream. RST_STREAM returns false: it closes the whole stream. *)
+let write_ends_stream = function
+  | Write_data { end_stream; _ } -> end_stream
+  | Write_res_headers { rh_end_stream; _ } -> rh_end_stream
+  | _ -> false
+
+(* The flow-control byte count: len(wd.p) for DATA, 0 otherwise. *)
+let data_size = function
+  | Write_data { data; _ } -> String.length data
+  | _ -> 0
+
+(* http2.httpCodeString. *)
+let httpcode_string code =
+  match code with 200 -> "200" | 404 -> "404" | _ -> string_of_int code
+
+(* http2.validWireHeaderFieldName + httpguts.IsTokenRune (reject uppercase).
+   Mirrors the same predicate in h2_frame.ml. *)
+let is_token_byte b =
+  let c = Char.code b in
+  if c >= 128 then false
+  else
+    match b with
+    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
+    | '`' | '|' | '~' ->
+        true
+    | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
+    | _ -> false
+
+let valid_wire_header_field_name v =
+  if String.length v = 0 then false
+  else begin
+    let ok = ref true in
+    String.iter
+      (fun c ->
+        if not (is_token_byte c) then ok := false
+        else if c >= 'A' && c <= 'Z' then ok := false)
+      v;
+    !ok
+  end
+
+(* httpguts.ValidHeaderFieldValue: reject CTL chars that are not LWS. *)
+let valid_header_field_value v =
+  let ok = ref true in
+  String.iter
+    (fun c ->
+      let b = Char.code c in
+      let is_ctl = b < 0x20 || b = 0x7f in
+      let is_lws = c = ' ' || c = '\t' in
+      if is_ctl && not is_lws then ok := false)
+    v;
+  !ok
+
+(* httpcommon.LowerHeader: lower-case an ASCII header name, reporting whether
+   it was ASCII. *)
+let lower_header k =
+  let ascii = ref true in
+  let b = Bytes.of_string k in
+  for i = 0 to Bytes.length b - 1 do
+    let c = Bytes.get b i in
+    if Char.code c >= 128 then ascii := false
+    else if c >= 'A' && c <= 'Z' then
+      Bytes.set b i (Char.chr (Char.code c + 32))
+  done;
+  (Bytes.to_string b, !ascii)
+
+(* encKV: encode one header field. *)
+let enc_kv enc k v =
+  Hpack.write_field enc { name = k; value = v; sensitive = false }
+
+(* encodeHeaders: when [keys] is None, iterate sorted keys (Go's sorterPool).
+   For each (k, values), lower-case + validate the name, skip invalid; for
+   each value, validate it, and only allow transfer-encoding: trailers. *)
+let encode_headers enc h keys =
+  let keys =
+    match keys with
+    | Some ks -> ks
+    | None ->
+        let ks = List.map fst (Header.to_list h) in
+        List.sort String.compare ks
+  in
+  List.iter
+    (fun k ->
+      let vv = Header.values h k in
+      let k, ascii = lower_header k in
+      if ascii && valid_wire_header_field_name k then begin
+        let is_te = k = "transfer-encoding" in
+        List.iter
+          (fun v ->
+            if valid_header_field_value v then
+              if (not is_te) || v = "trailers" then enc_kv enc k v)
+          vv
+      end)
+    keys
+
+let split_max_frame_size = 16384
+
+(* splitHeaderBlock: split [block] into <= maxFrameSize fragments and call [fn]
+   for each, with first/last flags. *)
+let split_header_block block fn =
+  let max_frame_size = split_max_frame_size in
+  let len = String.length block in
+  let rec loop pos first =
+    if pos >= len then Lwt.return_unit
+    else begin
+      let frag_len = min (len - pos) max_frame_size in
+      let frag = String.sub block pos frag_len in
+      let next = pos + frag_len in
+      let last = next >= len in
+      Lwt.bind (fn frag first last) (fun () -> loop next false)
+    end
+  in
+  loop 0 true
+
+(* Encode a header block from a sequence of WriteField calls into a string. *)
+let encode_block enc f =
+  let buf = Buffer.create 256 in
+  Hpack.set_writer enc (fun s -> Buffer.add_string buf s);
+  f ();
+  Buffer.contents buf
+
+let write_res_headers_frame oc enc (w : write_res_headers) =
+  let block =
+    encode_block enc (fun () ->
+        if w.http_res_code <> 0 then
+          enc_kv enc ":status" (httpcode_string w.http_res_code);
+        encode_headers enc w.h w.trailers;
+        if w.content_type <> "" then enc_kv enc "content-type" w.content_type;
+        if w.content_length <> "" then
+          enc_kv enc "content-length" w.content_length;
+        if w.date <> "" then enc_kv enc "date" w.date)
+  in
+  if String.length block = 0 && w.trailers = None then
+    failwith "unexpected empty hpack";
+  split_header_block block (fun frag first last ->
+      if first then
+        H2_frame.write_headers oc ~stream_id:w.rh_stream_id
+          ~end_stream:w.rh_end_stream ~end_headers:last frag
+      else H2_frame.write_continuation oc w.rh_stream_id last frag)
+
+let write_push_promise_frame oc enc (w : write_push_promise) =
+  let block =
+    encode_block enc (fun () ->
+        enc_kv enc ":method" w.pp_method;
+        enc_kv enc ":scheme" w.pp_scheme;
+        enc_kv enc ":authority" w.pp_authority;
+        enc_kv enc ":path" w.pp_path;
+        encode_headers enc w.pp_h None)
+  in
+  if String.length block = 0 then failwith "unexpected empty hpack";
+  split_header_block block (fun frag first last ->
+      if first then
+        H2_frame.write_push_promise oc ~stream_id:w.pp_stream_id
+          ~promise_id:w.pp_promised_id ~end_headers:last frag
+      else H2_frame.write_continuation oc w.pp_stream_id last frag)
+
+let write_frame ~enc oc w =
+  match w with
+  | Write_settings settings -> H2_frame.write_settings oc settings
+  | Write_settings_ack -> H2_frame.write_settings_ack oc
+  | Write_goaway { max_stream_id; code } ->
+      (* Go ignores the flush error; we just write the GOAWAY. *)
+      H2_frame.write_goaway oc max_stream_id code ""
+  | Write_data { stream_id; data; end_stream } ->
+      H2_frame.write_data oc stream_id end_stream data
+  | Write_handler_panic_rst stream_id ->
+      H2_frame.write_rst_stream oc stream_id H2_error.InternalError
+  | Write_rst_stream { stream_id; code } ->
+      H2_frame.write_rst_stream oc stream_id code
+  | Write_ping data -> H2_frame.write_ping oc false data
+  | Write_ping_ack data -> H2_frame.write_ping oc true data
+  | Write_window_update { stream_id; n } ->
+      H2_frame.write_window_update oc stream_id n
+  | Write_res_headers w -> write_res_headers_frame oc enc w
+  | Write_push_promise w -> write_push_promise_frame oc enc w
+  | Write_100_continue stream_id ->
+      let block =
+        encode_block enc (fun () -> enc_kv enc ":status" "100")
+      in
+      H2_frame.write_headers oc ~stream_id ~end_stream:false ~end_headers:true
+        block
