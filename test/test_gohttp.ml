@@ -23,4 +23,5 @@ let () =
       ("Context", Test_context.tests);
       ("H2", Test_h2.tests);
       ("HpackTables", Test_hpack_tables.tests);
+      ("Hpack", Test_hpack.tests);
     ]

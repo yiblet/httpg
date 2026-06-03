@@ -130,7 +130,7 @@ Status: Done
 Status: Done
 
 ### Ticket 3 — HPACK: encoder + decoder
-Status: Planned
+Status: Done
 
 **A) Scope** Port `hpack/encode.go` (`Encoder`: indexed/literal representations, integer + string encoding, dynamic-table sizing) and `hpack/hpack.go` (`Decoder`: parse representations, emit `HeaderField`s, dynamic-table updates, `maxStrLen`). Pure.
 
@@ -144,7 +144,19 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Files created:**
+  - `lib/hpack.ml` + `lib/hpack.mli` (module `Gohttp.Hpack`) — port of `hpack/encode.go` (`Encoder`) + `hpack/hpack.go` (`Decoder`), composing the Ticket-2 `Hpack_huffman` and `Hpack_tables` modules (tables/Huffman are reused, not reimplemented).
+    - **Primitives:** `append_var_int`/`read_var_int` (RFC 7541 §5.1 `N`-bit prefix; faithful to Go `appendVarInt`/`readVarInt`, incl. the `m >= 63` overflow check → `Decoding_error "varint integer overflow"` and the `Need_more` sentinel); `append_hpack_string` (§5.2 length + optional Huffman, only Huffman when strictly shorter via `Hpack_huffman.encoded_len`/`encode`); decoder `read_string`/`decode_string` enforcing `max_str_len` (→ `String_too_long`).
+    - **Encoder** (`type encoder`): `dynamic_table` (initial max 4096) + `Buffer`, `min_size`/`max_size_limit`/`table_size_update` mirroring Go's fields; `write_field` choosing indexed / literal-incremental-indexing / literal-without-indexing / never-indexed via `search_table` (`static_search` first, dynamic offset by `static_table_len`) + `should_index` (`!sensitive && size <= maxSize`); emits a pending dynamic-table-size-update before the field (`appendTableSize`, incl. the `min_size` double-update case); `set_max_dynamic_table_size`/`set_max_dynamic_table_size_limit`/`max_dynamic_table_size`; `set_writer`/`encode_to_string` accumulators.
+    - **Decoder** (`type decoder`): `dynamic_table` + emit callback, `emit_enabled`, `max_str_len`, owned `save_buf`, `first_field`; `write` parsing the four representations + dynamic-table-size-update (faithful `parseHeaderFieldRepr` bit tests), with `Need_more` saved to `save_buf` (and the `2*(maxStrLen+8)` paranoia check → `String_too_long`); `close` (truncated-headers error), `decode_full`; faithful errors `Invalid_indexed`, `Decoding_error "invalid encoding"`, size-update-too-large and size-update-not-at-start.
+- **Files modified:**
+  - `test/test_hpack.ml` (new) — 22 cases ported from `hpack_test.go`/`encode_test.go` + RFC 7541 appendix C. Integer primitive (C.1.1/C.1.2 vectors, round-trips, `Need_more` on truncation); RFC **C.2** (C.2.1 literal-with-indexing, C.2.2 literal-without-indexing, C.2.3 never-indexed/sensitive, C.2.4 indexed); RFC **C.3** request sequence (no Huffman, 3 requests C.3.1–C.3.3); RFC **C.4** request sequence WITH Huffman (C.4.1–C.4.3); RFC **C.5** response sequence with eviction (256-byte table, C.5.1–C.5.3); RFC **C.6** response sequence with eviction WITH Huffman (C.6.1–C.6.3); encoder type-byte + round-trip; **Success Criterion `Hpack.roundtrip`** = `roundtrip_basic` + `roundtrip_dynamic_two_passes` (dynamic table across two encode/decode passes on one encoder/decoder pair, asserting the 2nd pass compresses) + `roundtrip_table_size_update`; decode error cases (`Invalid_indexed 0`, index-too-large, truncated headers, `String_too_long`, size-update-too-large, size-update-not-at-start).
+  - `test/test_gohttp.ml` — wired `("Hpack", Test_hpack.tests)`.
+- **Test evidence:** baseline `jj st` clean + `dune build`/`dune test` = **333** green. After: `dune build` clean, `dune test` = **355 tests run, Test Successful**. New **Hpack** suite = **22** cases (333 + 22 = 355). RFC 7541 examples **C.1.1, C.1.2, C.2.1–C.2.4, C.3.1–C.3.3, C.4.1–C.4.3, C.5.1–C.5.3, C.6.1–C.6.3 all decode to the spec fields and pass**. `Hpack.roundtrip` Success Criterion passes (incl. the cross-pass dynamic-table case).
+- **Go cases omitted / artifacts:** `encode_test.go`'s byte-exact encoder vectors that assume the RFC's *non-Huffman* output are not asserted byte-for-byte — Go's encoder (faithfully ported) Huffman-encodes whenever strictly shorter (e.g. "custom-key" → 8 bytes), so its bytes differ from the raw-literal RFC C.2/C.3 examples; the encoder is instead validated by representation-type byte + decode round-trip. The RFC C.3/C.5 *decode* vectors fully exercise the non-Huffman decode path. Go's incremental `Write`/`saveBuf` chunk-boundary fuzz tests are covered structurally by the `Need_more`/truncated-headers cases. `bufPool`/`sync` machinery is an OCaml no-op (GC-managed). The `Need_more` exception is exposed (Go's internal `errNeedMore`) so the truncation primitive is testable.
+- **Commit:** `feat(h2): port HPACK encoder and decoder with RFC 7541 examples (H2 Ticket 3)` (single jj change; id reported below).
 
 ### Ticket 4 — Frame layer (Framer)
 Status: Planned
