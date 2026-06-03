@@ -117,3 +117,64 @@ module Response_recorder = struct
   let body_string t = Buffer.contents t.body
   let header t = t.header
 end
+
+(* Port of go/src/net/http/httptest/server.go (Server), restricted to the
+   loopback-network path we support: [NewServer]/[NewTLSServer] bind an
+   ephemeral 127.0.0.1 port, [Close] tears the listener down, and [Client]
+   returns a [Client.t] suitable for hitting the server.
+
+   Go's in-memory ("fakenet") network and the [NewUnstartedServer]+[Start]
+   split are out of scope: gohttp's [Server.listen_and_serve_started] binds and
+   begins serving in one step, so a started [Server] is the only useful shape
+   here (noted in the plan; [new_unstarted] omitted). *)
+module Server = struct
+  type server = {
+    url : string;  (** Go's [Server.URL] ("http://127.0.0.1:PORT"). *)
+    port : int;  (** the bound ephemeral port. *)
+    tls : bool;  (** whether this is a TLS ([StartTLS]) server. *)
+    srv : Server.t;  (** the running gohttp [Server] (Go's [Config]). *)
+    serve : unit Lwt.t;  (** the serve-loop promise (Go's [goServe]). *)
+    close : unit -> unit Lwt.t;  (** Go's [Server.Close]. *)
+  }
+
+  let url s = s.url
+  let port s = s.port
+
+  (* NewServer: bind 127.0.0.1:0, build the URL, serve in the background. *)
+  let new_server (handler : Server.handler) : server Lwt.t =
+    let open Lwt.Infix in
+    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 handler
+    >>= fun (srv, port, serve_loop) ->
+    (* Drive the serve loop in the background so [new_server] doesn't block,
+       mirroring Go's [goServe]. *)
+    Lwt.async (fun () -> serve_loop);
+    let url = Printf.sprintf "http://127.0.0.1:%d" port in
+    Lwt.return
+      { url; port; tls = false; srv; serve = serve_loop;
+        close = (fun () -> Server.close srv) }
+
+  (* NewTLSServer: like [new_server] but over TLS with the self-signed
+     [Net.test_server_certificate] (Go's [testcert.LocalhostCert]); URL is
+     "https://...". The matching [client] trusts the cert via [~insecure]. *)
+  let new_tls_server (handler : Server.handler) : server Lwt.t =
+    let open Lwt.Infix in
+    let certificates = Net.test_server_certificate () in
+    Server.listen_and_serve_tls_started ~certificates ~addr:"127.0.0.1" ~port:0
+      handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    let url = Printf.sprintf "https://127.0.0.1:%d" port in
+    Lwt.return
+      { url; port; tls = true; srv; serve = serve_loop;
+        close = (fun () -> Server.close srv) }
+
+  (* Server.Client: a client configured to talk to this server. Go pre-loads
+     the server's self-signed cert into the client's RootCAs; the faithful
+     gohttp analogue for a TLS server is a client that trusts it via
+     [~insecure:true] (Net.test_server_certificate's matching insecure
+     opt-out). An HTTP server gets a plain default-shaped client. *)
+  let client (s : server) : Client.t =
+    if s.tls then Client.create ~insecure:true () else Client.create ()
+
+  let close (s : server) : unit Lwt.t = s.close ()
+end

@@ -95,7 +95,7 @@ Status: Done
 **Status: Done.** Commit: see below.
 
 ### Ticket 2 — httptest.Server (loopback test server + Client + TLS)
-Status: Planned
+Status: Done
 
 **A) Scope** Port `httptest/server.go` (subset): `new_server handler` binds an ephemeral `127.0.0.1` port via `Server.listen_and_serve_started`, exposing `url` (`http://127.0.0.1:PORT`), a `close` that stops the server, and `client ()` returning a `Client.t` configured to talk to it. `new_tls_server` uses `listen_and_serve_tls_started` + `Net.test_server_certificate`; its `client ()` trusts the self-signed cert (via `~insecure` / custom authenticator). `new_unstarted` + `start`/`start_tls` if cheap.
 
@@ -109,7 +109,22 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate; no leaked listeners.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Baseline:** `jj st` clean (`@` empty, parent `7c450943`); `dune build && dune test` green at **468** tests.
+- **Files modified:**
+  - `lib/httptest.ml` — added the `Server` submodule (Go `httptest.Server`, loopback path). `type server = { url; port; tls; srv : Server.t; serve : unit Lwt.t; close : unit -> unit Lwt.t }`. `new_server` (Go `NewServer`): binds `127.0.0.1:0` via `Server.listen_and_serve_started`, drives the serve loop in the background with `Lwt.async` (Go's `goServe`), `url = "http://127.0.0.1:PORT"`. `new_tls_server` (Go `NewTLSServer`): same over `Server.listen_and_serve_tls_started` with `Net.test_server_certificate` (Go `testcert.LocalhostCert`), `url = "https://127.0.0.1:PORT"`. `client` (Go `Server.Client`): TLS server → `Client.create ~insecure:true ()` (the faithful analogue of Go pre-loading the self-signed cert into the client's `RootCAs`), HTTP server → `Client.create ()`. `close` (Go `Server.Close`) → `Server.close srv`. Accessors `url`/`port`.
+  - `lib/httptest.mli` — **updated**: documented the new `Server : sig … end` submodule (`type server`, `url`, `port`, `new_server`, `new_tls_server`, `client`, `close`) and broadened the module-header comment to cover both halves.
+  - `test/test_gohttp.ml` — wired `("HttptestServer", Test_httptest_server.tests)`.
+- **Files created:**
+  - `test/test_httptest_server.ml` (`val tests`, 3 cases ported from `server_test.go`/`httptest_test.go`, each `Lwt_main.run` bounded by `Net.with_timeout`, server closed via `Lwt.finalize`/explicit `close`):
+    - `server_get` (Go `TestServer`): handler writes `Uri.path req.url`; `Httptest.Server.client` GET `<url>/foo` → 200 + body `"/foo"`.
+    - `server_tls` (Go `testServerClient`): `new_tls_server` + its `client` → https round trip, asserts URL is `https://`, status 200, body `"hello"`.
+    - `server_close` (Go `Server.Close` semantics): serve a 200 first (sanity), `close`, then a fresh `Net.connect` to the captured port must raise (connection refused), bounded by the timeout.
+- **Evidence:** `dune build` clean; `dune test` green — **471** tests (468 baseline + 3 HttptestServer). `dune exec test/test_gohttp.exe -- test HttptestServer` → 3/3 OK in 0.111s (terminates; no leaked listeners — each server `close`d). Full run 1.849s.
+- **API adaptation / omissions noted:** `new_unstarted` + `Start`/`StartTLS` **omitted** — gohttp's `Server.listen_and_serve_started` binds and serves in one step, so the unstarted/started split is not useful here (noted in the `.mli`). Go's in-memory "fakenet" network (`NewTestServer`) is out of scope; only the loopback path is ported. `Server.Client` trust is modeled as `~insecure:true` rather than a pinned `RootCAs` cert pool, because `Net`'s TLS surface exposes the documented insecure opt-out (`null_authenticator`) as the analogue of Go's per-cert trust for the self-signed test certificate.
+
+**Status: Done.** Commit: see below.
 
 ### Ticket 3 — fs core: FileSystem/Dir/File, ServeContent (no ranges), ServeFile, FileServer, dir listing
 Status: Planned
