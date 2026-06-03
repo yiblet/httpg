@@ -1,0 +1,4 @@
+(library
+ (name gohttp_internal)
+ (package gohttp)
+ (libraries lwt lwt.unix))

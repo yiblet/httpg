@@ -54,6 +54,7 @@
   - `Gohttp.Client.do_`, `Gohttp.Transport` (HTTP/1.1 keep-alive).
 - **Execution Flow (end state):** Server: `listen_and_serve` → `Net` accept loop → per-conn Lwt fiber → `Io.read_request` → `ServeMux` dispatch → handler writes via `ResponseWriter` → `Io.write_response`. Client: `Client.do_` → `Transport.round_trip` → `Net` connect (+TLS) → `Io.write_request` → `Io.read_response`.
 - **Migration Shape:** Built bottom-up so the tree compiles green after every ticket: pure leaves → framing → message read/write → net → server → client. A thin `Url` adapter module wraps `Uri.t` only if Discovery uncertainty (1) proves real.
+  - **`lib/internal/` (private library `gohttp_internal`)** mirrors Go's `net/http/internal` package: an access-restricted library (no `public_name`; bound to the `gohttp` package) reachable only from within `lib/`, not by `test/`/`bin/` or external `gohttp` consumers. It currently houses `Chunked` (the chunked transfer-encoding codec, port of `internal/chunked.go`); `transfer.ml` delegates to and re-exports `Gohttp_internal.Chunked`. Room for further internal ports later (`ascii`, `common`, `testcert`). The top-level `lib/dune` does not use `include_subdirs`, so `lib/internal/` with its own `dune` is a separate library by default — the desired isolation.
 - **End-State Properties:** Each Go source file has a named OCaml counterpart and a ported test, making the port auditable file-by-file against `go/src/net/http`.
 
 ## Implementation Guide

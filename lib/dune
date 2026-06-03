@@ -1,4 +1,4 @@
 (library
  (name gohttp)
  (public_name gohttp)
- (libraries uri lwt lwt.unix tls-lwt base64))
+ (libraries uri lwt lwt.unix tls-lwt base64 gohttp_internal))
