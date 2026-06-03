@@ -6,10 +6,12 @@
    The conditional-request branch ([checkPreconditions] — If-Match /
    If-Unmodified-Since / If-None-Match / If-Modified-Since / If-Range, 304 / 412)
    is fully ported (Ticket 4). The byte-range branch
-   ([parseRange]/[httpRange], 206 / multipart/byteranges / 416) is still omitted
-   here: {!serve_content} sends a full 200 with [Accept-Ranges: bytes] for a
-   honored Range header — Ticket 5 fills it in. A clear hook is left in
-   {!serve_content} where the range header is read. *)
+   ([parseRange]/[httpRange], 206 / multipart/byteranges / 416) is fully ported
+   (Ticket 5): a single satisfiable range yields {b 206} + [Content-Range], a
+   single body window; multiple ranges yield {b 206}
+   [multipart/byteranges]; an unsatisfiable range yields {b 416} +
+   [Content-Range: bytes */SIZE]. [If-Range] (handled in {!check_preconditions})
+   gates whether the range applies. *)
 
 (** Go's [fs.FileInfo] subset that this port needs: the bits [serveFile] reads
     off a [Stat]. *)
@@ -92,14 +94,49 @@ val scan_etag : string -> (string * string) option
 val check_preconditions :
   Server.response_writer -> Body.t Request.t -> modtime:float -> bool * string
 
-(** Go's [ServeContent] core (full-body 200, no ranges yet). Sets
-    [Content-Type] (a small extension→MIME table, falling back to
-    {!Sniff.detect_content_type} on the first bytes when the handler left it
-    unset), [Last-Modified] (via {!Http_time.format_gmt}, unless [modtime] is
-    the zero/epoch time), [Accept-Ranges: bytes] and [Content-Length] = [size],
-    then streams the whole content (skipping the body for a HEAD request).
-    [read_window] reads a bounded window of the content (used both for the
-    sniff probe and the body stream). Calls {!check_preconditions} first. *)
+(** Go's [httpRange]: a single requested byte range, [start] inclusive,
+    [length] bytes. *)
+type http_range = { start : int64; length : int64 }
+
+(** Go's [httpRange.contentRange]: the [Content-Range] header value for the
+    range against a content of the given size — ["bytes START-END/SIZE"]. *)
+val content_range : http_range -> int64 -> string
+
+(** Go's [httpRange.mimeHeader]: the per-part headers for a
+    [multipart/byteranges] response, in the order multipart.Writer emits them
+    ([Content-Range] then [Content-Type]). *)
+val mime_header :
+  http_range -> content_type:string -> size:int64 -> (string * string) list
+
+(** Raised by {!parse_range} when none of the requested ranges overlaps the
+    content (Go's [errNoOverlap]) — maps to a 416 with [Content-Range: bytes
+    */SIZE]. *)
+exception No_overlap
+
+(** Raised by {!parse_range} for a syntactically malformed Range header (Go's
+    ["invalid range"]) — maps to a 416. *)
+exception Invalid_range
+
+(** Go's [parseRange]: parse a [Range] header against a content of [size] bytes
+    per RFC 7233. Accepts ["bytes="] then a comma list of [start-end] (both
+    inclusive), [start-] (to EOF), or [-suffix] (last N bytes). Returns the
+    satisfiable ranges (clamped to the content), or [Error Invalid_range] for a
+    malformed header / [Error No_overlap] when every range starts past the
+    content. An empty header returns [Ok []]. *)
+val parse_range : string -> int64 -> (http_range list, exn) result
+
+(** Go's [ServeContent] core. Sets [Content-Type] (a small extension→MIME table,
+    falling back to {!Sniff.detect_content_type} on the first bytes when the
+    handler left it unset), [Last-Modified] (via {!Http_time.format_gmt}, unless
+    [modtime] is the zero/epoch time), [Accept-Ranges: bytes] and
+    [Content-Length], then streams the content (skipping the body for a HEAD
+    request). Calls {!check_preconditions} first (304/412). If the (If-Range
+    gated) [Range] header is satisfiable it serves {b 206}: a single range with
+    a [Content-Range] header and just that window, or multiple ranges as a
+    [multipart/byteranges] body (deterministic boundary) with per-part
+    [Content-Range]/[Content-Type]; an unsatisfiable range serves {b 416} with
+    [Content-Range: bytes */SIZE]. [read_window] reads a bounded window of the
+    content (used for the sniff probe, the body stream, and each range). *)
 val serve_content :
   Server.response_writer ->
   Body.t Request.t ->

@@ -262,6 +262,9 @@ let trim_string s =
   done;
   if !j < !i then "" else String.sub s !i (!j - !i + 1)
 
+let has_prefix s p =
+  String.length s >= String.length p && String.sub s 0 (String.length p) = p
+
 (* Go scanETag: returns Some (etag, remain) if a syntactically valid ETag is
    present at the start of [s] (after trimming), else None. An ETag is either
    W/"text" or "text" (RFC 7232 2.3). *)
@@ -451,6 +454,134 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
         (false, range_header)
   end
 
+(* ---- byte ranges (Go fs.go: httpRange / parseRange / mimeHeader) ---- *)
+
+(* Go's httpRange. *)
+type http_range = { start : int64; length : int64 }
+
+exception No_overlap (* Go errNoOverlap *)
+exception Invalid_range (* Go errors.New("invalid range") *)
+
+(* Go httpRange.contentRange: "bytes START-END/SIZE". *)
+let content_range ra size =
+  Printf.sprintf "bytes %Ld-%Ld/%Ld" ra.start
+    (Int64.sub (Int64.add ra.start ra.length) 1L)
+    size
+
+(* Go httpRange.mimeHeader: the per-part headers for a multipart/byteranges
+   response. Keys are emitted in sorted order (Content-Range < Content-Type),
+   mirroring multipart.Writer.CreatePart. *)
+let mime_header ra ~content_type ~size =
+  [ ("Content-Range", content_range ra size); ("Content-Type", content_type) ]
+
+(* Go strconv.ParseInt(s, 10, 64) for a non-negative decimal, returning None on
+   any non-digit, empty input, or overflow. *)
+let parse_int64 s =
+  if s = "" then None
+  else
+    let ok = ref true in
+    String.iter (fun c -> if c < '0' || c > '9' then ok := false) s;
+    if not !ok then None
+    else match Int64.of_string_opt s with Some _ as r -> r | None -> None
+
+(* Go parseRange: parse a Range header per RFC 7233. Raises [Invalid_range] on a
+   malformed header, [No_overlap] when every range starts past the content. *)
+let parse_range s size =
+  if s = "" then Ok []
+  else
+    let b = "bytes=" in
+    if not (has_prefix s b) then Error Invalid_range
+    else begin
+      try
+        let body = String.sub s (String.length b) (String.length s - String.length b) in
+        let parts = String.split_on_char ',' body in
+        let no_overlap = ref false in
+        let ranges =
+          List.fold_left
+            (fun acc ra ->
+              let ra = trim_string ra in
+              if ra = "" then acc
+              else begin
+                match String.index_opt ra '-' with
+                | None -> raise Invalid_range (* Go strings.Cut: no '-' *)
+                | Some dash ->
+                    let start = trim_string (String.sub ra 0 dash) in
+                    let end_ =
+                      trim_string
+                        (String.sub ra (dash + 1) (String.length ra - dash - 1))
+                    in
+                    if start = "" then begin
+                      (* suffix-length: last N bytes *)
+                      if end_ = "" || end_.[0] = '-' then raise Invalid_range;
+                      match parse_int64 end_ with
+                      | None -> raise Invalid_range
+                      | Some i ->
+                          let i = if i > size then size else i in
+                          let st = Int64.sub size i in
+                          { start = st; length = Int64.sub size st } :: acc
+                    end
+                    else begin
+                      match parse_int64 start with
+                      | None -> raise Invalid_range
+                      | Some i ->
+                          if i >= size then begin
+                            (* starts after content: does not overlap *)
+                            no_overlap := true;
+                            acc
+                          end
+                          else begin
+                            let st = i in
+                            if end_ = "" then
+                              { start = st; length = Int64.sub size st } :: acc
+                            else
+                              match parse_int64 end_ with
+                              | None -> raise Invalid_range
+                              | Some j ->
+                                  if st > j then raise Invalid_range;
+                                  let j = if j >= size then Int64.sub size 1L else j in
+                                  {
+                                    start = st;
+                                    length = Int64.add (Int64.sub j st) 1L;
+                                  }
+                                  :: acc
+                          end
+                    end
+              end)
+            [] parts
+        in
+        let ranges = List.rev ranges in
+        if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
+      with Invalid_range -> Error Invalid_range
+    end
+
+let sum_ranges_size ranges =
+  List.fold_left (fun acc ra -> Int64.add acc ra.length) 0L ranges
+
+(* Fixed multipart boundary. Go uses a random 30-hex boundary; we use a fixed,
+   syntactically valid token so responses are deterministic and tests can assert
+   exact framing. *)
+let multipart_boundary = "GOHTTP_BYTERANGES_BOUNDARY"
+
+(* Go rangesMIMESize: total encoded size of a multipart/byteranges body — the
+   sum of each part's framing (boundary line + headers + CRLF) plus its bytes,
+   then the closing boundary. Mirrors multipart.Writer byte-for-byte so the
+   Content-Length is exact. *)
+let ranges_mime_size ranges ~content_type ~size =
+  let buf = Buffer.create 256 in
+  List.iteri
+    (fun idx ra ->
+      if idx = 0 then
+        Buffer.add_string buf (Printf.sprintf "--%s\r\n" multipart_boundary)
+      else Buffer.add_string buf (Printf.sprintf "\r\n--%s\r\n" multipart_boundary);
+      List.iter
+        (fun (k, v) -> Buffer.add_string buf (Printf.sprintf "%s: %s\r\n" k v))
+        (mime_header ra ~content_type ~size);
+      Buffer.add_string buf "\r\n")
+    ranges;
+  Buffer.add_string buf (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary);
+  let framing = Int64.of_int (Buffer.length buf) in
+  Int64.add framing (sum_ranges_size ranges)
+
 (* ---- MIME by extension (stand-in for mime.TypeByExtension) ---- *)
 
 (* A small built-in extension→type table. This is a deliberate stand-in for
@@ -496,9 +627,39 @@ let sniff_len = 512
 
 (* ---- serveContent (Ticket 3: full 200, no ranges) ---- *)
 
+(* Stream the byte window [start, start+length) of the content to [w] in
+   bounded chunks (Go's io.CopyN over a seeked reader). *)
+let stream_window w ~read_window ~start ~length =
+  let chunk = 32 * 1024 in
+  let rec loop off remaining =
+    if remaining <= 0L then Lwt.return_unit
+    else begin
+      let len =
+        if remaining < Int64.of_int chunk then Int64.to_int remaining else chunk
+      in
+      read_window ~off ~len >>= fun data ->
+      if data = "" then Lwt.return_unit
+      else
+        w.Server.write data >>= fun () ->
+        loop
+          (Int64.add off (Int64.of_int (String.length data)))
+          (Int64.sub remaining (Int64.of_int (String.length data)))
+    end
+  in
+  loop start length
+
+(* Full-body 200 path (no range, or range ignored). *)
+let serve_full w (r : Body.t Request.t) ~h ~size ~read_window =
+  Header.set h "Accept-Ranges" "bytes";
+  if Header.get h "Content-Encoding" = "" then
+    Header.set h "Content-Length" (Int64.to_string size);
+  w.Server.write_header Status.status_ok;
+  if r.Request.meth = "HEAD" then Lwt.return_unit
+  else stream_window w ~read_window ~start:0L ~length:size
+
 let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
   set_last_modified w modtime;
-  let done_, _range_req = check_preconditions w r ~modtime in
+  let done_, range_req = check_preconditions w r ~modtime in
   (* TICKET 4 HOOK: when [done_], a precondition already wrote 304/412. *)
   if done_ then Lwt.return_unit
   else begin
@@ -517,37 +678,64 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
            Header.set h "Content-Type" (Sniff.detect_content_type buf);
            Lwt.return_unit)
     >>= fun () ->
-    let code = Status.status_ok in
-    Header.set h "Accept-Ranges" "bytes";
-    (* TICKET 5 HOOK: parse [_range_req] here and switch [code] to 206 (single
-       range / multipart/byteranges) or 416, adjusting Content-Range and the
-       streamed window. For now we always send the whole file. *)
-    let send_size = size in
-    if Header.get h "Content-Encoding" = "" then
-      Header.set h "Content-Length" (Int64.to_string send_size);
-    w.Server.write_header code;
-    if r.Request.meth = "HEAD" then Lwt.return_unit
-    else begin
-      (* Stream the whole content in bounded windows. *)
-      let chunk = 32 * 1024 in
-      let rec loop off remaining =
-        if remaining <= 0L then Lwt.return_unit
-        else begin
-          let len =
-            if remaining < Int64.of_int chunk then Int64.to_int remaining
-            else chunk
-          in
-          read_window ~off ~len >>= fun data ->
-          if data = "" then Lwt.return_unit
-          else
-            w.Server.write data >>= fun () ->
-            loop
-              (Int64.add off (Int64.of_int (String.length data)))
-              (Int64.sub remaining (Int64.of_int (String.length data)))
-        end
-      in
-      loop 0L send_size
-    end
+    let ctype = Header.get h "Content-Type" in
+    (* Go serveContent: parse the (If-Range-gated) Range header, then dispatch
+       full-200 / single-206 / multipart-206 / 416. *)
+    match parse_range range_req size with
+    | Error No_overlap when size = 0L ->
+        (* Empty file + unsatisfiable range: ignore the range, serve 200. *)
+        serve_full w r ~h ~size ~read_window
+    | Error No_overlap ->
+        Header.set h "Content-Range" (Printf.sprintf "bytes */%Ld" size);
+        Server.error w "invalid range: failed to overlap"
+          Status.status_requested_range_not_satisfiable
+    | Error Invalid_range ->
+        Server.error w "invalid range"
+          Status.status_requested_range_not_satisfiable
+    | Error e -> Lwt.fail e
+    | Ok ranges ->
+        (* If the total range size exceeds the file, treat as no range (Go). *)
+        let ranges =
+          if sum_ranges_size ranges > size then [] else ranges
+        in
+        Header.set h "Accept-Ranges" "bytes";
+        match ranges with
+        | [] -> serve_full w r ~h ~size ~read_window
+        | [ ra ] ->
+            (* single range → 206 + Content-Range *)
+            Header.set h "Content-Range" (content_range ra size);
+            (* Go: for a range request, always set Content-Length. *)
+            Header.set h "Content-Length" (Int64.to_string ra.length);
+            w.Server.write_header Status.status_partial_content;
+            if r.Request.meth = "HEAD" then Lwt.return_unit
+            else stream_window w ~read_window ~start:ra.start ~length:ra.length
+        | ranges ->
+            (* multiple ranges → 206 multipart/byteranges *)
+            let send_size = ranges_mime_size ranges ~content_type:ctype ~size in
+            Header.set h "Content-Type"
+              ("multipart/byteranges; boundary=" ^ multipart_boundary);
+            Header.set h "Content-Length" (Int64.to_string send_size);
+            w.Server.write_header Status.status_partial_content;
+            if r.Request.meth = "HEAD" then Lwt.return_unit
+            else begin
+              Lwt_list.iteri_s
+                (fun idx ra ->
+                  let prefix =
+                    if idx = 0 then Printf.sprintf "--%s\r\n" multipart_boundary
+                    else Printf.sprintf "\r\n--%s\r\n" multipart_boundary
+                  in
+                  let hdrs =
+                    List.fold_left
+                      (fun acc (k, v) -> acc ^ Printf.sprintf "%s: %s\r\n" k v)
+                      "" (mime_header ra ~content_type:ctype ~size)
+                  in
+                  w.Server.write (prefix ^ hdrs ^ "\r\n") >>= fun () ->
+                  stream_window w ~read_window ~start:ra.start
+                    ~length:ra.length)
+                ranges
+              >>= fun () ->
+              w.Server.write (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary)
+            end
   end
 
 (* ---- serveFile ---- *)

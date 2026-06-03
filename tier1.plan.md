@@ -214,7 +214,7 @@ Status: Done
 **Status: Done.** Commit: see below.
 
 ### Ticket 5 — fs range requests (single + multipart/byteranges + If-Range)
-Status: Planned
+Status: Done
 
 **A) Scope** Port `parseRange`, `httpRange` (`contentRange`/`mimeHeader`), `If-Range`, and range serving in `serve_content`: a single satisfiable range → **206** + `Content-Range` + that window (streamed); multiple ranges → **206** `multipart/byteranges` with a boundary and per-part `Content-Range`/`Content-Type`; unsatisfiable → **416** + `Content-Range: bytes */size`; `If-Range` (ETag or date) gates whether the range applies (else full 200). `Accept-Ranges: bytes` already set.
 
@@ -228,4 +228,33 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Baseline:** `jj st` clean (`@` empty `72a77244`, parent `f782f165` Ticket 4); `dune build && dune test` green at **482** tests.
+- **Files modified:**
+  - `lib/fs.ml` — replaced the Ticket-3 `TICKET 5 HOOK` (always-200) block in `serve_content` with a faithful port of `fs.go`'s range-serving machinery:
+    - `type http_range = { start : int64; length : int64 }` (Go `httpRange`); `content_range : http_range -> int64 -> string` (Go `contentRange`, `"bytes %d-%d/%d"` with `end = start+length-1`); `mime_header : http_range -> content_type:string -> size:int64 -> (string*string) list` (Go `mimeHeader`, keys in the sorted order multipart.Writer emits: `Content-Range` then `Content-Type`).
+    - `exception No_overlap` (Go `errNoOverlap`), `exception Invalid_range` (Go `errors.New("invalid range")`).
+    - `parse_range : string -> int64 -> (http_range list, exn) result` (Go `parseRange`): requires the `bytes=` prefix, comma-splits, `textproto.TrimString`s each spec, `strings.Cut` on the first `-`; `start-end` (both inclusive, end clamped to `size-1`, reject `start>end`), `start-` (to EOF), `-suffix` (last N bytes, clamped to whole file, reject empty/leading-`-` suffix); a start `>= size` sets the no-overlap flag and is skipped; `Ok []` for an empty header; `Error No_overlap` when the no-overlap flag is set and no range survived; `Error Invalid_range` for any malformed spec (missing prefix, no `-`, non-numeric, `start>end`). `parse_int64` mirrors `strconv.ParseInt(_,10,64)` for non-negative decimals (rejects sign/non-digit/overflow).
+    - `sum_ranges_size` (Go `sumRangesSize`), `ranges_mime_size` (Go `rangesMIMESize` via a `countingWriter`-equivalent: builds the exact multipart framing bytes — `--BOUNDARY\r\n` / `\r\n--BOUNDARY\r\n` per part + sorted `K: V\r\n` headers + `\r\n` + closing `\r\n--BOUNDARY--\r\n` — and adds the sum of the range lengths, giving an exact Content-Length).
+    - `stream_window` streams a `[start, start+length)` window in 32 KiB chunks via `read_window` (Go's `content.Seek(start)` + `io.CopyN`). `serve_full` is the extracted full-200 path (`Accept-Ranges: bytes`, `Content-Length=size` unless `Content-Encoding` set, stream whole file, skip body for HEAD).
+    - `serve_content` dispatch (Go `serveContent` lines 317–431): compute `ctype` from the now-set `Content-Type`, `parse_range range_req size`, then: `Error No_overlap && size=0` → ignore range, full 200 (Go's empty-file special case); `Error No_overlap` → set `Content-Range: bytes */SIZE` then **416** via `Server.error`; `Error Invalid_range` → **416**; `Ok ranges` → if `sum_ranges_size ranges > size` drop to `[]` (Go's attack guard), set `Accept-Ranges: bytes`, then `[]` → full 200; `[ra]` → **206** + `Content-Range` + `Content-Length=ra.length`, stream that window; `ranges` (>1) → **206**, `Content-Type: multipart/byteranges; boundary=...`, `Content-Length=ranges_mime_size`, then write each part (boundary line + sorted per-part headers + `\r\n` + the byte window) and the closing boundary. HEAD skips all bodies.
+  - `lib/fs.mli` — **kept in sync**: rewrote the header comment (range branch now fully ported, not omitted); added `type http_range`, `val content_range`, `val mime_header`, `exception No_overlap`, `exception Invalid_range`, `val parse_range`, and expanded the `serve_content` doc to describe the 206-single / 206-multipart / 416 behavior + If-Range gating.
+  - `test/test_gohttp.ml` — wired `("FsRange", Test_fs_range.tests)`.
+- **Files created:**
+  - `test/test_fs_range.ml` (`val tests`, 5 cases; networked ones served via `Httptest.Server` over a unique temp dir, each `Lwt_main.run` bounded by `Net.with_timeout 10.`, temp dir removed in `Lwt.finalize`/`rm_rf`):
+    - `parse_range` (unit, from Go `TestParseRange`): empty→[], `bytes=0-4`/`bytes=2-5` explicit, `bytes=3-` to EOF, `bytes=-4` suffix, `bytes=-20` suffix-clamp, `bytes=5-99` end-clamp, `bytes=0-1,3-4` multi, whitespace-tolerant `bytes= 0-1 , 3-4 `; errors: missing prefix / no dash / `4-2` (start>end) / non-numeric / `--4` → `Invalid_range`; `bytes=99-` → `No_overlap`.
+    - `serve_file_range` (**Success Criterion**, from `fs_test.go`): plain GET → **200** + full body + `Content-Type: text/plain; charset=utf-8` + `Last-Modified` present + `Accept-Ranges: bytes`; `Range: bytes=4-7` → **206** + `Content-Range: bytes 4-7/16` + exactly those 4 bytes; `If-Modified-Since == Last-Modified` → **304** + empty body.
+    - `single_ranges`: `bytes=2-5` (slice + `bytes 2-5/16`), `bytes=-4` (last 4 + `bytes 12-15/16`), `bytes=3-` (offset 3 to EOF + `bytes 3-15/16`), each **206**.
+    - `multi_range`: `bytes=0-1,3-4` → **206**, `Content-Type` contains `multipart/byteranges; boundary=`, body contains both parts' `Content-Range: bytes 0-1/16`/`bytes 3-4/16` headers and both byte slices.
+    - `unsatisfiable_range`: `bytes=9999-` (size 10) → **416** + `Content-Range: bytes */10`.
+- **Boundary choice:** Go uses a random 30-hex multipart boundary; we use a **fixed** valid token `GOHTTP_BYTERANGES_BOUNDARY` so the `multipart/byteranges` framing (and thus the exact `Content-Length` computed by `ranges_mime_size`) is deterministic and unit-testable. Noted in `fs.ml`.
+- **Evidence:** `dune build` clean; `dune test` green — **487** tests (482 baseline + 5 FsRange). `dune exec test/test_gohttp.exe -- test FsRange` → 5/5 OK in 0.005s (terminates). Full run 1.846s. No leaked temp dirs (`/tmp/gohttp_fsrange_*` absent after the run). All prior 482 stay green (full-200 path unchanged when no Range header / range ignored).
+- **Success Criterion confirmed:** `serve_file_range` passes — 200 full / 206 range (`Content-Range: bytes 4-7/16`, exact slice) / 304 conditional.
+- **API adaptation / notes:** the 416 path uses the existing `Server.error` (which sets `Content-Type: text/plain; charset=utf-8` + `X-Content-Type-Options: nosniff` and writes the status-text body) after `Set`ting `Content-Range` — Go's `serveError`+`Error` does the same and preserves the just-set `Content-Range` (its header-stripping only touches Cache-Control/Content-Encoding/Etag/Last-Modified). `Accept-Ranges: bytes` is emitted on the 200 and 206 paths but not on 416 (matching Go, which `return`s from the parse switch before the unconditional `Set`). The multipart writer is hand-rolled (not the `multipart_form` lib, which is inbound-form parsing) and mirrors `mime/multipart.Writer` byte-for-byte.
+
+**Status: Done.** Commit: see below.
+
+---
+
+**Tier 1 plan complete.** All 5 tickets Done: (1) Http_time + ResponseRecorder, (2) httptest.Server, (3) fs core/FileServer/dir listing, (4) fs conditional requests, (5) fs byte-range requests. End state: handlers are unit-testable in-memory via `Response_recorder`; a real static file server over `Dir` works end-to-end with conditional GETs (304/412) and RFC 7233 byte ranges (206 single + `multipart/byteranges` + 416). Test total **487** (from a 452 start), all green, all networked/file tests timeout-bounded with temp dirs cleaned.
