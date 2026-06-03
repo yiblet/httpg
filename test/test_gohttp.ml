@@ -32,4 +32,5 @@ let () =
       ("H2Writesched", Test_h2_writesched.tests);
       ("H2Tls", Test_h2_tls.tests);
       ("H2Server", Test_h2_server.tests);
+      ("H2Transport", Test_h2_transport.tests);
     ]
