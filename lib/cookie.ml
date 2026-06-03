@@ -229,71 +229,24 @@ let valid_cookie_domain v =
   else if is_ipv4 v && not (String.contains v ':') then true
   else false
 
-(* ---- time formatting/parsing ---- *)
+(* ---- time formatting/parsing ----
+   The civil-date math (days_from_civil / utc_of_unix / month tables) and the
+   RFC1123 GMT formatter now live in the shared {!Http_time} module (Go's
+   http.TimeFormat); cookie.ml delegates to it. The cookie-specific expires
+   parser (which accepts "DD-Mon-YYYY HH:MM:SS MST" with a 4-digit year and an
+   arbitrary zone token, unlike Go's http.ParseTime) stays here. *)
 
-let days_in_month =
-  [| 31; 28; 31; 30; 31; 30; 31; 31; 30; 31; 30; 31 |]
+let days_in_month = Http_time.days_in_month
+let is_leap = Http_time.is_leap
+let unix_of_utc = Http_time.unix_of_utc
+let month_of_name = Http_time.month_of_name
 
-let is_leap y = (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0
-
-(* Days from civil date to days since 1970-01-01 (Howard Hinnant's algorithm). *)
-let days_from_civil y m d =
-  let y = if m <= 2 then y - 1 else y in
-  let era = (if y >= 0 then y else y - 399) / 400 in
-  let yoe = y - (era * 400) in
-  let doy = ((153 * ((if m > 2 then m - 3 else m + 9)) + 2) / 5) + d - 1 in
-  let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy in
-  (era * 146097) + doe - 719468
-
-(* Convert civil date+time (UTC) to Unix seconds. *)
-let unix_of_utc y mo d h mi s =
-  let days = days_from_civil y mo d in
-  Float.of_int ((((days * 24) + h) * 3600) + (mi * 60) + s)
-
-(* Inverse: Unix seconds -> (year, month, day, hour, min, sec, weekday).
-   weekday: 0=Sunday .. 6=Saturday. *)
-let utc_of_unix t =
-  let secs = int_of_float (Float.floor t) in
-  let days = if secs >= 0 then secs / 86400 else (secs - 86399) / 86400 in
-  let rem = secs - (days * 86400) in
-  let h = rem / 3600 in
-  let mi = rem mod 3600 / 60 in
-  let s = rem mod 60 in
-  (* 1970-01-01 is a Thursday (=4). *)
-  let weekday = (((days mod 7) + 4) mod 7 + 7) mod 7 in
-  (* civil_from_days (Hinnant). *)
-  let z = days + 719468 in
-  let era = (if z >= 0 then z else z - 146096) / 146097 in
-  let doe = z - (era * 146097) in
-  let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365 in
-  let y = yoe + (era * 400) in
-  let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100)) in
-  let mp = ((5 * doy) + 2) / 153 in
-  let d = doy - (((153 * mp) + 2) / 5) + 1 in
-  let m = if mp < 10 then mp + 3 else mp - 9 in
-  let y = if m <= 2 then y + 1 else y in
-  (y, m, d, h, mi, s, weekday)
-
-let weekday_names =
-  [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |]
-
-let month_names =
-  [| "Jan"; "Feb"; "Mar"; "Apr"; "May"; "Jun"; "Jul"; "Aug"; "Sep"; "Oct";
-     "Nov"; "Dec" |]
-
-let month_of_name s =
-  let rec find i = if i >= 12 then None else if month_names.(i) = s then Some (i + 1) else find (i + 1) in
-  find 0
-
-(* TimeFormat: "Mon, 02 Jan 2006 15:04:05 GMT". *)
-let format_time t =
-  let y, mo, d, h, mi, s, wd = utc_of_unix t in
-  Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday_names.(wd) d
-    month_names.(mo - 1) y h mi s
+(* http.TimeFormat: "Mon, 02 Jan 2006 15:04:05 GMT". *)
+let format_time = Http_time.format_gmt
 
 (* The year of an expires value, for validCookieExpires. *)
 let year_of t =
-  let y, _, _, _, _, _, _ = utc_of_unix t in
+  let y, _, _, _, _, _, _ = Http_time.utc_of_unix t in
   y
 
 (* validCookieExpires: year must be >= 1601 (RFC 6265 5.1.1.5). *)

@@ -3,6 +3,8 @@ let () =
     [
       ("Method", Test_method.tests);
       ("Status", Test_status.tests);
+      ("HttpTime", Test_http_time.tests);
+      ("Httptest", Test_httptest.tests);
       ("Header", Test_header.tests);
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);

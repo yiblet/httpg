@@ -64,7 +64,7 @@
 ## Build Out
 
 ### Ticket 1 — Http_time (shared HTTP-date) + httptest.ResponseRecorder
-Status: Planned
+Status: Done
 
 **A) Scope** (1) Extract a shared `http_time.ml` (+ `.mli`): `format_gmt` (RFC1123 `Mon, 02 Jan 2006 15:04:05 GMT`) and `parse_http_time` (accept RFC1123, RFC850, asctime — Go's `http.ParseTime`); refactor `cookie.ml` to use it (behavior identical, cookie tests stay green). (2) `httptest.ml` `Response_recorder`: an in-memory `Server.response_writer` capturing status (default 200), header map, body buffer, and a `flushed` flag; `result : unit -> Body.t Response.t` mirroring `ResponseRecorder.Result` (snapshot headers, body as `Body.String`, status code/line, auto Content-Type sniff + Content-Length like Go).
 
@@ -78,7 +78,21 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Baseline:** `jj st` clean; `dune build && dune test` green at **452** tests.
+- **Files created:**
+  - `lib/http_time.ml` + `lib/http_time.mli` — shared HTTP-date module. `format_gmt : float -> string` (Go `http.TimeFormat` `"Mon, 02 Jan 2006 15:04:05 GMT"`); `parse_http_time : string -> float option` (Go `http.ParseTime`: tries RFC1123 GMT, then RFC850 `"Monday, 02-Jan-06 15:04:05 GMT"` with 2-digit-year pivot at 69 like Go's `time`, then ANSIC asctime `"Mon Jan _2 15:04:05 2006"` with space-collapsed day). Also re-exports the civil-date primitives (`days_in_month`, `is_leap`, `days_from_civil`, `unix_of_utc`, `utc_of_unix`, `month_of_name`, name tables) that were moved out of `cookie.ml`.
+  - `lib/httptest.ml` + `lib/httptest.mli` — `Response_recorder` (Go `httptest.ResponseRecorder`). Record `{ mutable code; header; body:Buffer; mutable flushed; mutable wrote_header; mutable snap_header; mutable default_remote_addr }`; `create` (code=200), `to_response_writer`, `result : t -> Body.t Response.t`, getters `code`/`body_string`/`header`. Faithful port of `recorder.go`: first `write_header` wins; first `write` implicitly commits 200 + sniffs Content-Type (≤512 bytes, only when unset and no Transfer-Encoding) via `Sniff.detect_content_type`; `flush` commits 200 (no sniff) and sets `flushed`; header snapshot (`Header.clone`) taken at first commit (or at `result` time if never committed); `result` defaults code 0→200, status line `"%03d %s"`, body `Body.String`, content_length via a port of `parseContentLength` (trim, ""→-1, reject `+`/`-`/overflow).
+  - `test/test_http_time.ml` (`val tests`, 6 cases): `format_gmt` of a known epoch (2006-01-02 15:04:05 UTC, Monday) == expected RFC1123; RFC1123 round-trip; RFC850 + asctime samples parse to the same epoch; garbage and empty → `None`.
+  - `test/test_httptest.ml` (`val tests`, 10 cases ported from `recorder_test.go`): `recorder_basic` (Success Criterion: header + `write_header 201` + body → code 201 / "201 Created" / header / body), default 200, first-code-only, implicit-WriteHeader-on-first-write (flushed false), write-string (+CT sniff), flush-sets-flushed (result content_length −1), Content-Type html detection, Content-Type explicit not overridden, header snapshot at first commit, Content-Length header parsed (=9).
+- **Files modified:**
+  - `lib/cookie.ml` — removed the duplicated civil-date math/formatter (`days_from_civil`/`unix_of_utc`/`utc_of_unix`/`format_time`/name tables); now delegates to `Http_time` (`days_in_month`, `is_leap`, `unix_of_utc`, `month_of_name`, `format_time = Http_time.format_gmt`, `year_of` via `Http_time.utc_of_unix`). The cookie-specific `parse_expires` (accepts `DD-Mon-YYYY HH:MM:SS MST` with 4-digit year + arbitrary zone, unlike Go's `ParseTime`) was kept in `cookie.ml` to preserve byte-identical cookie behavior. `cookie.mli` unchanged.
+  - `test/test_gohttp.ml` — wired `("HttpTime", Test_http_time.tests)` and `("Httptest", Test_httptest.tests)`.
+- **Evidence:** `dune build` clean; `dune test` green — **468** tests (452 baseline + 6 HttpTime + 10 Httptest). All 91 Cookie cases stay green (refactor behavior-preserving). New suites: HttpTime 0–5 OK, Httptest 0–9 OK.
+- **API adaptation noted:** Go's `ResponseRecorder.WriteHeader` panics on a non-3-digit code (`checkWriteHeaderCode`); the OCaml `write_header` raises `Invalid_argument` instead (closest idiomatic analogue). Trailer-header handling in `Result` (the `Trailer`/`Trailer:`-prefix machinery) was not ported — the existing `Response.t` has `trailer = None` and no ticket consumer needs it yet; noted as a deliberate omission. `default_remote_addr` field is present (Go `DefaultRemoteAddr`) but only consumed by the loopback Server (Ticket 2).
+
+**Status: Done.** Commit: see below.
 
 ### Ticket 2 — httptest.Server (loopback test server + Client + TLS)
 Status: Planned
