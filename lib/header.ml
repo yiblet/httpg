@@ -2,15 +2,26 @@
    MIMEHeader methods it delegates to).
 
    A [t] represents the key-value pairs in an HTTP header, i.e. Go's
-   [Header map[string][]string]. Keys are expected to be in canonical form as
-   produced by [canonical_header_key]. We back the map with an association list
-   keyed by canonical key; this preserves Go's "one slice of values per key"
-   semantics. Ordering of insertion is preserved but is irrelevant to the wire
-   format, which sorts keys ([write]/[write_subset]). *)
+   [Header map[string][]string]. We back it with a [Hashtbl] keyed by canonical
+   key, mirroring Go's hash map (one slice of values per key, mutated in place).
+   Keys are expected to be in canonical form as produced by
+   [canonical_header_key]. Iteration order is unspecified, matching Go; the wire
+   format sorts keys ([write]/[write_subset]). *)
 
-type t = { mutable entries : (string * string list) list }
+type t = (string, string list) Hashtbl.t
 
-let create () = { entries = [] }
+let create () : t = Hashtbl.create 8
+
+(* Build a header from raw (key, values) entries, storing keys *verbatim*
+   (no canonicalization), mirroring a Go map literal [map[string][]string{...}].
+   Later duplicate keys overwrite earlier ones. *)
+let of_list pairs : t =
+  let h = Hashtbl.create (List.length pairs) in
+  List.iter (fun (k, vs) -> Hashtbl.replace h k vs) pairs;
+  h
+
+(* All (key, values) entries, in unspecified order. *)
+let to_list (h : t) = Hashtbl.fold (fun k vs acc -> (k, vs) :: acc) h []
 
 (* validHeaderFieldByte: RFC 7230 token characters.
    tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
@@ -60,30 +71,19 @@ let canonical_header_key s =
   in
   scan 0 true
 
-(* Lookup helpers operating on already-canonical keys. *)
-let find_opt h key = List.assoc_opt key h.entries
-
-let set_entry h key values =
-  let rec replace = function
-    | [] -> [ (key, values) ]
-    | (k, _) :: rest when k = key -> (key, values) :: rest
-    | kv :: rest -> kv :: replace rest
-  in
-  h.entries <- replace h.entries
-
-let remove_entry h key =
-  h.entries <- List.filter (fun (k, _) -> k <> key) h.entries
+(* Lookup helper operating on already-canonical keys. *)
+let find_opt (h : t) key = Hashtbl.find_opt h key
 
 (* MIMEHeader.Add: appends to any existing values associated with the canonical
    key. *)
 let add h key value =
   let key = canonical_header_key key in
   match find_opt h key with
-  | Some vs -> set_entry h key (vs @ [ value ])
-  | None -> set_entry h key [ value ]
+  | Some vs -> Hashtbl.replace h key (vs @ [ value ])
+  | None -> Hashtbl.replace h key [ value ]
 
 (* MIMEHeader.Set: replaces existing values with the single element value. *)
-let set h key value = set_entry h (canonical_header_key key) [ value ]
+let set h key value = Hashtbl.replace h (canonical_header_key key) [ value ]
 
 (* MIMEHeader.Get: first value or "". *)
 let get h key =
@@ -98,15 +98,14 @@ let values h key =
   | None -> []
 
 (* MIMEHeader.Del. *)
-let del h key = remove_entry h (canonical_header_key key)
+let del h key = Hashtbl.remove h (canonical_header_key key)
 
-(* Header.has: whether the key is defined (even with a 0-length slice). *)
-let has h key = List.mem_assoc (canonical_header_key key) h.entries
+(* Header.has: whether the key is defined. *)
+let has h key = Hashtbl.mem h (canonical_header_key key)
 
-(* Header.Clone: a copy of h. We have no nil header concept, so an empty header
-   clones to an empty header. Value lists are copied. *)
-let clone h =
-  { entries = List.map (fun (k, vs) -> (k, List.map Fun.id vs)) h.entries }
+(* Header.Clone: a copy of h. Value lists are immutable, so a shallow table copy
+   suffices. *)
+let clone (h : t) = Hashtbl.copy h
 
 (* httpguts.ValidHeaderFieldName: a non-empty token. *)
 let valid_header_field_name s =
@@ -135,7 +134,7 @@ let trim_string s =
 let write_subset h buf ~exclude =
   let excluded k = List.mem k exclude in
   let kvs =
-    List.filter (fun (k, _) -> not (excluded k)) h.entries
+    Hashtbl.fold (fun k vs acc -> if excluded k then acc else (k, vs) :: acc) h []
   in
   let kvs = List.sort (fun (a, _) (b, _) -> String.compare a b) kvs in
   List.iter

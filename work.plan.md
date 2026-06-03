@@ -27,6 +27,8 @@
   - *Integration:* `Clientserver.get_roundtrip` starts a `Gohttp.Server` on a loopback port via the Lwt backend, issues `Gohttp.Client.do` GET, and asserts status `200` and body equality — mirroring Go's `clientserver_test.go` happy path.
 - **Non-Goals:** HTTP/2, HTTP/3, ALPN h2 (`http2.go`, `clientconn.go`, `socks_bundle.go`, h2 bundles) — but HTTP/1.0 **is in scope**; `net/url` reimplementation (use `uri`); CGI/FCGI/pprof/httputil subpackages; the monad/IO-functor abstraction (deferred — write directly against Lwt).
 - **Constraints:** OCaml ≥ 5.0, dune ≥ 3.0. Deps: `uri`, `lwt`, `tls-lwt`, `alcotest` (already installed in the local switch, alongside `tls`/`x509`). Pure data modules must not depend on Lwt. Cross-reference every module against its `go/src/net/http/*.go` source. **When a ported test fails, fix the implementation, not the test** (unless the failure is a documented Go-specific porting artifact).
+  - **Every `lib/` module MUST have a hand-written `.mli` interface file** exposing only its faithful public surface.
+  - **Mirror Go's data structures, not just behavior.** Go `map[K]V` → OCaml `Hashtbl` (the hash-map analog), not `Map.Make` or assoc lists; Go slices → lists/arrays as fits. E.g. `Header.t = (string, string list) Hashtbl.t` mirrors `Header map[string][]string`.
 
 ## Discovery
 
@@ -57,7 +59,7 @@
 ## Implementation Guide
 
 - **Execution Model:** Orchestrator + sub-agents. The orchestrator works tickets **serially**, lowest open ticket first; never parallelizes tickets.
-- **Per-Ticket Workflow:** For each ticket the orchestrator spawns one dedicated ticket agent that MUST: (1) `jj st` + run existing `dune test` to confirm green start; (2) implement the ticket against the matching `go/src/net/http` file; (3) port the corresponding Go `*_test.go` cases into alcotest and run `dune build && dune test`; (4) update this ticket's **Execution Record** with what changed, test evidence (names + pass counts), and commit id; (5) `jj commit -m "<semantic message>"` before returning.
+- **Per-Ticket Workflow:** For each ticket the orchestrator spawns one dedicated ticket agent that MUST: (1) `jj st` + run existing `dune test` to confirm green start; (2) implement the ticket against the matching `go/src/net/http` file, writing a `.mli` for every new module and mirroring Go's data structures (`map`→`Hashtbl`); (3) port the corresponding Go `*_test.go` cases into alcotest and run `dune build && dune test`; (4) do ALL plan edits (this ticket's **Execution Record**: what changed, test evidence with names + pass counts) BEFORE committing; (5) run a single `jj commit -m "<semantic message>"` and do not edit files afterward (one clean commit per ticket).
 - **Verification Gate:** Before advancing, the orchestrator confirms the ticket's Execution Record shows `dune build` clean and the named tests passing, and that a jj commit exists (`jj log` shows it). If evidence is missing/incomplete, spawn a verification agent to run `dune build && dune test`, record evidence, and commit any fixup.
 - **Failure Handling:** If a ticket agent fails, it returns feedback. The orchestrator adjusts the plan if needed and retries **once** with a fresh agent. Two failures → stop and return control to the user with failure context.
 - **Scope Handling:** Honor user scope exactly — one named ticket ⇒ only that ticket; "all" ⇒ tickets in order. No ticket is complete until tests pass, the Execution Record is updated, and the jj commit exists.

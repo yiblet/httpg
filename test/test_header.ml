@@ -16,7 +16,7 @@ let canon name input expected () =
    header by raw-inserting each (key, values) entry. This is required to
    faithfully reproduce rows that use non-canonical raw keys (e.g. "k1",
    "NewlineInKey\r\n"). *)
-let make pairs = { Header.entries = pairs }
+let make pairs = Header.of_list pairs
 
 let write_test name pairs exclude expected =
   let run () =
