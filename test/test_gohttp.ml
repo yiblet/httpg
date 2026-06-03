@@ -21,4 +21,5 @@ let () =
       ("Clientserver", Test_clientserver.tests);
       ("Form", Test_request_form.tests);
       ("Context", Test_context.tests);
+      ("H2", Test_h2.tests);
     ]

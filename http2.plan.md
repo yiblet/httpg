@@ -72,7 +72,7 @@
 ## Build Out
 
 ### Ticket 1 — h2 scaffolding: constants, errors, preface
-Status: Planned
+Status: Done
 
 **A) Scope** Foundation for everything: `h2.ml` (frame types, flags, `SettingID`s + defaults, the client connection preface, default initial window sizes, max frame size bounds) and `h2_error.ml` (`ErrCode` enum + text, `Stream_error`, `Connection_error`, `ConnectionError`/`StreamError` constructors). Pure, no IO.
 
@@ -86,7 +86,19 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Files created:**
+  - `lib/h2_error.ml` + `lib/h2_error.mli` — port of `internal/http2/errors.go`: `err_code` variant (NoError…HTTP11Required plus `Unknown of int`), `err_code_to_int`/`err_code_of_int`/`err_code_string` (faithful to Go's `errCodeName` map; unknown → `"unknown error code 0xN"`), `exception Connection_error of err_code`, `stream_error` record + `exception Stream_error`, `stream_error`/`conn_error` constructors.
+  - `lib/h2.ml` + `lib/h2.mli` — port of the constant block of `internal/http2/http2.go` + frame type/flag constants from `frame.go`: `client_preface` (`"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"`), `client_preface_len` (24), `next_proto_tls` (`"h2"`), `frame_type` (Data=0…Continuation=9) + int conversions + stringer, frame flags (END_STREAM=0x1, END_HEADERS=0x4, PADDED=0x8, PRIORITY=0x20, ACK=0x1), `setting_id` (HeaderTableSize=1…MaxHeaderListSize=6) + int conversions + stringer, defaults (`initial_window_size=65535`, `initial_max_frame_size=16384`, `initial_header_table_size=4096`, `default_max_read_frame_size=1 lsl 20`), `setting` record.
+- **Files modified:**
+  - `test/test_h2.ml` (new) — 59 cases ported from `errors_test.go` (`TestErrCodeString`, incl. unknown 0xf) + constant block: err-code int round-trips/values, preface bytes/length, frame-type values + round-trips, frame flags, setting-id values/round-trips/names, default constants.
+  - `test/test_gohttp.ml` — wired `("H2", Test_h2.tests)`.
+- **Test evidence:** baseline `dune test` = **262** tests green. After: `dune build` clean, `dune test` = **321 tests run, Test Successful**. New **H2** suite = **59** cases (262 + 59 = 321).
+- **Go cases omitted:** none of `errors_test.go` (its sole `TestErrCodeString` is ported). `http2.go`/`frame.go` have no dedicated stringer test for settings/frames beyond the values asserted here. The `Unknown of int` constructor is an OCaml-specific representation of Go's open-ended `ErrCode`/`SettingID`/`FrameType` uint values (Go has no separate variant; unknown values flow through the same int type).
+- **Commit:** `feat(h2): scaffold HTTP/2 constants, error codes and preface (H2 Ticket 1)` (single squashed jj change; id reported to orchestrator).
+
+Status: Done
 
 ### Ticket 2 — HPACK: Huffman + static & dynamic tables
 Status: Planned
