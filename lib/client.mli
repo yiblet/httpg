@@ -44,11 +44,21 @@ val default_client : t
     {!Transport.round_trip} for each hop. A non-2xx status is not an error.
     Raises [Failure] when the redirect policy aborts.
 
+    {b The response body streams} (a {!Body.Stream}, see {!Transport.round_trip}):
+    it is not buffered, and the underlying connection is returned to the
+    transport pool only after the caller consumes the body to EOF
+    ({!Body.read_all} or {!Body.drain}, the analogue of [resp.Body.Close]). The
+    redirect loop drains each intermediate hop's body before following, so the
+    hop's connection is released for reuse.
+
     The optional [?context] (Go's per-request [context.Context]) is applied to
     [req] before the exchange; when omitted the request keeps its existing
     context (defaulting to {!Context.background}). When the client carries a
     [timeout], it composes over the effective context as a deadline (Go's
-    [setRequestCancel]). *)
+    [setRequestCancel]) — and the deadline {b covers the streaming body read},
+    not just the headers: the timer is disarmed when the body reaches EOF or
+    fails (Go's [cancelTimerBody]), and a body read outstanding when the deadline
+    fires aborts with the timeout cause. *)
 val do_ :
   ?context:Context.t -> t -> Body.t Request.t -> Body.t Response.t Lwt.t
 

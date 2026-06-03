@@ -1,6 +1,15 @@
 (* Port of the read/write halves of request.go and response.go, over Lwt_io
    channels: readRequest / ReadRequest, Request.Write, ReadResponse,
-   Response.Write. Bodies are materialized in memory ({!Body.t}). *)
+   Response.Write.
+
+   Read bodies {b stream} — they are not materialized in memory. {!read_request}
+   and {!read_response} return a {!Body.Stream} that pulls bytes lazily from the
+   connection (wrapping [Transfer.read_transfer]'s incremental reader). For a
+   chunked body, reaching EOF reads the trailing trailer block and merges it into
+   the message's [trailer] field (Go's [body.readTrailer] / [mergeSetHeader]), so
+   the trailer is only populated once the body has been consumed to EOF. Use
+   {!Body.read_all} to collect a whole body or {!Body.drain} to consume-and-
+   discard it. *)
 
 (** A parse / protocol error, carrying Go's message text (Go's
     [ProtocolError] / [badStringError]). *)
@@ -17,12 +26,16 @@ val read_mime_header : Lwt_io.input_channel -> Header.t Lwt.t
 
 (** [read_request ic] is [ReadRequest]: parse the request line, headers
     (Host promoted to [host] and deleted from the header map), and body framing
-    from [ic]. The body is read fully into memory. *)
+    from [ic]. The body is a streaming {!Body.Stream} reading lazily from [ic];
+    it is not buffered. Consume it to EOF ({!Body.read_all}/{!Body.drain}) to
+    reach the next message boundary and populate any chunked trailer. *)
 val read_request : Lwt_io.input_channel -> Body.t Request.t Lwt.t
 
 (** [read_response ?request ic] is [ReadResponse]: parse the status line,
     headers and body framing. [request] optionally supplies the corresponding
-    request (for HEAD body suppression); a GET is assumed otherwise. *)
+    request (for HEAD body suppression); a GET is assumed otherwise. The body is
+    a streaming {!Body.Stream} reading lazily from [ic] (not buffered); consume
+    it to EOF to reach the next message boundary and read any chunked trailer. *)
 val read_response : ?request:Body.t Request.t -> Lwt_io.input_channel -> Body.t Response.t Lwt.t
 
 (** [write_request oc r] is [Request.Write]: write the request line, Host /

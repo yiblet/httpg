@@ -3,7 +3,18 @@
 
 (** [Empty] is the analogue of [http.NoBody]; [String s] an in-memory body;
     [Stream next] a streaming reader whose [next ()] yields successive chunks
-    and finally [None] (the analogue of [io.EOF]). *)
+    and finally [None] (the analogue of [io.EOF]).
+
+    A body produced by a {b read path} — a server request body or a client
+    response body (see {!Io.read_request}/{!Io.read_response}) — is a [Stream]
+    that pulls bytes lazily {b from the underlying connection}; it is never
+    materialized up front. Such a body must be consumed to EOF (via {!read_all}
+    or {!drain}) to free the connection: reading to [None] runs the on-EOF
+    action that reads any chunked trailer and releases the connection for
+    keep-alive reuse (Go's [resp.Body.Close]). Until then the connection is held
+    and is not reused. A handler/caller that returns without draining the body
+    leaves it to the framework to drain (server side) or simply forgoes reuse
+    (client side). *)
 type t =
   | Empty
   | String of string

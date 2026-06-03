@@ -226,7 +226,7 @@ Status: Done
 Status: Done.
 
 ### Ticket 5 — End-to-end streaming demo + docs
-Status: Planned
+Status: Done
 
 **A) Scope** A `bin/main.ml` (or example) demonstrating a streaming server handler and a streaming client consumer over both h1 and h2; update module docs/`.mli` comments to describe the streaming/lifecycle model. Final sweep that no read/write path buffers unintentionally.
 
@@ -240,4 +240,52 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; `dune exec gohttp` shows streaming.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean (working copy empty, parent = Ticket 4 commit `3cae126d`); `dune build && dune test` green — **449 tests**.
+
+*Files modified:*
+- `bin/main.ml` — reworked into a streaming demo with three bounded round trips (whole run wrapped in `Net.with_timeout 30.` over `Lwt_main.run`, terminates in <2s). New headline `demo_stream`: a `streaming_handler` writes four chunks (`chunk-1..4`) calling `w.Server.flush` between each (so the response is framed `Transfer-Encoding: chunked` and bytes leave the server as the handler runs); the gohttp `Client.get`s it and consumes the response `Body.Stream` **chunk-by-chunk** via the `Body.Stream next` reader, printing each chunk as it arrives (never calls `read_all`, so nothing is pre-buffered). The existing plaintext h1 (`demo_http`, `read_all`) and TLS+ALPN h2 (`demo_h2`, `read_all`, asserts `h2_round_trip_count = 1`) round trips are retained and folded in sequence.
+
+*Demo behavior (`dune exec gohttp`, verified terminating):*
+```
+Streaming GET http://127.0.0.1:PORT/stream
+-> 200 OK (consuming body incrementally)
+  [chunk 1 arrived] chunk-1
+  [chunk 2 arrived] chunk-2
+  [chunk 3 arrived] chunk-3
+  [chunk 4 arrived] chunk-4
+  [EOF after 4 chunk(s)]
+
+GET http://127.0.0.1:PORT/demo
+-> 200 OK
+Hello from gohttp! You requested /demo
+
+GET https://127.0.0.1:PORT/h2-demo (h2 round trips: 1)
+-> 200 OK
+Hello from gohttp! You requested /h2-demo
+```
+The four "[chunk N arrived]" lines are printed by the client as it pulls each `Body.Stream` chunk — demonstrating the body is consumed incrementally, not pre-materialized.
+
+*Documentation sweep (`.mli` doc comments, verified against the implemented behavior):*
+- `lib/body.mli` — expanded the `type t` doc to state that read-path bodies (server request / client response, from `Io.read_request`/`read_response`) are `Stream`s pulling lazily **from the connection**, never materialized up front, and must be consumed to EOF (`read_all`/`drain`) to run the on-EOF action (read chunked trailer + release the connection for keep-alive reuse, Go's `resp.Body.Close`). `drain` already documented (Ticket 1).
+- `lib/io.mli` — **corrected the stale "Bodies are materialized in memory" header comment** (no longer true): now describes that read bodies stream (a `Body.Stream` wrapping `Transfer.read_transfer`'s incremental reader), and the chunked trailer is read + merged into the message `trailer` only on EOF (Go's `body.readTrailer`/`mergeSetHeader`). Also updated `read_request`/`read_response` doc (removed "read fully into memory" / "body is read fully into memory"; now "streaming `Body.Stream` reading lazily, not buffered, consume to EOF for next boundary + trailer").
+- `lib/server.mli` — already documented `response_writer.flush` + the 2048 buffer-then-chunk model (Ticket 2). Verified accurate, no change needed.
+- `lib/transport.mli` — expanded `round_trip` doc: the response body streams (not pre-buffered); reusability decided up front; a one-shot release wrapped on body EOF (Go's `bodyEOFSignal`/`waitForBodyRead`) returns the connection to the idle pool **only after** the caller drains the body to EOF (`read_all`/`drain` = `resp.Body.Close`), else closed; each chunk read races the request context, aborting + closing mid-stream on cancellation.
+- `lib/client.mli` — expanded `do_` doc: response body streams + connection pooled only after drain; the redirect loop drains each hop; the client `timeout`/`?context` deadline **covers the streaming body read** (Go's `cancelTimerBody`), disarmed on body EOF/failure, aborting an outstanding body read when it fires.
+
+*No-buffer sweep findings (`grep read_all`/`Buffer.contents`/`materialize` across `lib/*.ml`):*
+- **Read paths fully stream** — `io.ml`'s `materialize_body` is gone (Ticket 1); `read_request`/`read_response` return `Body.Stream`. h2 request/response bodies stream over `H2_pipe` (Ticket 4). No whole-body buffer on any read path.
+- **Server response write streams** — `serve_one`'s 2048 buffer-then-chunk writer (Ticket 2) and the h2 ~4 KiB DATA framing (Ticket 4) only hold a bounded buffer, by design (faithful to Go's `bufferBeforeChunkingSize`/`handlerChunkWriteSize`).
+- **Legitimate (in-scope-for-Go) whole-body reads, NOT bugs:** `Io.write_response`'s zero-length-body probe (`io.ml:440`, faithful port of Go's `Response.Write` reading the body when `ContentLength==0`); `Form.parse_form`/multipart `read_all` (`form.ml:122,246`, Go's `ParseForm` reads the whole form body up to `maxFormSize`).
+- **Follow-up recorded (NOT fixed — out of scope + destabilization risk):** `Transfer.write_body` (`transfer.ml:519,527`) buffers the **request/response write** body via `read_all` — the chunked branch reads the whole body then emits it as one chunk (Go's `transferWriter.writeBody` instead `io.Copy`s into the chunked writer, streaming per read), and the fixed-length branch reads the whole body to verify the byte count (Go uses `io.CopyN`). This contradicts true streaming on the **request-write** path, but that path is explicitly scoped "**as today**" in this plan (Problem §"Request writes (client)") and is a Non-Goal here; `write_body` is shared by `write_request`/`write_response` and covered by many existing wire-format tests, so changing it risks destabilizing them. **Follow-up:** stream `write_body`'s chunked + fixed-length branches per `Body.Stream` chunk (mirroring Go's `io.Copy`/`io.CopyN`) in a dedicated request-body-streaming ticket.
+
+*Tests adapted:* **none** — demo + docs only; all 449 prior tests stayed green with no assertion touched.
+
+*Evidence / counts:* `dune build` clean (dev profile, warnings-as-errors). `dune exec test/test_gohttp.exe` → **449 tests run, Test Successful in ~1.7s** (terminates) — unchanged total (Tickets 1–4 already cover the streaming integration tests; Ticket 5 is demo + docs). `dune exec gohttp` runs and terminates, printing the four streamed chunks incrementally (output above).
+
+Status: Done.
+
+---
+
+**Streaming plan complete.** All 5 tickets are Done. Bodies now stream first-class on every read path (server request bodies, client response bodies, h1 + h2) and write where Go streams (server responses via the 2048 buffer-then-chunk model with `flush`; h2 DATA per ~4 KiB), with the full body lifecycle (`Body.drain`/EOF-release) gating keep-alive reuse on both ends and context cancellation covering mid-stream reads. The one remaining whole-body buffer on a hot path is `Transfer.write_body`'s request/response-write branch, which the plan scoped "as today" (Non-Goal) and is recorded as a follow-up above.

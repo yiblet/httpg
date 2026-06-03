@@ -34,10 +34,25 @@ val create :
     idle pooled connection or dial a fresh one via {!Net.connect}, send the
     request with {!Io.write_request} and read the response with
     {!Io.read_response}. Sets the default Host and User-Agent headers when the
-    request lacks them. On a keep-alive-eligible response (keep-alives enabled,
-    neither request nor response asked to close) the connection is returned to
-    the pool; otherwise it is closed. A failure on a recycled idle connection
-    triggers one fresh-dial retry.
+    request lacks them.
+
+    {b The response body streams and gates connection reuse.} The returned
+    [resp.body] is a {!Body.Stream} pulling bytes lazily from the connection; it
+    is not pre-buffered. Reusability (keep-alives enabled, neither request nor
+    response asked to close) is decided up front, and a one-shot release action
+    is wrapped onto the body's EOF (Go's [bodyEOFSignal] over [waitForBodyRead]):
+    the connection is returned to the idle pool {b only after the caller consumes
+    the body to EOF} ({!Body.read_all} or {!Body.drain} — the analogue of
+    [resp.Body.Close]); if it is not reusable, or if the read fails, the
+    connection is closed instead. A caller that never drains the body simply
+    forgoes reuse. A failure on a recycled idle connection triggers one
+    fresh-dial retry.
+
+    {b Cancellation covers the body read.} Each body chunk read races
+    [req]'s context ([?context], or a client timeout composed onto it): if the
+    context fires mid-stream the read aborts with the context cause and the
+    connection is closed (never pooled) — Go aborting an in-flight body read on
+    [<-ctx.Done()].
 
     {b HTTP/2:} for an ["https"] request (or when [?force_h2] is set) the dial
     advertises ALPN [["h2"; "http/1.1"]] via {!Net.connect_alpn}; if the peer
