@@ -7,9 +7,20 @@
    HTTP/2, proxies, the wantConn queue, connsPerHost limits, the async body
    read-ahead and the byte-counted persistConn read/write loops are out of
    scope; we keep one idle connection per cache key (a list, as Go does) and
-   reuse the most-recently-returned one. Because {!Io} materializes response
-   bodies fully in memory, a keep-alive-eligible connection can be returned to
-   the pool as soon as {!round_trip} has read the response. *)
+   reuse the most-recently-returned one.
+
+   The response body now {b streams} (Stream Ticket 1: {!Io.read_response}
+   returns a [Body.Stream], not a materialized String). So a keep-alive-eligible
+   connection is {b not} immediately free after {!round_trip} reads the response
+   headers — it is still busy carrying the (unread) body. Mirroring Go's
+   [persistConn.readLoop]/[bodyEOFSignal] (transport.go), {!round_trip} decides
+   reusability up front (Go's [persistConn.alive]) then hands back a body wrapped
+   with a {b one-shot EOF/close action}: when the body reaches EOF (or is
+   drained), the connection is returned to the idle pool if reusable, else
+   closed. If the caller never drains/closes the body, the connection is simply
+   not reused (Go behaves the same until [resp.Body.Close]). A [?context] firing
+   mid-body aborts the in-flight read and closes the connection rather than
+   pooling it. *)
 
 open Lwt.Infix
 
@@ -195,17 +206,65 @@ let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
     | Some pc -> Lwt.return (pc, true)
     | None -> dial t ~scheme ~host ~port >>= fun pc -> Lwt.return (pc, false)
   in
+  (* Wrap the streaming [resp.body] so that reaching EOF (or being drained)
+     runs a one-shot connection-release action: pool the connection if
+     [reusable], else close it (Go's [bodyEOFSignal.fn] / [persistConn]
+     returning to the pool only after [waitForBodyRead]). A [?context] firing
+     mid-body aborts the in-flight read and closes the connection (NOT pooled),
+     re-raising the context cause. The action runs at most once. *)
+  let wrap_body_lifecycle pc (resp : Body.t Response.t) : Body.t =
+    let reuse = reusable t req resp in
+    let released = ref false in
+    let release ~reuse_now =
+      if !released then Lwt.return_unit
+      else begin
+        released := true;
+        if reuse_now then (put_idle_conn t key pc; Lwt.return_unit)
+        else close_conn pc
+      end
+    in
+    match resp.Response.body with
+    | (Body.Empty | Body.String _) as b ->
+      (* No streaming body on the wire (e.g. HEAD / no-body status): the
+         connection is immediately free. *)
+      Lwt.async (fun () -> release ~reuse_now:reuse);
+      b
+    | Body.Stream inner ->
+      let next () : string option Lwt.t =
+        (* Race the inner read against the request context (Go aborts an
+           in-flight body read on <-ctx.Done()). *)
+        let ctx_p =
+          Context.done_ req.Request.ctx >>= fun () ->
+          let cause =
+            match Context.err req.Request.ctx with
+            | Some e -> e
+            | None -> Context.Canceled
+          in
+          Lwt.fail cause
+        in
+        Lwt.try_bind
+          (fun () -> Lwt.choose [ inner (); ctx_p ])
+          (fun chunk ->
+            Lwt.cancel ctx_p;
+            match chunk with
+            | Some _ -> Lwt.return chunk
+            | None ->
+              (* io.EOF: release the connection to the pool / close it. *)
+              release ~reuse_now:reuse >>= fun () -> Lwt.return_none)
+          (fun exn ->
+            (* Context fired (or the read failed): close the connection
+               unconditionally (never pool a torn-down/cancelled body). *)
+            Lwt.cancel ctx_p;
+            release ~reuse_now:false >>= fun () -> Lwt.fail exn)
+      in
+      Body.Stream next
+  in
   let exchange pc =
-    (* Body is fully materialized by Io.read_response, so the connection is
-       immediately free. Return it to the pool when reusable, else close. *)
     Io.write_request pc.oc req >>= fun () ->
     Lwt_io.flush pc.oc >>= fun () ->
     Io.read_response ~request:req pc.ic >>= fun resp ->
-    (if reusable t req resp then (
-       put_idle_conn t key pc;
-       Lwt.return_unit)
-     else close_conn pc)
-    >>= fun () -> Lwt.return resp
+    resp.Response.body <- wrap_body_lifecycle pc resp;
+    Lwt.return resp
   in
   (* Race the IO against the request context (Go aborts an in-flight round trip
      on <-ctx.Done() and returns context.Cause(ctx)). If the context fires

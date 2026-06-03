@@ -14,6 +14,7 @@ let () =
       ("ResponseWrite", Test_responsewrite.tests);
       ("StreamRead", Test_stream_read.tests);
       ("StreamWrite", Test_stream_write.tests);
+      ("StreamClient", Test_stream_client.tests);
       ("Net", Test_net.tests);
       ("Mapping", Test_mapping.tests);
       ("Pattern", Test_pattern.tests);

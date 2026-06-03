@@ -141,7 +141,7 @@ Status: Done
 Status: Done.
 
 ### Ticket 3 — Streaming client response bodies (HTTP/1.x)
-Status: Planned
+Status: Done
 
 **A) Scope** `Client`/`Transport` return a streaming `Response.body`; the connection is returned to the idle pool only after the body is drained/closed. `?context` cancellation aborts a mid-stream body read.
 
@@ -155,7 +155,29 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean (working copy empty, parent = Ticket 2 commit `e0227a99`); `dune build && dune test` green — **443 tests**.
+
+*Files modified (with `.mli` review):*
+- `lib/transport.ml` — `round_trip`'s `exchange` no longer assumes a materialized body. After `Io.read_response` it computes reusability up front (`reusable t req resp` = keep-alives enabled ∧ neither request nor response asked to close — Go's `persistConn.alive`) and wraps the streaming `resp.body` with a one-shot **connection-release** action (`wrap_body_lifecycle`): when the body reaches EOF (inner reader returns `None`, after the chunked-trailer read), the connection is **returned to the idle pool** if reusable, else **closed** (Go's `bodyEOFSignal.fn` / `tryPutIdleConn` after `waitForBodyRead`). A no-body-on-wire body (`Empty`/`String`, e.g. HEAD / no-body status) releases the connection immediately (`Lwt.async`). The wrapped `next` **races each inner read against `Context.done_ req.ctx`** (Go aborting an in-flight body read on `<-ctx.Done()`): on the context firing it closes the connection (never pools a cancelled body) and re-raises the cause. The `released` flag makes the release run at most once (no double pool/close). The header-phase `exchange_with_ctx` race is unchanged (still closes on a headers-phase cancellation). The `dials`/`h2_round_trips` counters are untouched, so reuse-after-drain stays observable. Header comment updated to describe the streaming/`bodyEOFSignal` lifecycle. **No `.mli` change** — `round_trip`'s signature is unchanged; the lifecycle is internal.
+- `lib/client.ml` — `do_one` redirect loop now **`Body.drain resp.Response.body` before following a redirect** (Go reads up to `maxBodySlurpSize` then closes; closing releases the connection). Because the body now streams, this drain is what advances the previous hop's connection to EOF and fires its pool-return action — without it the next hop would dial fresh. `do_` (timeout path) reworked: the `Client.Timeout` deadline must now cover the **streaming body read** (Go's `cancelTimerBody`). It no longer cancels the timer when `do_one` returns the response (the body is still in flight); instead it **wraps the response body** (`wrap_timer_body`) so reaching EOF / a read failure disarms the timer (Go's `cancelTimerBody.Read`/`Close` stopping the timer), and the transport's per-read context race already enforces the deadline mid-body. On any error during the round trip the timer is cancelled and the error re-raised. **No `.mli` change** — `do_`/`get`/`post`/`head` signatures are unchanged.
+- `lib/server.ml` — **bug fix surfaced by the new client path:** the Ticket-2 streaming response path terminated a chunked stream with only `chunked_writer_close oc` (= `"0\r\n"`), omitting the trailing CRLF that ends the (empty) trailer block. A kept-alive client that reads the chunked trailer (`Io.stream_body` → `read_mime_header`) then blocks forever waiting for the blank line. Fixed to write `"0\r\n"` **then `"\r\n"`** (mirroring Go's `chunkWriter.close` and `Transfer.write_body`/`after_body`). This was previously unexercised: existing chunked server tests read to EOF on connection close, and clientserver tests used Content-Length responses, so no client ever read a chunked-keep-alive trailer. **No `.mli` change** (internal serve loop).
+
+*How reuse is gated on body drain:* `round_trip` decides reusability before handing back the body and installs a one-shot release on the streaming body's EOF. The connection returns to the idle pool only when the caller pulls the body to `None` (via `Body.read_all` or `Body.drain`) — exactly Go's "connection returns to the pool after the body is fully read + closed". If the caller never drains, the connection is simply not reused.
+
+*How cancellation aborts mid-body:* the wrapped body's `next` does `Lwt.choose [ inner (); Context.done_ req.ctx >>= raise cause ]` on every read. When the request context (an explicit `?context`, or the client `timeout` deadline composed onto it) fires while a body read is outstanding, the choose rejects with the context cause, the connection is **closed** (not pooled), and the cause propagates to the caller. The `cancel_mid_body` test exercises this; the existing `Context.deadline_aborts`/`cancel_aborts` tests (which fire during the headers read) still pass via the unchanged `exchange_with_ctx` race.
+
+*Tests adapted + why:* **none required.** The existing client/transport/context/h2 tests already consume the response body with `Body.read_all` before inspecting reuse/state (`test_clientserver.ml`'s `keepalive_reuse` reads `resp1.body` then checks `dial_count`; `test_context.ml`/`test_h2_clientserver.ml` likewise), and the cancellation tests abort during the headers phase. All 443 prior tests stayed green with no assertion weakened. (The legitimate `read_all`/`drain` adaptation noted in the migration strategy turned out to be already in place from Ticket 1.)
+
+*New tests:* `test/test_stream_client.ml` (`val tests`, real loopback `Server.listen_and_serve_started` + gohttp `Client`, each bounded by `Net.with_timeout` over `Lwt_main.run`), wired into `test/test_gohttp.ml` as `("StreamClient", Test_stream_client.tests)` — **3 cases:**
+  - `client_body_streamed` (**Success Criterion**): handler writes `"FIRST"`, flushes, then **blocks on a promise the test resolves only after it has read that first chunk** from the response body, then streams 200×1024 bytes. The test asserts the first chunk (`"FIRST"`) is readable **while the handler is still suspended** (`Lwt.state released = Sleep`) — proving no pre-materialization — and that the full drained body (`first ^ read_all`) equals the exact concatenation (`"FIRST"` + 200·1KiB).
+  - `reuse_after_drain`: two sequential `Client.get`s on one client/transport; after `Body.drain resp1.body` the test asserts `idle_count = 1` (connection pooled) and `dial_count = 1`, then the second `Client.get` reuses it (`dial_count` still `1`).
+  - `cancel_mid_body`: handler writes one chunk, flushes, then sleeps 5s; client uses a `~context` with a 0.3s timeout — the first chunk reads fine but the next body read races the expired context and aborts with `Context.Deadline_exceeded` (not a full body).
+
+*Evidence / counts:* `dune build` clean (dev profile, warnings-as-errors). `dune exec test/test_gohttp.exe` → **446 tests run, Test Successful in ~1.66s** (terminates) — 443 prior all green + 3 new StreamClient (`client_body_streamed`, `reuse_after_drain`, `cancel_mid_body` all `[OK]`). New total **446** = 443 + 3. First-chunk-before-EOF asserted (`client_body_streamed`); reuse-after-drain asserted via `dial_count`/`idle_count` (`reuse_after_drain`); mid-body cancellation asserted (`cancel_mid_body`).
+
+Status: Done.
 
 ### Ticket 4 — HTTP/2 streaming alignment
 Status: Planned

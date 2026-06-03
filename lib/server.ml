@@ -570,7 +570,15 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
      (* Streaming already started. Flush any residual buffered bytes, then
         terminate the framing: close the chunk stream when chunking. *)
      flush_buffered () >>= fun () ->
-     (if !chunking then Transfer.chunked_writer_close oc else Lwt.return_unit)
+     (* Terminate the chunk stream: the 0-chunk size line ([chunked_writer_close]
+        writes ["0\r\n"]) followed by the trailing CRLF that ends the (empty)
+        trailer block — mirroring Go's [chunkWriter.close] and {!Transfer}'s
+        [write_body]/[after_body]. Without the final CRLF a kept-alive peer that
+        reads the chunked trailer (e.g. {!Io.stream_body}) blocks waiting for
+        the blank line. *)
+     (if !chunking then
+        Transfer.chunked_writer_close oc >>= fun () -> Lwt_io.write oc "\r\n"
+      else Lwt.return_unit)
      >>= fun () -> Lwt_io.flush oc >>= fun () ->
      Lwt.return (not !close_after_reply)
    end)

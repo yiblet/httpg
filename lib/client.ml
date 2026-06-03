@@ -99,9 +99,13 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
           (* 3xx without Location: hand the response back, as Go does. *)
           Lwt.return resp
       | Some loc_url ->
-          (* Drain/close the previous response body so the connection can be
-             reused (Go reads up to maxBodySlurpSize then closes). The body is
-             already materialized; nothing to drain. *)
+          (* Drain the previous response body so its connection returns to the
+             idle pool before the next hop (Go reads up to [maxBodySlurpSize]
+             then closes — closing releases the connection). The body now
+             streams, so this drain is what actually advances the connection to
+             EOF and fires its pool-return action; without it the next hop would
+             dial a fresh connection. *)
+          Body.drain resp.Response.body >>= fun () ->
           let include_body = include_body && include_body_on_hop in
           let strip_sensitive = url_host loc_url <> initial_host in
           let new_header = Header.create () in
@@ -139,6 +143,27 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   in
   loop req [] true
 
+(* Wrap [resp]'s body so that reaching EOF (or a read failure) disarms the
+   deadline timer via [cancel] (Go's [cancelTimerBody.Read]/[Close] stopping the
+   timer once the body is fully consumed). [cancel] is idempotent on the context
+   (a second call after [done_] is a no-op), so this is safe even if the body is
+   never read (the timer then fires and disarms itself). Empty/String bodies are
+   already complete: disarm immediately. *)
+let wrap_timer_body ~cancel (resp : Body.t Response.t) : Body.t Response.t =
+  (match resp.Response.body with
+  | Body.Empty | Body.String _ -> cancel Context.Canceled
+  | Body.Stream inner ->
+    let next () =
+      Lwt.try_bind
+        (fun () -> inner ())
+        (function
+          | Some _ as chunk -> Lwt.return chunk
+          | None -> cancel Context.Canceled; Lwt.return_none)
+        (fun exn -> cancel Context.Canceled; Lwt.fail exn)
+    in
+    resp.Response.body <- Body.Stream next);
+  resp
+
 let do_ ?context c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   (* Apply the caller-supplied per-request context (Go's req.Context()) before
      the exchange; when omitted the request keeps its existing [ctx]. *)
@@ -147,17 +172,25 @@ let do_ ?context c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   | None -> do_one c req
   | Some secs ->
       (* Go's Client.Timeout = context.WithDeadline over the request context,
-         covering the whole exchange. Because {!Io.read_response} materializes
-         the response body fully in memory during the round trip, this deadline
-         also covers the body read (Go's cancelTimerBody wraps the streaming
-         body; here the body is already buffered, so no extra wrapper is
-         needed). The timer is cancelled when [do_one] completes to avoid a
-         leak. *)
+         covering the whole exchange {b including the streaming body read} (Go's
+         [cancelTimerBody] wraps [resp.Body] so the deadline keeps running until
+         the body is consumed). Our response body now streams, and
+         {!Transport.round_trip} races each body read against the same request
+         context — so the deadline applies until the caller drains/reads the
+         body. We therefore must NOT cancel the timer when [do_one] returns the
+         response (the headers arrived but the body is still in flight); doing so
+         would let an unbounded body read run past the deadline. Instead, on
+         success we leave the deadline armed and {b wrap the response body} so
+         that draining it to EOF (or a context cancellation) disarms the timer
+         — mirroring [cancelTimerBody.Close]/EOF stopping the timer. On failure
+         (the deadline fired, or any other error) we cancel and re-raise. *)
       let ctx, cancel = Context.with_timeout req.Request.ctx secs in
       let req = Request.with_context req ctx in
-      Lwt.finalize
+      Lwt.try_bind
         (fun () -> do_one c req)
-        (fun () -> cancel Context.Canceled; Lwt.return_unit)
+        (fun resp ->
+          Lwt.return (wrap_timer_body ~cancel resp))
+        (fun exn -> cancel Context.Canceled; Lwt.fail exn)
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
