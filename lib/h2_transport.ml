@@ -791,6 +791,11 @@ let close cc : unit Lwt.t =
   signal_reader_done cc None;
   Lwt.catch (fun () -> Lwt_io.close cc.oc) (fun _ -> Lwt.return_unit)
 
+(* Whether the connection is closed / no longer usable (Go's [closed] / the
+   negation of [canTakeNewRequest]). Exposed so a transport pool can drop dead
+   connections. *)
+let is_closed cc = cc.closed || cc.closing
+
 (* ---- minimal connection pool (client_conn_pool.go subset) ---- *)
 
 type t = { conns : (string, client_conn list) Hashtbl.t }

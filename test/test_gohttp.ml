@@ -33,4 +33,5 @@ let () =
       ("H2Tls", Test_h2_tls.tests);
       ("H2Server", Test_h2_server.tests);
       ("H2Transport", Test_h2_transport.tests);
+      ("H2ClientServer", Test_h2_clientserver.tests);
     ]

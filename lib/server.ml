@@ -540,6 +540,114 @@ let listen_and_serve ~addr ~port handler =
   Net.listen (if addr = "" then "0.0.0.0" else addr) port
   >>= fun listen_fd -> serve srv listen_fd
 
+(* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
+
+(* The default ALPN protocols advertised by the TLS server, in descending order
+   of preference (Go's [http2.NextProtoTLS] + ["http/1.1"]). *)
+let default_alpn_protocols = [ "h2"; "http/1.1" ]
+
+(* Adapt an HTTP/1.x [Server.handler] into an [H2_server.handler]: build the
+   H2 response_writer, expose it to the user handler as a {!response_writer}
+   (the H2 writer minus [flush]), run the handler, then flush the buffered
+   headers/body onto the wire. The two writer types are structurally identical
+   apart from H2's extra [flush] (which the serve loop drives), so the bridge is
+   a straight field projection. *)
+let h2_handler_of_handler (handler : handler) : H2_server.handler =
+ fun (h2w : H2_server.response_writer) (r : Body.t Request.t) ->
+  let w =
+    {
+      header = h2w.H2_server.header;
+      write_header = h2w.H2_server.write_header;
+      write = h2w.H2_server.write;
+    }
+  in
+  handler.serve_http w r >>= fun () -> h2w.H2_server.flush ()
+
+(* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
+   "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the
+   existing HTTP/1.x serve loop over the TLS channels. *)
+let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
+  match alpn with
+  | Some "h2" ->
+      Lwt.finalize
+        (fun () -> H2_server.serve ic oc ~handler:(h2_handler_of_handler handler))
+        (fun () ->
+          Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
+          >>= fun () ->
+          Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
+  | _ ->
+      (* HTTP/1.x over TLS: reuse the plaintext serve loop. It already wraps the
+         channels in a keep-alive loop with per-conn/per-request contexts and
+         closes the channels in its finalizer. *)
+      let remote = Net.sockaddr_to_string peer in
+      let conn_ctx, cancel_conn = Context.with_cancel Context.background in
+      let rec loop () =
+        Lwt.catch
+          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (Some r))
+          (fun _ -> Lwt.return None)
+        >>= function
+        | None -> Lwt.return_unit
+        | Some r ->
+            r.Request.remote_addr <- remote;
+            let req_ctx, cancel_req = Context.with_cancel conn_ctx in
+            r.Request.ctx <- req_ctx;
+            Lwt.catch
+              (fun () -> serve_one oc r handler)
+              (fun _ -> Lwt.return false)
+            >>= fun keep_alive ->
+            cancel_req Context.Canceled;
+            if keep_alive then loop () else Lwt.return_unit
+      in
+      Lwt.finalize loop (fun () ->
+          cancel_conn Context.Canceled;
+          Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
+          >>= fun () ->
+          Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
+
+(* Go's Server.ServeTLS over a [Net.tls_server]: accept + handshake each
+   connection, dispatch by ALPN, until [srv.stop] resolves. *)
+let serve_tls srv (tls_srv : Net.tls_server) =
+  srv.listen_fd <- Some (Net.tls_listen_fd tls_srv);
+  let rec accept_loop () =
+    let accept_p =
+      Lwt.map (fun c -> `Conn c) (Net.accept_tls tls_srv)
+    in
+    let stop_p = Lwt.map (fun () -> `Stop) srv.stop in
+    Lwt.choose [ accept_p; stop_p ] >>= function
+    | `Stop -> Lwt.return_unit
+    | `Conn conn ->
+        Lwt.async (fun () ->
+            Lwt.catch
+              (fun () -> serve_tls_conn srv.handler conn)
+              (fun _ -> Lwt.return_unit));
+        accept_loop ()
+  in
+  Lwt.catch accept_loop (fun _ -> Lwt.return_unit)
+
+(* Go's Server.ListenAndServeTLS: bind addr:port with TLS + ALPN and serve,
+   dispatching h2/http1 by the negotiated protocol. *)
+let listen_and_serve_tls ~certificates ?(alpn = default_alpn_protocols) ~addr
+    ~port handler =
+  let srv = create ~addr ~port handler in
+  Net.listen_tls ~certificates ~alpn (if addr = "" then "0.0.0.0" else addr)
+    port
+  >>= fun tls_srv -> serve_tls srv tls_srv
+
+(* Like {!listen_and_serve_tls} but binds first and returns the running server,
+   the bound port and the serve loop promise, so tests can connect over an
+   ephemeral TLS port and {!close}. *)
+let listen_and_serve_tls_started ~certificates ?(alpn = default_alpn_protocols)
+    ~addr ~port handler =
+  let srv = create ~addr ~port handler in
+  Net.listen_tls ~certificates ~alpn (if addr = "" then "0.0.0.0" else addr)
+    port
+  >>= fun tls_srv ->
+  let lfd = Net.tls_listen_fd tls_srv in
+  srv.listen_fd <- Some lfd;
+  let bound = Net.bound_port lfd in
+  let serve_t = serve_tls srv tls_srv in
+  Lwt.return (srv, bound, serve_t)
+
 (* Like listen_and_serve but returns the [Server.t] and the bound port via a
    callback once the listener is up, so tests can connect to an ephemeral
    port and stop the server. *)

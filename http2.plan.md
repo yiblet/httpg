@@ -346,7 +346,7 @@ Status: Done
 - **Commit:** `feat(h2): port HTTP/2 client transport (ClientConn, multiplexed round trips) (H2 Ticket 9)` (single jj change; id reported to orchestrator).
 
 ### Ticket 10 — ALPN wiring + end-to-end integration
-Status: Planned
+Status: Done
 
 **A) Scope** Wire it together: `Server.listen_and_serve` (and a new TLS variant) uses `Net.listen_tls` with ALPN `["h2";"http/1.1"]` and dispatches each accepted connection to `H2_server.serve` or the HTTP/1.x serve loop by negotiated protocol; `Transport`/`Client` connect with ALPN and use `H2_transport` when "h2" is negotiated (or when forced), falling back to HTTP/1.x. Optional `h2c` stretch only if cheap.
 
@@ -360,4 +360,30 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; e2e tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Files modified:**
+  - `lib/server.ml` + `lib/server.mli` — added the HTTP/2-over-TLS dispatch. New public entry points: `default_alpn_protocols = ["h2"; "http/1.1"]`; `listen_and_serve_tls : certificates:Tls.Config.certchain -> ?alpn:string list -> addr:string -> port:int -> handler -> unit Lwt.t` (Go's `ListenAndServeTLS`); and `listen_and_serve_tls_started` (the bind-first/return-port variant for tests, mirroring `listen_and_serve_started`). Internals: `serve_tls srv tls_srv` is the accept loop over a `Net.tls_server` (`Net.accept_tls` does the handshake + ALPN readout per connection), racing `Net.accept_tls` against the server's `stop` promise exactly like the plaintext `serve`; each accepted connection is dispatched in its own `Lwt.async` fiber by `serve_tls_conn`. **Plaintext `listen_and_serve`/`serve` are unchanged.**
+  - `lib/transport.ml` + `lib/transport.mli` — ALPN-driven client protocol selection. `round_trip` gained `?force_h2:bool` (default false). For `scheme = "https"` (or `force_h2`) the dial now uses `Net.connect_alpn ~alpn:["h2"; "http/1.1"]` (`force_h2` advertises only `["h2"]`) via a new `dial_alpn` helper that returns the negotiated protocol; the legacy `dial` is `dial_alpn … ~force_h2:false` discarding it. A new h2 connection pool `h2_conns : (string, H2_transport.client_conn) Hashtbl.t` keyed by authority `"host:port"` (parallel to the existing h1 `idle_conn` pool) reuses live `client_conn`s (evicting via `H2_transport.is_closed`). Plaintext `http` keeps the unchanged HTTP/1.x `attempt` path. New test hook `h2_round_trip_count : t -> int`.
+  - `lib/h2_transport.ml` + `lib/h2_transport.mli` — added `is_closed : client_conn -> bool` (`closed || closing`) so the transport pool can evict dead h2 conns.
+  - `bin/main.ml` — extended the demo to also do a TLS+ALPN h2 round trip (`Server.listen_and_serve_tls_started` advertising `["h2"; "http/1.1"]` + `Client.get` over `https://…`, printing the h2 round-trip count). Both demos run and print 200 + body (verified: plaintext h1 and `h2 round trips: 1`).
+- **How the dispatch / adapter works:**
+  - **Server dispatch:** `serve_tls_conn` branches on the negotiated ALPN string from `Net.accept_tls`: `Some "h2"` → `H2_server.serve ic oc ~handler:(h2_handler_of_handler handler)`; anything else (incl. no ALPN) → the existing HTTP/1.x keep-alive serve loop (`Io.read_request`/`serve_one`) over the same TLS channels, with per-conn/per-request `Context` cancellation matching the plaintext path. Channels are closed in the finalizer either way.
+  - **Server adapter (`Server.handler` ↔ `H2_server`):** the two `response_writer` types are structurally identical except `H2_server.response_writer` adds a `flush`. `h2_handler_of_handler` builds the `H2_server.response_writer`, projects it to a `Server.response_writer` (the three shared fields `header`/`write_header`/`write`, dropping `flush`), runs the user's `serve_http w r`, then calls `h2w.flush ()` to push the buffered headers/body onto the wire. No shared-signature refactor was needed — a straight field projection bridges them, keeping the single existing `Server.handler` type serving both protocols.
+  - **Client routing:** `Transport.round_trip` for https first tries a pooled h2 `client_conn` for the authority; otherwise dials with ALPN. Negotiated `"h2"` → `H2_transport.new_client_conn` (pooled by authority) + `H2_transport.round_trip`; negotiated `http/1.1`/none → the HTTP/1.x exchange over the freshly-dialed channels. The client accepts the self-signed test cert via the existing `Net.connect_alpn` → `null_authenticator` path. `Client.get`/`post`/`head` signatures are unchanged; they gain the h2 behavior transparently because `Client.do_` composes `Transport.round_trip`.
+- **Files created:**
+  - `test/test_h2_clientserver.ml` (new) — 2 e2e cases over **real loopback TLS** (`Server.listen_and_serve_tls_started` on an ephemeral port with `Net.test_server_certificate`), bounded by `Net.with_timeout 30.`:
+    - **`clientserver_roundtrip` (THE SUCCESS CRITERION):** server advertises `["h2"; "http/1.1"]`; the gohttp `Client` (https) does a GET (`/hello` ⇒ 200 + `"hello, h2"`) then a POST (`/echo` ⇒ echoed `"ping-pong"`), both on the **same pooled, multiplexed h2 connection**; asserts `Transport.h2_round_trip_count = 2` (proving h2 was used for both).
+    - **`http11_fallback`:** server advertises only `["http/1.1"]`; the same gohttp Client over TLS is served by the HTTP/1.x path ⇒ 200 + body, with `h2_round_trip_count = 0`.
+  - `test/test_gohttp.ml` — wired `("H2ClientServer", Test_h2_clientserver.tests)`.
+- **Test evidence:** baseline `jj st` clean + `dune build`/`dune test` = **432** green. After: `dune build` clean, `dune test --force` = **434 tests run, Test Successful** (terminates in ~1.33s — all e2e bounded by `Net.with_timeout`, no hang). New **H2ClientServer** suite = **2** cases (432 + 2 = 434). **Success Criterion `H2.clientserver_roundtrip` passes** (GET 200 + body, POST echoed body, both over h2 on one multiplexed connection — `h2_round_trip_count = 2`), **and the http/1.1 fallback works** (200 + body, `h2_round_trip_count = 0`). All prior 432 tests stay green.
+- **Go behaviors omitted / artifacts:** **h2c cleartext upgrade** — left unimplemented (plan optional/stretch; TLS-ALPN is the required path). **Client `?force_h2`** is exposed on `Transport.round_trip` but not threaded through `Client.get`/`post`/`head` (their signatures are kept per the ticket; the Success Criterion exercises natural ALPN negotiation over https rather than forcing). The h2 conn pool is a minimal authority→single-conn reuse (no `maxConcurrentStreams` admission control / idle-timeout eviction beyond `is_closed`) — matching the Ticket-9 pool scope. `h2_round_trip_count` is an OCaml test hook with no Go analogue (used to assert the path taken).
+- **Commit:** `feat(h2): wire ALPN h2 into Server/Client with TLS and h1 fallback (H2 Ticket 10)` (single jj change; id reported to orchestrator).
+
+Status: Done
+
+---
+
+## HTTP/2 plan complete
+
+All 10 tickets are **Done**. gohttp now ports Go's `net/http` HTTP/2 stack end-to-end: HPACK (Huffman + static/dynamic tables + encoder/decoder), the frame layer (Framer + all frame types), flow control / data buffer / stream pipe, the write framers + round-robin scheduler, the `H2_server` connection (serverConn + stream state machine), the `H2_transport` client (multiplexed `ClientConn` + pool), server-side TLS + ALPN in `Net`, and — this ticket — the public `Server`/`Client` transparently selecting HTTP/2 over TLS via ALPN with HTTP/1.1 fallback. Final suite: **434 tests green**. The two RFC Success Criteria (`Hpack.roundtrip`, `Frame.roundtrip`) and the integration Success Criterion (`H2.clientserver_roundtrip`: real TLS+ALPN gohttp server ↔ client over `h2`, GET + POST on one multiplexed connection) all pass.

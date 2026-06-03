@@ -103,3 +103,37 @@ val listen_and_serve_started :
   port:int ->
   handler ->
   (t * int * unit Lwt.t) Lwt.t
+
+(* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
+
+(** The default ALPN protocols advertised by {!listen_and_serve_tls}, in
+    descending order of preference: [["h2"; "http/1.1"]] (Go's
+    [http2.NextProtoTLS] + ["http/1.1"]). *)
+val default_alpn_protocols : string list
+
+(** Go's [ListenAndServeTLS]: bind [addr]:[port] with server-side TLS carrying
+    [certificates] and advertising the ALPN protocols [alpn] (default
+    {!default_alpn_protocols}), then serve [handler] over each accepted
+    connection — dispatching to the HTTP/2 server connection ({!H2_server.serve})
+    when the negotiated ALPN protocol is ["h2"], and to the existing HTTP/1.x
+    serve loop otherwise (incl. when no ALPN protocol was agreed). The same
+    {!handler} serves both protocols (the h2 path adapts it via the
+    {!H2_server} response_writer). *)
+val listen_and_serve_tls :
+  certificates:Tls.Config.certchain ->
+  ?alpn:string list ->
+  addr:string ->
+  port:int ->
+  handler ->
+  unit Lwt.t
+
+(** Like {!listen_and_serve_tls} but binds first and returns the running
+    [Server.t], the bound port (useful with an ephemeral [port = 0]) and the
+    serve loop promise — so tests can connect over TLS and {!close}. *)
+val listen_and_serve_tls_started :
+  certificates:Tls.Config.certchain ->
+  ?alpn:string list ->
+  addr:string ->
+  port:int ->
+  handler ->
+  (t * int * unit Lwt.t) Lwt.t

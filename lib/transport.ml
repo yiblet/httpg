@@ -36,10 +36,21 @@ type t = {
      no exact analogue, but it lets the keep-alive-reuse test assert that a
      second request did NOT open a second connection). *)
   mutable dials : int;
+  (* HTTP/2 connection pool (Go's [Transport.h2transport] / clientConnPool):
+     keyed by authority ["host:port"], reused for multiplexed requests. *)
+  h2_conns : (string, H2_transport.client_conn) Hashtbl.t;
+  (* Test hook: how many requests this transport has served over h2. *)
+  mutable h2_round_trips : int;
 }
 
 let create () =
-  { idle_conn = Hashtbl.create 8; disable_keep_alives = false; dials = 0 }
+  {
+    idle_conn = Hashtbl.create 8;
+    disable_keep_alives = false;
+    dials = 0;
+    h2_conns = Hashtbl.create 8;
+    h2_round_trips = 0;
+  }
 
 (* Go's connectMethodKey.String(): "scheme|host:port" (no proxy here). *)
 let conn_key ~scheme ~host ~port = Printf.sprintf "%s|%s:%d" scheme host port
@@ -82,10 +93,28 @@ let close_conn pc =
   Lwt.catch (fun () -> Lwt_io.close pc.oc) (fun _ -> Lwt.return_unit)
   >>= fun () -> Lwt.catch (fun () -> Lwt_io.close pc.ic) (fun _ -> Lwt.return_unit)
 
-let dial t ~scheme ~host ~port =
+(* The ALPN protocols advertised for an https dial (Go's
+   [Transport.TLSClientConfig.NextProtos] with HTTP/2 enabled): h2 preferred,
+   http/1.1 fallback. *)
+let h2_alpn_protocols = [ "h2"; "http/1.1" ]
+
+(* Dial a fresh connection, optionally advertising ALPN for an https dial.
+   Returns the channels plus the negotiated ALPN protocol ([None] for plaintext
+   or when no protocol was agreed). [force_h2] advertises only ["h2"]. *)
+let dial_alpn t ~scheme ~host ~port ~force_h2 =
   t.dials <- t.dials + 1;
   let tls = scheme = "https" in
-  Net.connect ~host ~port ~tls () >>= fun (ic, oc) -> Lwt.return { ic; oc }
+  let alpn =
+    if force_h2 then Some [ "h2" ]
+    else if tls then Some h2_alpn_protocols
+    else None
+  in
+  Net.connect_alpn ~host ~port ~tls ?alpn () >>= fun (ic, oc, negotiated) ->
+  Lwt.return ({ ic; oc }, negotiated)
+
+let dial t ~scheme ~host ~port =
+  dial_alpn t ~scheme ~host ~port ~force_h2:false >>= fun (pc, _) ->
+  Lwt.return pc
 
 (* Decide whether a connection can be returned to the pool after this exchange,
    mirroring Go's persistConn.alive / shouldRetryRequest plumbing reduced to the
@@ -104,12 +133,36 @@ let set_default_headers (req : Body.t Request.t) ~host =
   if Header.get req.Request.header "User-Agent" = "" then
     Header.set req.Request.header "User-Agent" default_user_agent
 
-(* Go's Transport.RoundTrip (HTTP/1.x path). The optional [?context] is an API
-   ergonomics layer over Go's req.Context(): when supplied it is applied to the
-   request before the round trip (so the [Context.done_ req.ctx] race below
-   uses it); when omitted the request's existing [ctx] is used (defaulting to
-   [Context.background]). *)
-let round_trip ?context t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+(* The authority key for the h2 connection pool: ["host:port"]. *)
+let h2_authority ~host ~port = Printf.sprintf "%s:%d" host port
+
+(* Whether a pooled h2 connection is still usable. *)
+let h2_conn_usable cc = not (H2_transport.is_closed cc)
+
+(* Get (or [None]) a usable pooled h2 connection for [authority]. *)
+let get_h2_conn t authority =
+  match Hashtbl.find_opt t.h2_conns authority with
+  | Some cc when h2_conn_usable cc -> Some cc
+  | Some _ ->
+      Hashtbl.remove t.h2_conns authority;
+      None
+  | None -> None
+
+(* The h2 request/response exchange over [cc], counted for the test hook. *)
+let h2_round_trip t cc req =
+  t.h2_round_trips <- t.h2_round_trips + 1;
+  H2_transport.round_trip cc req
+
+(* Go's Transport.RoundTrip. For https (or when [force_h2]) the dial advertises
+   ALPN ["h2"; "http/1.1"]; if "h2" is negotiated the request is multiplexed
+   over a pooled {!H2_transport.client_conn} (keyed by authority), otherwise the
+   existing HTTP/1.x path runs over the dialed channels. Plaintext http always
+   uses HTTP/1.x. The optional [?context] is an API ergonomics layer over Go's
+   req.Context(): when supplied it is applied to the request before the round
+   trip (so the [Context.done_ req.ctx] race below uses it); when omitted the
+   request's existing [ctx] is used (defaulting to [Context.background]). *)
+let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
+    Body.t Response.t Lwt.t =
   (match context with Some ctx -> req.Request.ctx <- ctx | None -> ());
   let scheme, host, port = scheme_host_port req in
   if host = "" then
@@ -117,6 +170,14 @@ let round_trip ?context t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   else begin
   let key = conn_key ~scheme ~host ~port in
   set_default_headers req ~host;
+  let authority = h2_authority ~host ~port in
+  let want_h2 = force_h2 || scheme = "https" in
+  (* HTTP/2 fast path: reuse a pooled h2 connection for this authority. *)
+  let h2_reuse () =
+    match get_h2_conn t authority with
+    | Some cc -> Some (h2_round_trip t cc req)
+    | None -> None
+  in
   (* Obtain a connection: reuse an idle one or dial a fresh one. *)
   let acquire () =
     match get_idle_conn t key with
@@ -184,11 +245,30 @@ let round_trip ?context t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
         if was_idle && allow_retry && not ctx_done then attempt ~allow_retry:false
         else Lwt.fail exn)
   in
-  attempt ~allow_retry:true
+  (* When HTTP/2 is wanted, try a pooled h2 conn first; otherwise dial with
+     ALPN and either establish an h2 ClientConn (negotiated "h2") or fall through
+     to the HTTP/1.x path over the freshly-dialed channels (negotiated
+     http/1.1 / none). Plaintext http skips all of this. *)
+  if want_h2 then
+    match h2_reuse () with
+    | Some p -> p
+    | None ->
+        dial_alpn t ~scheme ~host ~port ~force_h2 >>= fun (pc, negotiated) ->
+        if negotiated = Some "h2" then
+          H2_transport.new_client_conn pc.ic pc.oc >>= fun cc ->
+          Hashtbl.replace t.h2_conns authority cc;
+          h2_round_trip t cc req
+        else
+          (* Reuse the dialed channels for the HTTP/1.x exchange. *)
+          Lwt.catch
+            (fun () -> exchange_with_ctx pc)
+            (fun exn -> close_conn pc >>= fun () -> Lwt.fail exn)
+  else attempt ~allow_retry:true
   end
 
 (* Test/inspection hooks. *)
 let dial_count t = t.dials
+let h2_round_trip_count t = t.h2_round_trips
 let idle_count t key = match Hashtbl.find_opt t.idle_conn key with
   | Some l -> List.length l
   | None -> 0

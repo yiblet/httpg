@@ -52,6 +52,12 @@ val round_trip : client_conn -> Body.t Request.t -> Body.t Response.t Lwt.t
     streams. Mirrors Go's [ClientConn.Close]. *)
 val close : client_conn -> unit Lwt.t
 
+(** [is_closed cc] is [true] once the connection has been closed (cleanly or by
+    a reader error) or is shutting down — i.e. it can no longer take new
+    requests. Mirrors the negation of Go's [canTakeNewRequest]; exposed so a
+    transport pool can evict dead connections. *)
+val is_closed : client_conn -> bool
+
 (* ---- minimal connection pool (client_conn_pool.go subset) ---- *)
 
 (** A transport: a connection pool keyed by authority string ([host:port]).
