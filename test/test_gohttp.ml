@@ -24,4 +24,5 @@ let () =
       ("H2", Test_h2.tests);
       ("HpackTables", Test_hpack_tables.tests);
       ("Hpack", Test_hpack.tests);
+      ("H2Frame", Test_h2_frame.tests);
     ]
