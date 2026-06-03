@@ -3,14 +3,13 @@
    [serveFile]/[FileServer], [dirList], [toHTTPError], [localRedirect], the
    path-cleaning + [containsDotDot] traversal guard.
 
-   {b Stubbed for later tickets:} the conditional-request branch
-   ([checkPreconditions] — If-Match / If-Unmodified-Since / If-None-Match /
-   If-Modified-Since, 304 / 412) is reduced to {!check_preconditions} which
-   currently never short-circuits (always "serve full 200") — Ticket 4 fills it
-   in. The byte-range branch ([parseRange]/[httpRange]/If-Range, 206 /
-   multipart/byteranges / 416) is omitted here: {!serve_content} always sends a
-   full 200 with [Accept-Ranges: bytes] — Ticket 5 fills it in. A clear hook is
-   left in {!serve_content} where the range header is read. *)
+   The conditional-request branch ([checkPreconditions] — If-Match /
+   If-Unmodified-Since / If-None-Match / If-Modified-Since / If-Range, 304 / 412)
+   is fully ported (Ticket 4). The byte-range branch
+   ([parseRange]/[httpRange], 206 / multipart/byteranges / 416) is still omitted
+   here: {!serve_content} sends a full 200 with [Accept-Ranges: bytes] for a
+   honored Range header — Ticket 5 fills it in. A clear hook is left in
+   {!serve_content} where the range header is read. *)
 
 (** Go's [fs.FileInfo] subset that this port needs: the bits [serveFile] reads
     off a [Stat]. *)
@@ -72,12 +71,24 @@ val local_redirect :
 val dir_list :
   Server.response_writer -> Body.t Request.t -> file -> unit Lwt.t
 
-(** [check_preconditions w r ~modtime] is the Ticket-3 stub of Go's
-    [checkPreconditions]: it returns [(done_, range_header)] where [done_] is
-    whether a precondition already produced the whole response (currently always
-    [false]) and [range_header] is the request's [Range] header passed through
-    (currently the raw value; the If-Range gate is added in Ticket 5). Ticket 4
-    replaces the body with the real RFC 7232 precondition machinery. *)
+(** Go's [scanETag]: if a syntactically valid ETag (either ["\"text\""] or
+    [W/"text"], RFC 7232 2.3) is present at the start of the (trimmed) input,
+    returns [Some (etag, remain)] with the matched ETag and the text after it;
+    otherwise [None]. *)
+val scan_etag : string -> (string * string) option
+
+(** Go's [checkPreconditions]: evaluate request preconditions per RFC 7232
+    section 6 against [modtime] and the response's handler-set [Etag] header.
+    Returns [(done_, range_header)]: if a precondition short-circuits the
+    response it writes it ({b 304} via [writeNotModified] — clears
+    Content-Type/Length/Encoding, drops Last-Modified when an Etag is set, status
+    304 no body — for a matched If-None-Match/If-Modified-Since on GET/HEAD, or
+    {b 412} Precondition Failed for a failed If-Match/If-Unmodified-Since, or for
+    a matched If-None-Match on a non-GET/HEAD method) and returns [done_ = true].
+    Otherwise [done_ = false] and [range_header] is the request's [Range] header,
+    blanked out when an If-Range condition fails (so the range is not honored).
+    Precedence: If-Match → If-Unmodified-Since → If-None-Match →
+    If-Modified-Since, then If-Range. *)
 val check_preconditions :
   Server.response_writer -> Body.t Request.t -> modtime:float -> bool * string
 

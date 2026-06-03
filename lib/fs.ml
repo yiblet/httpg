@@ -242,15 +242,214 @@ let dir_list w (r : Body.t Request.t) (f : file) =
         entries
       >>= fun () -> w.Server.write "</pre>\n"
 
-(* ---- preconditions (Ticket 3 stub) ---- *)
+(* ---- preconditions (Go fs.go: checkPreconditions + helpers) ---- *)
 
-(* TICKET 4 HOOK: replace this with the real RFC 7232 checkPreconditions
-   (checkIfMatch / checkIfUnmodifiedSince / checkIfNoneMatch /
-   checkIfModifiedSince → 304 / 412). For now never short-circuits; passes the
-   raw Range header through (TICKET 5 will gate it via checkIfRange). *)
-let check_preconditions _w (r : Body.t Request.t) ~modtime:_ =
-  let range_req = Header.get r.Request.header "Range" in
-  (false, range_req)
+(* Go isZeroTime: t is obviously unspecified (zero or Unix()=0). Our modtime is
+   Unix-epoch seconds, so both collapse to 0.0. *)
+let is_zero_time t = t = 0.0
+
+(* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
+let trim_string s =
+  let n = String.length s in
+  let is_ws c = c = ' ' || c = '\t' in
+  let i = ref 0 in
+  while !i < n && is_ws s.[!i] do
+    incr i
+  done;
+  let j = ref (n - 1) in
+  while !j >= !i && is_ws s.[!j] do
+    decr j
+  done;
+  if !j < !i then "" else String.sub s !i (!j - !i + 1)
+
+(* Go scanETag: returns Some (etag, remain) if a syntactically valid ETag is
+   present at the start of [s] (after trimming), else None. An ETag is either
+   W/"text" or "text" (RFC 7232 2.3). *)
+let scan_etag s =
+  let s = trim_string s in
+  let n = String.length s in
+  let start =
+    if n >= 2 && s.[0] = 'W' && s.[1] = '/' then 2 else 0
+  in
+  if n - start < 2 || s.[start] <> '"' then None
+  else begin
+    (* scan from start+1 for the closing quote, validating ETag chars *)
+    let rec loop i =
+      if i >= n then None
+      else
+        let c = Char.code s.[i] in
+        if c = 0x21 || (c >= 0x23 && c <= 0x7E) || c >= 0x80 then loop (i + 1)
+        else if s.[i] = '"' then
+          Some (String.sub s 0 (i + 1), String.sub s (i + 1) (n - i - 1))
+        else None
+    in
+    loop (start + 1)
+  end
+
+(* Go etagStrongMatch: a == b && a != "" && a[0] == '"'. *)
+let etag_strong_match a b =
+  a = b && a <> "" && a.[0] = '"'
+
+(* Go etagWeakMatch: strings.TrimPrefix(a,"W/") == strings.TrimPrefix(b,"W/"). *)
+let etag_weak_match a b =
+  let strip s =
+    if String.length s >= 2 && s.[0] = 'W' && s.[1] = '/' then
+      String.sub s 2 (String.length s - 2)
+    else s
+  in
+  strip a = strip b
+
+(* condResult. *)
+type cond_result = Cond_none | Cond_true | Cond_false
+
+(* Go checkIfMatch. *)
+let check_if_match w (r : Body.t Request.t) =
+  let im = Header.get r.Request.header "If-Match" in
+  if im = "" then Cond_none
+  else begin
+    let etag_hdr = Header.get (w.Server.header ()) "Etag" in
+    let rec loop im =
+      let im = trim_string im in
+      if String.length im = 0 then Cond_false
+      else if im.[0] = ',' then loop (String.sub im 1 (String.length im - 1))
+      else if im.[0] = '*' then Cond_true
+      else
+        match scan_etag im with
+        | None -> Cond_false
+        | Some (etag, remain) ->
+            if etag_strong_match etag etag_hdr then Cond_true
+            else loop remain
+    in
+    loop im
+  end
+
+(* Go checkIfUnmodifiedSince. *)
+let check_if_unmodified_since (r : Body.t Request.t) ~modtime =
+  let ius = Header.get r.Request.header "If-Unmodified-Since" in
+  if ius = "" || is_zero_time modtime then Cond_none
+  else
+    match Http_time.parse_http_time ius with
+    | None -> Cond_none
+    | Some t ->
+        (* Last-Modified truncates sub-second precision; truncate modtime too. *)
+        let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
+        if modtime <= t then Cond_true else Cond_false
+
+(* Go checkIfNoneMatch. *)
+let check_if_none_match w (r : Body.t Request.t) =
+  let inm = Header.get r.Request.header "If-None-Match" in
+  if inm = "" then Cond_none
+  else begin
+    let etag_hdr = Header.get (w.Server.header ()) "Etag" in
+    let rec loop buf =
+      let buf = trim_string buf in
+      if String.length buf = 0 then Cond_true
+      else if buf.[0] = ',' then loop (String.sub buf 1 (String.length buf - 1))
+      else if buf.[0] = '*' then Cond_false
+      else
+        match scan_etag buf with
+        | None -> Cond_true
+        | Some (etag, remain) ->
+            if etag_weak_match etag etag_hdr then Cond_false else loop remain
+    in
+    loop inm
+  end
+
+(* Go checkIfModifiedSince. *)
+let check_if_modified_since (r : Body.t Request.t) ~modtime =
+  if r.Request.meth <> "GET" && r.Request.meth <> "HEAD" then Cond_none
+  else begin
+    let ims = Header.get r.Request.header "If-Modified-Since" in
+    if ims = "" || is_zero_time modtime then Cond_none
+    else
+      match Http_time.parse_http_time ims with
+      | None -> Cond_none
+      | Some t ->
+          let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
+          if modtime <= t then Cond_false else Cond_true
+  end
+
+(* Go checkIfRange. *)
+let check_if_range w (r : Body.t Request.t) ~modtime =
+  if r.Request.meth <> "GET" && r.Request.meth <> "HEAD" then Cond_none
+  else begin
+    let ir = Header.get r.Request.header "If-Range" in
+    if ir = "" then Cond_none
+    else begin
+      match scan_etag ir with
+      | Some (etag, _) when etag <> "" ->
+          if etag_strong_match etag (Header.get (w.Server.header ()) "Etag")
+          then Cond_true
+          else Cond_false
+      | _ ->
+          (* The If-Range value is typically the ETag, but may also be the
+             modtime date. *)
+          if is_zero_time modtime then Cond_false
+          else
+            match Http_time.parse_http_time ir with
+            | None -> Cond_false
+            | Some t ->
+                if int_of_float t = int_of_float modtime then Cond_true
+                else Cond_false
+    end
+  end
+
+(* Go writeNotModified: clears representation metadata and writes 304. *)
+let write_not_modified w =
+  let h = w.Server.header () in
+  Header.del h "Content-Type";
+  Header.del h "Content-Length";
+  Header.del h "Content-Encoding";
+  if Header.get h "Etag" <> "" then Header.del h "Last-Modified";
+  w.Server.write_header Status.status_not_modified
+
+(* Go checkPreconditions: evaluates request preconditions and reports whether a
+   precondition resulted in 304/412. Returns [(done_, range_header)]. Follows
+   RFC 7232 section 6: If-Match → If-Unmodified-Since → If-None-Match →
+   If-Modified-Since, then If-Range gates the Range header. *)
+let check_preconditions w (r : Body.t Request.t) ~modtime =
+  let ch = check_if_match w r in
+  let ch =
+    if ch = Cond_none then check_if_unmodified_since r ~modtime else ch
+  in
+  if ch = Cond_false then begin
+    w.Server.write_header Status.status_precondition_failed;
+    (true, "")
+  end
+  else begin
+    match check_if_none_match w r with
+    | Cond_false ->
+        if r.Request.meth = "GET" || r.Request.meth = "HEAD" then begin
+          write_not_modified w;
+          (true, "")
+        end
+        else begin
+          w.Server.write_header Status.status_precondition_failed;
+          (true, "")
+        end
+    | Cond_none ->
+        if check_if_modified_since r ~modtime = Cond_false then begin
+          write_not_modified w;
+          (true, "")
+        end
+        else begin
+          let range_header = Header.get r.Request.header "Range" in
+          let range_header =
+            if range_header <> "" && check_if_range w r ~modtime = Cond_false
+            then ""
+            else range_header
+          in
+          (false, range_header)
+        end
+    | Cond_true ->
+        let range_header = Header.get r.Request.header "Range" in
+        let range_header =
+          if range_header <> "" && check_if_range w r ~modtime = Cond_false then
+            ""
+          else range_header
+        in
+        (false, range_header)
+  end
 
 (* ---- MIME by extension (stand-in for mime.TypeByExtension) ---- *)
 
@@ -286,9 +485,7 @@ let ext_of name =
       if after_slash then String.sub name i (String.length name - i) else ""
   | None -> ""
 
-(* ---- isZeroTime / setLastModified ---- *)
-
-let is_zero_time t = t = 0.0
+(* ---- setLastModified ---- *)
 
 let set_last_modified w modtime =
   if not (is_zero_time modtime) then
@@ -457,8 +654,17 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                       | None -> Lwt.return_unit)
                       >>= fun () ->
                       if d.fi_is_dir then begin
-                        set_last_modified w d.fi_mod_time;
-                        dir_list w r f
+                        if
+                          check_if_modified_since r ~modtime:d.fi_mod_time
+                          = Cond_false
+                        then begin
+                          write_not_modified w;
+                          Lwt.return_unit
+                        end
+                        else begin
+                          set_last_modified w d.fi_mod_time;
+                          dir_list w r f
+                        end
                       end
                       else
                         serve_content w r ~name:d.fi_name

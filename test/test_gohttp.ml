@@ -7,6 +7,7 @@ let () =
       ("Httptest", Test_httptest.tests);
       ("HttptestServer", Test_httptest_server.tests);
       ("Fs", Test_fs.tests);
+      ("FsConditional", Test_fs_conditional.tests);
       ("Header", Test_header.tests);
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);

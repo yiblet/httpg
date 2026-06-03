@@ -167,7 +167,7 @@ Status: Done
 **Status: Done.** Commit: see below.
 
 ### Ticket 4 — fs conditional requests (preconditions + ETag + time headers)
-Status: Planned
+Status: Done
 
 **A) Scope** Port `checkPreconditions`, `scanETag`, and the precondition headers: `If-Match`, `If-Unmodified-Since`, `If-None-Match`, `If-Modified-Since`, returning **304 Not Modified** / **412 Precondition Failed** per RFC 7232 + Go's exact precedence. Wire into `serve_content`. Emit `ETag` if the handler set one (Go doesn't auto-generate ETags; honor a handler-set ETag).
 
@@ -181,7 +181,37 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Baseline:** `jj st` clean (`@` empty `76de8751`, parent `58dda697` Ticket 3); `dune build && dune test` green at **476** tests.
+- **Files modified:**
+  - `lib/fs.ml` — replaced the Ticket-3 `check_preconditions` stub with a faithful port of `fs.go`'s precondition machinery:
+    - `trim_string` (Go `textproto.TrimString`: trims leading/trailing ` `/`\t`).
+    - `scan_etag : string -> (string * string) option` (Go `scanETag`): trims, accepts an optional `W/` prefix, requires a leading `"`, scans the allowed ETag char set (`0x21`, `0x23`–`0x7E`, `≥0x80`) to the closing quote, returns `(etag, remain)`; otherwise `None`.
+    - `etag_strong_match` (Go `etagStrongMatch`: `a=b && a≠"" && a.[0]='"'`), `etag_weak_match` (Go `etagWeakMatch`: compare after stripping a `W/` prefix from each).
+    - `type cond_result = Cond_none | Cond_true | Cond_false` (Go `condResult`).
+    - `check_if_match` (If-Match: `*` or strong-match against the handler-set `Etag` → `Cond_true`, else `Cond_false`; comma-list scan), `check_if_unmodified_since` (parse via `Http_time.parse_http_time`, truncate modtime to whole seconds, `modtime ≤ t → Cond_true` else `Cond_false`), `check_if_none_match` (`*` or weak-match → `Cond_false`, else `Cond_true`; comma-list, weak comparison), `check_if_modified_since` (GET/HEAD only; `modtime ≤ t → Cond_false` else `Cond_true`), `check_if_range` (GET/HEAD only; strong-ETag match → `Cond_true`/`Cond_false`, else date `Unix==Unix` → `Cond_true`).
+    - `write_not_modified` (Go `writeNotModified`): deletes Content-Type/Content-Length/Content-Encoding, drops Last-Modified when an Etag is present, writes **304**.
+    - `check_preconditions` (Go `checkPreconditions`): precedence **If-Match → If-Unmodified-Since → If-None-Match → If-Modified-Since → If-Range**. A failed If-Match/If-Unmodified-Since → **412**; an If-None-Match `Cond_false` → **304** for GET/HEAD else **412**; If-Modified-Since `Cond_false` → **304**; otherwise returns the request's `Range` header, blanked when `check_if_range` is `Cond_false`. Returns `(done_, range_header)`.
+    - `is_zero_time` moved above the precondition block (used by the new code).
+    - `serve_file`: the directory listing branch now applies Go's deferred `checkIfModifiedSince(d.ModTime())` → `write_not_modified` (304) before `set_last_modified`/`dir_list`.
+    - `serve_content` already called `check_preconditions` and short-circuited on `done_` (the Ticket-3 hook); it now sees real 304/412 short-circuits. The Range header it receives is now If-Range-gated (still served as a full 200 until Ticket 5).
+  - `lib/fs.mli` — **kept in sync**: dropped the "stubbed for Ticket 4" caveat in the header; added `val scan_etag : string -> (string * string) option`; rewrote the `check_preconditions` doc to describe the real RFC 7232 precedence + 304/412 semantics.
+  - `test/test_gohttp.ml` — wired `("FsConditional", Test_fs_conditional.tests)`.
+- **Files created:**
+  - `test/test_fs_conditional.ml` (`val tests`, 6 cases; networked ones served via `Httptest.Server` over a unique temp dir, each `Lwt_main.run` bounded by `Net.with_timeout 10.`, temp dir removed in `Lwt.finalize`/`rm_rf`):
+    - `scan_etag` (unit): valid strong (`"123"`→`("\"123\"","")`), valid weak (`W/"foo"`), trimmed list (`  "a", "b"`→`("\"a\"",", \"b\"")`), and three invalid forms (no quote / empty / unterminated → `None`).
+    - `if_modified_since_304`: plain GET learns `Last-Modified`, then `If-Modified-Since == Last-Modified` → **304** + empty body.
+    - `if_modified_since_200`: `If-Modified-Since` far in the past → **200** + body.
+    - `if_none_match_304`: a custom handler sets `Etag: "foo"` before `Fs.serve_content`; `If-None-Match: "foo"` → **304** (empty body), `If-None-Match: "baz", W/"foo"` (weak list) → **304**, `If-None-Match: "Foo"` (mismatch) → **200** + body.
+    - `if_match_412`: handler sets `Etag: "right"`; `If-Match: "wrong"` → **412**, `If-Match: "right"` → **200**, `If-Match: *` → **200**.
+    - `if_unmodified_since_412`: `If-Unmodified-Since` in the past → **412**; `If-Unmodified-Since == Last-Modified` → **200** + body.
+  - The custom ETag handler exercises the "handler set the response Etag before serve_content" path (FileServer does not auto-generate ETags, mirroring Go).
+- **Evidence:** `dune build` clean; `dune test` green — **482** tests (476 baseline + 6 FsConditional). `dune exec test/test_gohttp.exe -- test FsConditional` → 6/6 OK in 0.005s (terminates). Full run 1.807s. No leaked temp dirs (`/tmp/gohttp_fscond_*` absent after the run). All prior 476 stay green (plain GET with no precondition headers still serves 200 — Fs suite green).
+- **Precondition precedence implemented:** If-Match → If-Unmodified-Since → If-None-Match → If-Modified-Since → If-Range (gates the Range header), exactly per `checkPreconditions`.
+- **API adaptation / notes:** modtime is Unix-epoch seconds (a `float`); Go's `modtime.Truncate(time.Second)` is `Float.floor`. Go's `isZeroTime` (zero-`time.Time` **or** Unix==0) collapses to `t = 0.0` here. The If-Range date branch compares `int_of_float t = int_of_float modtime` (Go `t.Unix() == modtime.Unix()`). The Range header is computed/gated now but still served as a full 200 (Ticket 5 turns it into 206/multipart/416). The `httpservecontentkeepheaders` GODEBUG header-stripping on the error path is unchanged from Ticket 3 (deliberate stand-in).
+
+**Status: Done.** Commit: see below.
 
 ### Ticket 5 — fs range requests (single + multipart/byteranges + If-Range)
 Status: Planned
