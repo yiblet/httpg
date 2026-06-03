@@ -16,4 +16,5 @@ let () =
       ("Mapping", Test_mapping.tests);
       ("Pattern", Test_pattern.tests);
       ("RoutingTree", Test_routing_tree.tests);
+      ("Ascii", Test_ascii.tests);
     ]

@@ -108,18 +108,9 @@ let count_char s c =
 let split_char s c =
   String.split_on_char c s
 
-(* ascii.ToLower: returns (lowered, isASCII). *)
-let ascii_to_lower s =
-  let buf = Bytes.of_string s in
-  let is_ascii = ref true in
-  Bytes.iteri
-    (fun i ch ->
-      let code = Char.code ch in
-      if code >= 0x80 then is_ascii := false
-      else if ch >= 'A' && ch <= 'Z' then
-        Bytes.set buf i (Char.chr (code + 32)))
-    buf;
-  (Bytes.to_string buf, !is_ascii)
+(* ascii.ToLower: returns (lowered, ok) where ok=false if s is not ASCII
+   printable. *)
+let ascii_to_lower = Gohttp_internal.Ascii.to_lower
 
 let contains_any s set =
   let found = ref false in

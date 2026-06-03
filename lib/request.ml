@@ -77,13 +77,7 @@ let parse_basic_auth (auth : string) : (string * string) option =
   let lp = String.length prefix in
   let eq_fold_prefix s =
     String.length s >= lp
-    &&
-    let ok = ref true in
-    for i = 0 to lp - 1 do
-      let lower c = if c >= 'A' && c <= 'Z' then Char.chr (Char.code c + 32) else c in
-      if lower s.[i] <> lower prefix.[i] then ok := false
-    done;
-    !ok
+    && Gohttp_internal.Ascii.equal_fold (String.sub s 0 lp) prefix
   in
   if String.length auth < lp || not (eq_fold_prefix auth) then None
   else

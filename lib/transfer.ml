@@ -44,12 +44,7 @@ let lower_ascii b =
   if b >= 'A' && b <= 'Z' then Char.chr (Char.code b + 32) else b
 
 (* internal/ascii.EqualFold. *)
-let ascii_equal_fold s t =
-  String.length s = String.length t
-  &&
-  let ok = ref true in
-  String.iteri (fun i c -> if lower_ascii c <> lower_ascii t.[i] then ok := false) s;
-  !ok
+let ascii_equal_fold = Gohttp_internal.Ascii.equal_fold
 
 (* httpguts.isOWS for token-boundary trimming. *)
 let is_ows b = b = ' ' || b = '\t'
@@ -137,17 +132,7 @@ let has_token v token =
   if lt > lv || lt = 0 then false
   else if v = token then true
   else begin
-    let eq_fold a b =
-      String.length a = String.length b
-      && (let ok = ref true in
-          String.iteri
-            (fun i ca ->
-              let cb = b.[i] in
-              let lower c = if c >= 'A' && c <= 'Z' then Char.chr (Char.code c + 32) else c in
-              if lower ca <> lower cb then ok := false)
-            a;
-          !ok)
-    in
+    let eq_fold = Gohttp_internal.Ascii.equal_fold in
     let found = ref false in
     let sp = ref 0 in
     while (not !found) && !sp <= lv - lt do
