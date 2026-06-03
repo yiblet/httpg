@@ -50,6 +50,7 @@ type response_writer = {
   header : unit -> Header.t;
   write_header : int -> unit;
   write : string -> unit Lwt.t;
+  flush : unit -> unit Lwt.t;
 }
 
 (* Go's Handler interface: ServeHTTP(ResponseWriter, *Request). *)
@@ -363,18 +364,162 @@ let body_allowed_for_status status =
   else if status = Status.status_not_modified then false
   else true
 
-(* Run [serve] for one request on [oc], returning whether the connection
-   should be kept alive afterward. Implements implicit WriteHeader(200),
-   content-type sniffing, Date, Content-Length (buffered body) and the
-   version-sensitive Connection handling. Bodies are buffered then flushed so
-   we can always emit an exact Content-Length, matching Go's common case. *)
+(* Go's bufferBeforeChunkingSize (server.go:342): the response is buffered into
+   a bufio.Writer of this size before the framing decision (Content-Length vs
+   chunked) is forced. *)
+let buffer_before_chunking_size = 2048
+
+(* Run [serve] for one request on [oc], returning whether the connection should
+   be kept alive afterward. Faithfully mirrors Go's [response]/[chunkWriter]
+   buffer-then-chunk model (server.go:1096,1284,1353):
+
+   - Handler [write]s accumulate in a [buffer_before_chunking_size]-byte buffer.
+   - The framing decision (Go's chunkWriter.writeHeader) fires at first flush:
+     the buffer overflows 2048 bytes, the handler returns, or [flush] is called.
+   - If the handler finished ([handler_done]) with <=2048 buffered, set no
+     explicit Content-Length, the status allows a body, and it is not a
+     zero-byte HEAD -> emit an exact Content-Length and the buffered bytes, NO
+     chunking (Go's common case, server.go:1353).
+   - Otherwise (overflow / Flush / still running) -> HTTP/1.1: emit
+     Transfer-Encoding: chunked and stream subsequent writes chunk-encoded;
+     HTTP/1.0 unknown length: Connection: close, raw bytes, close at EOF.
+   - Content-Type is sniffed from the first <=512 buffered bytes when unset and
+     a body is allowed. Implicit WriteHeader(200). HEAD writes no body. *)
 let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
   let header = Header.create () in
   let status = ref Status.status_ok in
   let wrote_header = ref false in
+  (* Whether the response framing headers have been emitted on the wire. *)
+  let headers_emitted = ref false in
+  (* Whether we committed to chunked transfer encoding. *)
+  let chunking = ref false in
+  (* Whether the handler has returned (forces the Content-Length common case). *)
+  let handler_done = ref false in
+  (* Pending body bytes not yet committed to a framing decision. *)
   let body_buf = Buffer.create 256 in
-  (* Whether the client/handler requested the connection be closed. *)
+  let is_head = r.meth = "HEAD" in
   let req_should_close = r.close in
+  (* mutable "close after reply" flag (Go's w.closeAfterReply). *)
+  let close_after_reply = ref req_should_close in
+  let proto =
+    if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0"
+  in
+  (* Emit the status line + headers, deciding the framing. [final_cl] is
+     [Some n] when we know the exact Content-Length (handler done, fits, no
+     explicit CL); otherwise framing is chunked (HTTP/1.1) or close (HTTP/1.0).
+     Returns once the header block is written to [oc]. *)
+  let emit_headers () =
+    headers_emitted := true;
+    let code = !status in
+    let body_allowed = body_allowed_for_status code in
+    let buffered = Buffer.contents body_buf in
+    (* Content-Type sniff from the first <=512 buffered bytes (Go uses
+       bufferBeforeChunkingSize's head; sniff itself caps at 512). *)
+    (if body_allowed && not (Header.has header "Content-Type") then
+       if
+         not
+           (Gohttp_internal.Ascii.equal_fold
+              (Header.get header "X-Content-Type-Options")
+              "nosniff")
+       then
+         if String.length buffered > 0 then
+           let sniff_src =
+             if String.length buffered > 512 then String.sub buffered 0 512
+             else buffered
+           in
+           Header.set header "Content-Type" (Sniff.detect_content_type sniff_src));
+    (* Date header (Go always sets it if absent). *)
+    if not (Header.has header "Date") then
+      Header.set header "Date" (http_time_now ());
+    let handler_conn_close =
+      Transfer.has_token
+        (String.lowercase_ascii (Header.get header "Connection"))
+        "close"
+    in
+    if handler_conn_close then close_after_reply := true;
+    let has_explicit_cl = Header.has header "Content-Length" in
+    let has_te = Header.has header "Transfer-Encoding" in
+    (* Decide the exact-Content-Length common case: handler is done, everything
+       fit in <=2048 (i.e. we have not started chunking), no explicit CL, body
+       allowed, not a zero-byte HEAD, no explicit TE (server.go:1353). *)
+    let auto_cl =
+      !handler_done && (not has_te) && body_allowed && (not has_explicit_cl)
+      && ((not is_head) || String.length buffered > 0)
+    in
+    let content_length =
+      if auto_cl then Some (String.length buffered)
+      else if has_explicit_cl then
+        int_of_string_opt (String.trim (Header.get header "Content-Length"))
+      else None
+    in
+    (* Framing: HEAD / no-body status -> no body framing. Else CL present ->
+       Content-Length, no chunking. Else HTTP/1.1 -> chunked; HTTP/1.0 unknown
+       length -> close-delimited (server.go:1503). *)
+    if (not body_allowed) || (is_head && not auto_cl && not has_explicit_cl)
+    then chunking := false
+    else if content_length <> None then chunking := false
+    else if Request.proto_at_least r 1 1 then chunking := true
+    else begin
+      (* HTTP/1.0 unknown length: signal EOF by closing the connection. *)
+      chunking := false;
+      close_after_reply := true
+    end;
+    (* HTTP/1.0 keep-alive (Go's wants10KeepAlive, server.go:1369): an HTTP/1.0
+       request asking for keep-alive that we answer with a known length (a
+       Content-Length, a HEAD, or a no-body status) may keep the connection
+       alive and must advertise it explicitly. Otherwise HTTP/1.0 closes. *)
+    let wants10_keep_alive =
+      (not (Request.proto_at_least r 1 1))
+      && Request.proto_at_least r 1 0
+      && Transfer.has_token
+           (String.lowercase_ascii (Header.get r.Request.header "Connection"))
+           "keep-alive"
+    in
+    let sent_known_length =
+      is_head || content_length <> None || not body_allowed
+    in
+    let advertise10_keep_alive = ref false in
+    if not (Request.proto_at_least r 1 1) then begin
+      if wants10_keep_alive && sent_known_length && not req_should_close then
+        advertise10_keep_alive := true
+      else close_after_reply := true
+    end;
+    let keep_alive = not !close_after_reply in
+    let status_text = Status.status_text code in
+    let status_line =
+      if status_text = "" then
+        Printf.sprintf "%s %03d status code %d\r\n" proto code code
+      else Printf.sprintf "%s %03d %s\r\n" proto code status_text
+    in
+    let out = Buffer.create 256 in
+    Buffer.add_string out status_line;
+    (match content_length with
+    | Some n -> Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" n)
+    | None -> if !chunking then Buffer.add_string out "Transfer-Encoding: chunked\r\n");
+    if not keep_alive then Buffer.add_string out "Connection: close\r\n"
+    else if !advertise10_keep_alive then
+      Buffer.add_string out "Connection: keep-alive\r\n";
+    Header.write_subset header out ~exclude:excluded_headers;
+    Buffer.add_string out "\r\n";
+    Lwt_io.write oc (Buffer.contents out) >>= fun () ->
+    Lwt.return keep_alive
+  in
+  (* Push the currently-buffered bytes to the wire under the decided framing.
+     Only called after [emit_headers]; clears the buffer. *)
+  let flush_buffered () =
+    let data = Buffer.contents body_buf in
+    Buffer.clear body_buf;
+    if is_head || String.length data = 0 then Lwt.return_unit
+    else if !chunking then Transfer.chunked_writer_write oc data
+    else Lwt_io.write oc data
+  in
+  (* The implicit-WriteHeader-200 helper for the first write. *)
+  let ensure_status () =
+    if not !wrote_header then begin
+      wrote_header := true;
+      status := Status.status_ok
+    end
+  in
   let rw =
     {
       header = (fun () -> header);
@@ -386,70 +531,49 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
           end);
       write =
         (fun data ->
-          if not !wrote_header then begin
-            wrote_header := true;
-            status := Status.status_ok
-          end;
-          if body_allowed_for_status !status then Buffer.add_string body_buf data;
-          Lwt.return_unit);
+          ensure_status ();
+          if not (body_allowed_for_status !status) then Lwt.return_unit
+          else begin
+            Buffer.add_string body_buf data;
+            (* Overflow past 2048 with headers not yet emitted: force the
+               framing decision now (handler is NOT done -> chunked/close, not
+               Content-Length), emit headers, stream the buffer. *)
+            if (not !headers_emitted)
+               && Buffer.length body_buf > buffer_before_chunking_size
+            then emit_headers () >>= fun _ -> flush_buffered ()
+            else if !headers_emitted then flush_buffered ()
+            else Lwt.return_unit
+          end);
+      flush =
+        (fun () ->
+          ensure_status ();
+          (* Force the framing decision now; handler not necessarily done, so
+             length is unknown -> chunked (HTTP/1.1) / close (HTTP/1.0). *)
+          (if not !headers_emitted then emit_headers () >>= fun _ -> Lwt.return_unit
+           else Lwt.return_unit)
+          >>= fun () ->
+          flush_buffered () >>= fun () -> Lwt_io.flush oc);
     }
   in
   h.serve_http rw r >>= fun () ->
-  (* finishRequest: ensure header was written. *)
-  if not !wrote_header then begin
-    wrote_header := true;
-    status := Status.status_ok
-  end;
-  let is_head = r.meth = "HEAD" in
-  let body = Buffer.contents body_buf in
-  let body_allowed = body_allowed_for_status !status in
-  (* Content-Type sniffing when not set and a body is allowed. *)
-  if body_allowed && not (Header.has header "Content-Type") then begin
-    (* Only sniff if X-Content-Type-Options nosniff is not set. *)
-    if not (Gohttp_internal.Ascii.equal_fold (Header.get header "X-Content-Type-Options") "nosniff")
-    then
-      if String.length body > 0 then
-        Header.set header "Content-Type" (Sniff.detect_content_type body)
-  end;
-  (* Date header (Go always sets it if absent). *)
-  if not (Header.has header "Date") then
-    Header.set header "Date" (http_time_now ());
-  (* Determine close: HTTP/1.0 closes by default unless keep-alive; HTTP/1.1
-     keeps alive unless close. Honor an explicit handler "Connection: close". *)
-  let handler_conn_close =
-    Transfer.has_token (String.lowercase_ascii (Header.get header "Connection")) "close"
-  in
-  let keep_alive = (not req_should_close) && not handler_conn_close in
-  (* Build the status line with the request's protocol. *)
-  let proto =
-    if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0"
-  in
-  let status_text = Status.status_text !status in
-  let status_line =
-    if status_text = "" then Printf.sprintf "%s %03d status code %d\r\n" proto !status !status
-    else Printf.sprintf "%s %03d %s\r\n" proto !status status_text
-  in
-  let out = Buffer.create (256 + String.length body) in
-  Buffer.add_string out status_line;
-  (* Framing headers (managed; not part of the handler header subset). *)
-  let content_length = String.length body in
-  if body_allowed then
-    Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" content_length)
-  else if (not is_head) && String.length body = 0 then
-    (* For 204/304/1xx we omit Content-Length entirely (Go does too). *)
-    ();
-  (* Connection header per version rules. *)
-  if not keep_alive then Buffer.add_string out "Connection: close\r\n"
-  else if not (Request.proto_at_least r 1 1) then
-    (* HTTP/1.0 keep-alive must be explicit on the wire. *)
-    Buffer.add_string out "Connection: keep-alive\r\n";
-  (* Remaining handler headers (sorted), excluding the managed ones. *)
-  Header.write_subset header out ~exclude:excluded_headers;
-  Buffer.add_string out "\r\n";
-  Lwt_io.write oc (Buffer.contents out) >>= fun () ->
-  (if is_head then Lwt.return_unit else Lwt_io.write oc body) >>= fun () ->
-  Lwt_io.flush oc >>= fun () ->
-  Lwt.return keep_alive
+  handler_done := true;
+  (* finishRequest: ensure the status is set. *)
+  ensure_status ();
+  (* If headers were never emitted (everything fit in <=2048 and no flush),
+     emit them now: this is the exact-Content-Length common case. Then write
+     the buffered body. If chunking already started, finish the chunk stream. *)
+  (if not !headers_emitted then
+     emit_headers () >>= fun keep_alive ->
+     flush_buffered () >>= fun () -> Lwt_io.flush oc >>= fun () ->
+     Lwt.return keep_alive
+   else begin
+     (* Streaming already started. Flush any residual buffered bytes, then
+        terminate the framing: close the chunk stream when chunking. *)
+     flush_buffered () >>= fun () ->
+     (if !chunking then Transfer.chunked_writer_close oc else Lwt.return_unit)
+     >>= fun () -> Lwt_io.flush oc >>= fun () ->
+     Lwt.return (not !close_after_reply)
+   end)
 
 (* Note: Io.read_request returns a streaming request body; the serve loop runs
    Body.drain on it before reusing a kept-alive connection (Go's finishRequest
@@ -565,6 +689,7 @@ let h2_handler_of_handler (handler : handler) : H2_server.handler =
       header = h2w.H2_server.header;
       write_header = h2w.H2_server.write_header;
       write = h2w.H2_server.write;
+      flush = h2w.H2_server.flush;
     }
   in
   handler.serve_http w r >>= fun () -> h2w.H2_server.flush ()

@@ -104,7 +104,7 @@ Status: Done
 Status: Done.
 
 ### Ticket 2 — Streaming server responses (HTTP/1.x)
-Status: Planned
+Status: Done
 
 **A) Scope** Rewrite `serve_one`'s `response_writer` to faithfully mirror Go's `chunkWriter`: buffer writes into a `bufferBeforeChunkingSize = 2048`-byte buffer; the framing decision fires at first flush = buffer exceeds 2048 **or** handler returns **or** `Flush()` called. If the handler finishes with ≤2048 buffered and set no `Content-Length` → emit exact **Content-Length**, write buffered body (NO chunking). Else → **chunked** (HTTP/1.1) / close-at-EOF (HTTP/1.0), streaming subsequent writes directly. Implicit `WriteHeader 200`; content sniff uses the first ≤512 bytes of the buffer. Add `flush`.
 
@@ -118,7 +118,27 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean (working copy empty, parent = Ticket 1 commit); `dune build && dune test` green — **440 tests**.
+
+*Files modified (with `.mli` updates):*
+- `lib/server.ml` + `lib/server.mli` — added `flush : unit -> unit Lwt.t` to `response_writer` (both the type and the `.mli` doc comment, which now describes the 2048 buffer-then-chunk + Flush model). Rewrote `serve_one` to mirror Go's `response`/`chunkWriter` (server.go:1096,1284,1353). Added the constant `buffer_before_chunking_size = 2048`. Updated the h2 adapter `h2_handler_of_handler` to project the H2 writer's existing `flush` into the new field (H2 already had `flush`).
+- `test/test_gohttp.ml` — wired `("StreamWrite", Test_stream_write.tests)` into the runner.
+- `test/test_stream_write.ml` — new integration suite (3 cases).
+
+*Buffer-then-chunk + Flush implementation:* `serve_one`'s writer keeps a `Buffer` (`body_buf`), and flags `wrote_header`/`headers_emitted`/`chunking`/`handler_done`. `write data`: implicit `WriteHeader 200`, append to `body_buf`; if headers not yet emitted and the buffer exceeds 2048 → `emit_headers` (chunked decision, handler not done) then stream the buffer chunk-encoded; if already streaming → write directly (chunked or raw). `flush ()`: implicit 200, force `emit_headers` if not yet (length unknown → chunked HTTP/1.1 / close HTTP/1.0), push buffered bytes, `Lwt_io.flush`. After the handler returns, `handler_done := true`; if headers were never emitted (everything fit in ≤2048 and no flush) → `emit_headers` decides the **exact-Content-Length common case** (`auto_cl`: handler done, ≤2048 buffered i.e. not chunking, no explicit CL, body allowed, not a zero-byte HEAD, no explicit TE — server.go:1353) and writes the buffered body raw with NO chunking; if streaming already started → flush residual bytes then `chunked_writer_close` for the terminating 0-chunk. `emit_headers` writes the status line (request proto), sniffs Content-Type from the first ≤512 buffered bytes (when unset, body allowed, not nosniff), sets Date if absent, picks the framing header (Content-Length / `Transfer-Encoding: chunked`), and the Connection header. HTTP/1.0 keep-alive (Go's `wants10KeepAlive`, server.go:1369): an HTTP/1.0 request asking for keep-alive answered with a known length (Content-Length / HEAD / no-body) advertises `Connection: keep-alive` and stays reusable; otherwise HTTP/1.0 closes. `close_after_reply` drives the keep-alive return value, consistent with the framing (chunked/CL keep-alive per the existing rules; HTTP/1.0 unknown-length close-delimited → not reusable).
+
+*Tests touched + why:* only `test/test_gohttp.ml` (wiring). No existing test needed adaptation: existing small-response server tests still see an exact Content-Length (≤2048 buffered, handler done → `auto_cl`), and the HTTP/1.0 keep-alive `Serve.http10_close` test still gets `Connection: keep-alive` because the `wants10KeepAlive` branch was reproduced faithfully. No assertion was weakened. No `response_writer` record-literal in tests required a `flush` field (none construct the record).
+
+*New tests (`test/test_stream_write.ml`, each bounded by `Net.with_timeout 10.0` over `Lwt_main.run`, real loopback server via `Server.listen_and_serve_started` + raw `Net.connect` client) — 3 cases:*
+  - `server_streams_unbuffered` (**Success Criterion**) — handler writes "alpha"/"beta"/"gamma" with `flush` between, suspended after the first flush on a promise the test resolves only after it has read the early bytes. Asserts the early bytes announce `Transfer-Encoding: chunked` and that the dechunked early body is exactly `"alpha"` **while the handler is still suspended** (chunk observable on the client before completion = unbuffered streaming). After release, the full dechunked body equals `"alphabetagamma"`.
+  - `small_response` — one ≤2048-byte write ⇒ exact `Content-Length: 16`, NO `Transfer-Encoding: chunked`, body intact.
+  - `large_response` — a 5000-byte write without flush ⇒ `Transfer-Encoding: chunked`, no Content-Length, dechunked body intact.
+
+*Evidence / counts:* `dune build` clean (dev profile, warnings-as-errors). `dune exec test/test_gohttp.exe` → **443 tests run, Test Successful in ~1.3s** (terminates) — 440 prior all green + 3 new StreamWrite (`server_streams_unbuffered`, `small_response`, `large_response` all `[OK]`). New total **443** = 440 + 3. Confirmed small ≤2048 responses still get Content-Length; large/flushed responses chunk.
+
+Status: Done.
 
 ### Ticket 3 — Streaming client response bodies (HTTP/1.x)
 Status: Planned

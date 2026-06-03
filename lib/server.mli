@@ -9,13 +9,20 @@
       the response headers are flushed (Go's [ResponseWriter.Header]).
     - [write_header code] sets the status code (Go's [WriteHeader]); the first
       [write] implicitly calls [write_header 200].
-    - [write data] appends body bytes (Go's [ResponseWriter.Write]). The body
-      is buffered until the handler returns, so an exact Content-Length can be
-      emitted. *)
+    - [write data] appends body bytes (Go's [ResponseWriter.Write]). Writes
+      accumulate in a [bufferBeforeChunkingSize = 2048] byte buffer; the framing
+      decision (Content-Length vs chunked) fires at first flush = the buffer
+      exceeds 2048 bytes, the handler returns, or [flush] is called. A handler
+      that finishes with <=2048 bytes buffered and no explicit Content-Length
+      gets an exact Content-Length (Go's common case); otherwise the response is
+      streamed chunked (HTTP/1.1) or close-delimited (HTTP/1.0).
+    - [flush ()] forces the headers/framing decision and pushes buffered bytes
+      to the client (Go's [http.Flusher.Flush]). *)
 type response_writer = {
   header : unit -> Header.t;
   write_header : int -> unit;
   write : string -> unit Lwt.t;
+  flush : unit -> unit Lwt.t;
 }
 
 (** Go's [Handler] interface: [ServeHTTP(ResponseWriter, *Request)]. *)
