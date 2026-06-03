@@ -812,7 +812,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 10 — Client + Transport
-Status: Planned
+Status: Done
 
 **A) Scope** Port `client.go` + `transport.go` (HTTP/1.x): `RoundTripper`, `Transport`, `Client`, `Client.do`.
 
@@ -826,7 +826,101 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; round-trip tests bounded by timeout.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/transport.ml` + `lib/transport.mli` — new; port of the HTTP/1.x subset
+    of `go/src/net/http/transport.go`. `type t` carries the idle-connection pool
+    `idle_conn : (string, persist_conn list) Hashtbl.t` (Go's
+    `idleConn map[connectMethodKey][]*persistConn`, keyed by the
+    `"scheme|host:port"` cache key — `conn_key`, the analog of
+    `connectMethodKey.String`; value is a list of idle conns, most-recently-used
+    at the end as Go documents), a `disable_keep_alives` toggle, and a `dials`
+    counter (test hook, no exact Go analog). `round_trip : t -> Body.t Request.t
+    -> Body.t Response.t Lwt.t` (Go `Transport.RoundTrip`): derives
+    scheme/host/port from the request `Uri.t` (`scheme_host_port`; default
+    port 80/443; TLS when scheme is https), pops an idle pooled connection
+    (`get_idle_conn`) or dials a fresh one via `Net.connect`
+    (`dial`), sets default Host + User-Agent headers (`set_default_headers`),
+    writes via `Io.write_request` + flush, reads via `Io.read_response`, then on
+    a keep-alive-eligible response (`reusable`: keep-alives enabled AND not
+    `req.close` AND not `resp.close`) returns the connection to the pool
+    (`put_idle_conn`), else closes it. A failure on a recycled idle connection
+    triggers one fresh-dial retry (`attempt ~allow_retry`, Go's
+    `shouldRetryRequest` for an idempotent re-dial). `default_transport`
+    (Go's `DefaultTransport`). Public surface also exposes `create`, `conn_key`,
+    `dial_count`, `idle_count`.
+  - `lib/client.ml` + `lib/client.mli` — new; port of the HTTP/1.x subset of
+    `go/src/net/http/client.go`. `type check_redirect = Body.t Request.t list ->
+    (unit, string) result` (Go's `CheckRedirect`); `default_check_redirect`
+    aborts after 10 redirects (Go's `defaultCheckRedirect`). `type t` wraps a
+    `Transport.t` + redirect policy + optional `timeout`. `do_ : t -> Body.t
+    Request.t -> Body.t Response.t Lwt.t` (Go `Client.Do`/`do`): the
+    redirect-following loop composing `Transport.round_trip` per hop, with
+    `redirect_behavior` (Go's `redirectBehavior`: 301/302/303 rewrite method to
+    GET unless original was GET/HEAD and drop body; 307/308 preserve method +
+    body), `copy_headers` (Go's `makeHeadersCopier`: copies initial-request
+    headers onto each hop, stripping `sensitive_header`s on a cross-host
+    redirect and `body_header`s when the body is dropped), and the optional
+    `Net.with_timeout` wrap. Builders/verbs: `make_request` (Go `NewRequest`),
+    `get` (`Client.Get`), `head` (`Client.Head`), `post ~content_type`
+    (`Client.Post`). `default_client` (Go's `DefaultClient`).
+  - `bin/main.ml` — replaced the status-text placeholder with a real
+    end-to-end demo: starts a `Server` on an ephemeral loopback port, issues a
+    `Client.get` against it, prints status + body. `bin/dune` gained `lwt
+    lwt.unix`.
+  - `test/test_clientserver.ml` — new; alcotest suite `val tests` (3 cases),
+    each starting a real loopback `Server` via `Server.listen_and_serve_started`
+    on an ephemeral port and driving it with the gohttp `Client`, bounded by
+    `Net.with_timeout 10.` and driven by `Lwt_main.run`.
+  - `test/test_gohttp.ml` — registered `("Clientserver", Test_clientserver.tests)`.
+- **Test evidence:** `dune build` clean; `dune test --force` →
+  "Test Successful in 0.033s. **245 tests run.**" All `[OK]`. New suite
+  `Clientserver` = 3 cases (baseline was 242):
+  - **`Clientserver.get_roundtrip`** — THE PLAN'S INTEGRATION SUCCESS CRITERION:
+    server returns 200 + "hello"; `Client.get` reads `status_code = 200` and
+    body `"hello"`. **Passes.**
+  - `Clientserver.post_body` — server echoes the request body; client
+    `Client.post`s `"the quick brown fox"` (text/plain) and reads it back
+    (status 200, echoed body equal).
+  - `Transport.keepalive_reuse` — two sequential `Client.get`s to the same
+    HTTP/1.1 server on a dedicated `Transport`; reuse asserted via the
+    transport's `dial_count`: it is 1 after the first request and STILL 1 after
+    the second (the second request pops the idle pooled connection instead of
+    dialing again). Both response bodies are "hello".
+  Suite runs in ~0.03s well under its 10s timeout; the executable was re-run
+  with `--force` confirming termination.
+- **User-Agent:** `Transport.default_user_agent = "gohttp-client/1.1"` (Go uses
+  `"Go-http-client/1.1"`; the port advertises its own UA so the wire string is
+  not mistaken for the Go runtime's, keeping Go's `<name>/<http-version>` shape).
+- **Keep-alive reuse, how asserted (documented):** the `Transport` records a
+  `dials` count incremented only on a fresh `Net.connect`. After
+  `Io.read_response` (which materializes the body in memory, so the connection
+  is immediately free) a keep-alive-eligible connection is returned to the idle
+  pool keyed by `"scheme|host:port"`. The test asserts the dial count stays at 1
+  across two requests — i.e. the second request reused the pooled connection.
+  Server-side accept counting was considered but is less deterministic (the
+  kernel accepts eagerly), so the transport-side dial count is used as the
+  authoritative reuse signal.
+- **Porting notes / intentionally omitted Go cases:**
+  - HTTP/2, proxies, the `wantConn`/`wantConnQueue` scheduling, `connsPerHost`
+    limits, the async body read-ahead (`bodyEOFSignal`/`maxBodySlurpSize` exact
+    plumbing), `persistConn` byte-counting read/write loops, `RegisterProtocol`,
+    `TLSNextProto`, and DialContext hooks are out of scope (HTTP/1.x-only port).
+    Because `Io` materializes bodies fully, the connection is freed synchronously
+    and the elaborate Go conn-lifecycle machinery collapses to a simple
+    return-to-pool / close decision.
+  - Client: cookie jars (`Client.Jar`, the `makeHeadersCopier` cookie-rewrite
+    branch), `Timeout`-as-deadline `setRequestCancel`, `GetBody` re-sending on
+    307/308 (the body is reused directly when in-memory `String`/`Empty`), the
+    `url.Error` wrapping, `ErrUseLastResponse`, and `Referer` injection are
+    omitted/reduced. The 3xx-without-Location case (hand the response back) and
+    the cross-host sensitive-header strip ARE ported.
+  - `TestClientTimeout*`, jar tests, proxy tests, the streaming/expect-100 and
+    HTTP/2-variant rows of `clientserver_test.go` are out of scope; the happy
+    GET/POST round-trip and keep-alive reuse rows are ported.
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 11 — Form & multipart parsing
 Status: Planned

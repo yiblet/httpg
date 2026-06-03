@@ -18,4 +18,5 @@ let () =
       ("RoutingTree", Test_routing_tree.tests);
       ("Ascii", Test_ascii.tests);
       ("Serve", Test_serve.tests);
+      ("Clientserver", Test_clientserver.tests);
     ]
