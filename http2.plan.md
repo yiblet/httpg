@@ -101,7 +101,7 @@ Status: Done
 Status: Done
 
 ### Ticket 2 — HPACK: Huffman + static & dynamic tables
-Status: Planned
+Status: Done
 
 **A) Scope** Port `hpack/huffman.go` (Huffman code table, encode + decode with the decoding tree, `ErrInvalidHuffman`), `hpack/static_table.go` (the 61-entry static table), and the table machinery from `hpack/tables.go` (`HeaderField`, `headerFieldTable`, `dynamicTable` with size accounting + eviction). Pure.
 
@@ -115,7 +115,19 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Files created:**
+  - `lib/hpack_huffman.ml` + `lib/hpack_huffman.mli` — port of `hpack/huffman.go` plus the `huffmanCodes` (256 × uint32) and `huffmanCodeLen` (256 × uint8) arrays from `tables.go`, embedded verbatim. `exception Invalid_huffman` (= Go `ErrInvalidHuffman`); lazily-built decode tree (`type node` mirroring Go's `node`, via `build_root_huffman_node`/`buildRootHuffmanNode`); `decode : string -> string` (faithful `huffmanDecode` with `maxLen=0`, validating incomplete symbol / overlong padding / non-EOS-prefix trailing bits); `encode : string -> string` (port of `AppendHuffmanString` from an empty dst, EOS-padded to a byte boundary, using `Int64` for Go's uint64 bit buffer); `encoded_len : string -> int` (= `HuffmanEncodeLength`).
+  - `lib/hpack_tables.ml` + `lib/hpack_tables.mli` — port of `hpack/static_table.go` + the table machinery of `tables.go` and the `HeaderField`/`dynamicTable` parts of `hpack.go`. `type header_field = { name; value; sensitive }` with `is_pseudo`/`size` (len name + len value + 32); `type header_field_table` (mirrors `headerFieldTable`: oldest-first `ents` + `evict_count` + `by_name`/`by_name_value` `Hashtbl`s keyed by stable 1-based unique ids) with `add_entry`/`evict_oldest`/`search` (returns `(index, name_value_match)`) and the static-vs-dynamic `id_to_index` split; the 61-entry `static_table` array + `static_table_len`/`static_table_entry`/`static_search` (over the global `static_field_table`); `type dynamic_table` (mirrors `dynamicTable`: `size`/`max_size`/`allowed_max_size`) with `create_dynamic_table`/`dynamic_add`/`set_max_size`/`set_allowed_max_size`/`dynamic_evict` and combined-index lookup `at` (static 1..61, dynamic after, newest lowest = Go `(*Decoder).at`).
+- **Files modified:**
+  - `test/test_hpack_tables.ml` (new) — 12 cases ported from `tables_test.go` (`TestHeaderFieldTable` add/search/idToIndex/evict, mapped to `dynamic_table_search`) + the Huffman cases of `hpack_test.go` (`TestHuffmanRoundtrip`/`TestHuffmanDecode`): Huffman encode→decode round-trip over representative strings incl. all 256 byte values + high-code symbols (varying EOS padding); RFC 7541 C.4.1 vector `"www.example.com"` → `f1e3c2e5f23a6ba0ab90f4ff` and C.4.2 `"no-cache"` → `a8eb10649cbf` (encode + decode); invalid-Huffman raises `Invalid_huffman`; `encoded_len`; static lookups by index + name/value `static_search` (incl. name-only → newest id, sensitive); dynamic add/evict/size accounting, `set_max_size` shrink-to-0, combined-index `at`, `is_pseudo`, `size`.
+  - `test/test_gohttp.ml` — wired `("HpackTables", Test_hpack_tables.tests)`.
+- **Test evidence:** baseline `dune st` clean + `dune build`/`dune test` = **321** green. After: `dune build` clean, `dune test` = **333 tests run, Test Successful**. New **HpackTables** suite = **12** cases (321 + 12 = 333). Confirmed passing: a Huffman round-trip (`huffman_roundtrip`, incl. all 256 byte values) and the RFC 7541 C.4.1/C.4.2 known vectors (`huffman_rfc_vector_C41`/`_C42`).
+- **Go cases omitted:** `tables_test.go`'s `TestHeaderFieldTableLookupAll` and benchmark/fuzz helpers are not separately ported — their lookup coverage is subsumed by `dynamic_table_search`/`static_search`. `TestHuffmanMaxStrLen` / `ErrStringLength` is deferred to Ticket 3 (the `maxStrLen`/`Decoder` decode path lives there; `hpack_huffman.decode` ports the `maxLen=0` unlimited path only). The lazy `sync.Once` build of the decode tree is rendered as OCaml `lazy` (semantic equivalent; no behavioral difference).
+- **Commit:** `feat(h2): port HPACK Huffman codec and static/dynamic tables (H2 Ticket 2)` (single jj change; id reported to orchestrator).
+
+Status: Done
 
 ### Ticket 3 — HPACK: encoder + decoder
 Status: Planned
