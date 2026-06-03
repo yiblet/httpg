@@ -485,6 +485,11 @@ let close srv =
 let serve_conn (handler : handler) (cfd, peer) =
   let ic, oc = Net.channels_of_fd cfd in
   let remote = Net.sockaddr_to_string peer in
+  (* Go's Server: a base context cancelled when the connection is closed
+     (connContext / cancelCtx in conn.serve), off which each request derives
+     its own per-request context. Cancelled in the finalizer below so a handler
+     observing Context.done_ sees the connection close (Go's conn.serve). *)
+  let conn_ctx, cancel_conn = Context.with_cancel Context.background in
   let rec loop () =
     Lwt.catch
       (fun () -> Io.read_request ic >>= fun r -> Lwt.return (Some r))
@@ -493,15 +498,23 @@ let serve_conn (handler : handler) (cfd, peer) =
     | None -> Lwt.return_unit (* EOF or parse error: close. *)
     | Some r ->
         r.Request.remote_addr <- remote;
+        (* Per-request context cancelled when the handler returns (Go cancels
+           the request context as ServeHTTP unwinds) and, via its parent
+           [conn_ctx], when the connection closes. *)
+        let req_ctx, cancel_req = Context.with_cancel conn_ctx in
+        r.Request.ctx <- req_ctx;
         Lwt.catch
           (fun () -> serve_one oc r handler)
           (fun _ -> Lwt.return false)
         >>= fun keep_alive ->
+        cancel_req Context.Canceled;
         if keep_alive then loop () else Lwt.return_unit
   in
-  loop () >>= fun () ->
-  Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit) >>= fun () ->
-  Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit)
+  Lwt.finalize loop (fun () ->
+      cancel_conn Context.Canceled;
+      Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
+      >>= fun () ->
+      Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
 
 (* Go's Server.Serve over a listening fd: accept connections, handle each in
    its own fiber, until [stop] resolves. *)

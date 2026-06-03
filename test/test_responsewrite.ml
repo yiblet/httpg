@@ -31,6 +31,7 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Gohttp.Body.t Gohttp.Reque
     form = None;
     post_form = None;
     multipart_form = None;
+    ctx = Gohttp.Context.background;
   }
 
 let header pairs =

@@ -70,6 +70,7 @@ let dummy_req () : Gohttp.Body.t Gohttp.Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
+    ctx = Gohttp.Context.background;
   }
 
 let basic_auth_roundtrip () =

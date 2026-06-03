@@ -40,6 +40,9 @@ type 'body t = {
       (** Go [Form]: query + urlencoded body params; [None] until parsed. *)
   mutable post_form : Values.t option;  (** Go [PostForm]: body params only. *)
   mutable multipart_form : multipart_form option;  (** Go [MultipartForm]. *)
+  mutable ctx : Context.t;
+      (** Go [Request.ctx]: the request context (deadline/cancellation),
+          defaulting to {!Context.background}. *)
 }
 
 (** [defaultUserAgent]. *)
@@ -79,3 +82,10 @@ val basic_auth_encode : string -> string -> string
 
 (** [Request.SetBasicAuth]: set the "Authorization" header. *)
 val set_basic_auth : 'a t -> string -> string -> unit
+
+(** [Request.Context]: the request's context (never nil; defaults to
+    {!Context.background}). *)
+val context : 'a t -> Context.t
+
+(** [Request.WithContext]: a shallow copy of the request carrying [ctx]. *)
+val with_context : 'a t -> Context.t -> 'a t

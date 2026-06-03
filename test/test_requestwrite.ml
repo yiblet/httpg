@@ -41,6 +41,7 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1) ?(header = Gohttp.
     form = None;
     post_form = None;
     multipart_form = None;
+    ctx = Gohttp.Context.background;
   }
 
 let write r = capture (fun oc -> Gohttp.Io.write_request oc r)

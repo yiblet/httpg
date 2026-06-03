@@ -130,16 +130,53 @@ let round_trip t (req : Body.t Request.t) : Body.t Response.t Lwt.t =
      else close_conn pc)
     >>= fun () -> Lwt.return resp
   in
+  (* Race the IO against the request context (Go aborts an in-flight round trip
+     on <-ctx.Done() and returns context.Cause(ctx)). If the context fires
+     first we raise its cause exception; [Lwt.choose] then leaves the IO branch
+     pending, which we cancel and whose connection we close (the IO read would
+     otherwise fail with EBADF and could mask the context cause). On normal IO
+     completion the never-resolving context branch (for a background context) or
+     resolved-after branch is cancelled, so the watcher does not leak. *)
+  let exchange_with_ctx pc =
+    let io_p = exchange pc in
+    let ctx_p =
+      Context.done_ req.Request.ctx >>= fun () ->
+      let cause =
+        match Context.err req.Request.ctx with
+        | Some e -> e
+        | None -> Context.Canceled
+      in
+      Lwt.fail cause
+    in
+    (* Lwt.choose resolves/rejects as soon as the first branch does, without
+       cancelling the other. *)
+    Lwt.try_bind
+      (fun () -> Lwt.choose [ io_p; ctx_p ])
+      (fun resp ->
+        (* IO won. Stop watching the context. *)
+        Lwt.cancel ctx_p;
+        Lwt.return resp)
+      (fun exn ->
+        (* Either the context fired (cause exn) or the IO failed. In both cases
+           cancel the still-pending sibling and close the connection so the fd
+           is released; then re-raise. *)
+        Lwt.cancel ctx_p;
+        Lwt.cancel io_p;
+        close_conn pc >>= fun () -> Lwt.fail exn)
+  in
   let rec attempt ~allow_retry =
     acquire () >>= fun (pc, was_idle) ->
     Lwt.catch
-      (fun () -> exchange pc)
+      (fun () -> exchange_with_ctx pc)
       (fun exn ->
         (* A reused (idle) connection may have been closed by the server; on a
            failure with a recycled connection, dial fresh and retry once
            (Go's shouldRetryRequest for an idempotent re-dial). *)
         close_conn pc >>= fun () ->
-        if was_idle && allow_retry then attempt ~allow_retry:false
+        (* Do not retry when the context cancelled/expired (Go's
+           shouldRetryRequest declines once the request context is done). *)
+        let ctx_done = Context.err req.Request.ctx <> None in
+        if was_idle && allow_retry && not ctx_done then attempt ~allow_retry:false
         else Lwt.fail exn)
   in
   attempt ~allow_retry:true

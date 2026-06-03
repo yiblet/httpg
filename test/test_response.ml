@@ -77,6 +77,7 @@ let location () =
       form = None;
       post_form = None;
       multipart_form = None;
+      ctx = Gohttp.Context.background;
     }
   in
   let raw = "HTTP/1.1 302 Found\r\nLocation: /to\r\nContent-Length: 0\r\n\r\n" in

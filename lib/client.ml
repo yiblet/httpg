@@ -116,6 +116,9 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
               form = None;
               post_form = None;
               multipart_form = None;
+              (* Go's redirect path clones the original request, preserving its
+                 context so the overall deadline still bounds later hops. *)
+              ctx = req.Request.ctx;
             }
           in
           (match c.check_redirect via with
@@ -127,7 +130,19 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
 let do_ c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
   match c.timeout with
   | None -> do_one c req
-  | Some secs -> Net.with_timeout secs (do_one c req)
+  | Some secs ->
+      (* Go's Client.Timeout = context.WithDeadline over the request context,
+         covering the whole exchange. Because {!Io.read_response} materializes
+         the response body fully in memory during the round trip, this deadline
+         also covers the body read (Go's cancelTimerBody wraps the streaming
+         body; here the body is already buffered, so no extra wrapper is
+         needed). The timer is cancelled when [do_one] completes to avoid a
+         leak. *)
+      let ctx, cancel = Context.with_timeout req.Request.ctx secs in
+      let req = Request.with_context req ctx in
+      Lwt.finalize
+        (fun () -> do_one c req)
+        (fun () -> cancel Context.Canceled; Lwt.return_unit)
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
@@ -153,6 +168,7 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     form = None;
     post_form = None;
     multipart_form = None;
+    ctx = Context.background;
   }
 
 let get c url = do_ c (make_request Method.get url)

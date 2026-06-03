@@ -38,6 +38,10 @@ type 'body t = {
   mutable form : Values.t option;
   mutable post_form : Values.t option;
   mutable multipart_form : multipart_form option;
+  (* Go's Request.ctx: the request's context, defaulting to Context.background
+     (Go uses context.Background when r.ctx is nil). Carries the per-request
+     deadline/cancellation (Ticket 12). *)
+  mutable ctx : Context.t;
 }
 
 (* defaultUserAgent (request.go). *)
@@ -126,3 +130,12 @@ let basic_auth_encode username password = Base64.encode_string (username ^ ":" ^
 (* Request.SetBasicAuth. *)
 let set_basic_auth (r : 'a t) username password =
   Header.set r.header "Authorization" ("Basic " ^ basic_auth_encode username password)
+
+(* Request.Context: the request's context, never nil (Go returns
+   context.Background for a nil ctx; here the field defaults to that). *)
+let context (r : 'a t) = r.ctx
+
+(* Request.WithContext: a shallow copy of the request with the given context
+   (Go returns *Request with r2.ctx = ctx). All fields are copied; only [ctx]
+   differs. *)
+let with_context (r : 'a t) (ctx : Context.t) : 'a t = { r with ctx }

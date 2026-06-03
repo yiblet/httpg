@@ -35,6 +35,7 @@ let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
+    ctx = Gohttp.Context.background;
   }
 
 let values_get r_field key =
@@ -132,6 +133,7 @@ let parse_form_unknown_content_type () =
         form = None;
         post_form = None;
         multipart_form = None;
+        ctx = Gohttp.Context.background;
       }
     in
     let res = run (Form.parse_form r) in
