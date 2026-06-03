@@ -100,7 +100,7 @@ Status: Done
 - **Commit id:** `38d183b1` (jj change `ktsztlxm`) — "feat: scaffold multi-module lib with Method and Status (Ticket 1)". This plan-file edit recording the commit id lands in a subsequent working-copy change.
 
 ### Ticket 2 — Header
-Status: Planned
+Status: Done
 
 **A) Scope** Port `header.go`: `Header.t` (canonical-key map to value lists) with `add/set/get/values/del/clone/write` and `canonical_header_key`.
 
@@ -117,7 +117,42 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/header.ml` — new; port of `go/src/net/http/header.go` plus the
+    textproto canonicalization/`MIMEHeader` methods it delegates to
+    (`go/src/net/textproto/reader.go` `CanonicalMIMEHeaderKey` /
+    `validHeaderFieldByte`, `go/src/net/textproto/header.go` `MIMEHeader`).
+    Exposes `type t = { mutable entries : (string * string list) list }` (Go's
+    `map[string][]string` with canonical keys), `create`, `canonical_header_key`,
+    `add`, `set`, `get` (first value or ""), `values`, `del`, `has`, `clone`,
+    `write`, and `write_subset ~exclude`. `write`/`write_subset` mirror Go's
+    `Header.Write`/`writeSubset`: keys sorted via `String.compare`, one
+    `Key: value\r\n` line per value, keys with invalid field-name bytes dropped
+    (`valid_header_field_name`), values run through `headerNewlineToSpace` +
+    `textproto.TrimString`.
+  - `test/test_header.ml` — new; alcotest suite exposing `val tests`. Ports
+    `header_test.go`: the `headerWriteTests` table (all 11 representative rows
+    incl. sort-over-threshold and the invalid-characters/header-smuggling row),
+    canonicalization cases (incl. Success-Criteria `uSER-aGeNT -> User-Agent`,
+    plus invalid-byte passthrough), and get/set/add/del/values/clone semantics.
+  - `test/test_gohttp.ml` — added `("Header", Test_header.tests)` to the
+    `Alcotest.run "gohttp"` list.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.002s. 36 tests run." All `[OK]`. New suite `Header` = 20 cases (8
+  canonicalization, 11 write/write_subset, 3 get/set/add/del + values + clone),
+  alongside `Method` (9) and `Status` (7) for 36 total.
+- **Porting notes:** Go's `headerWriteTests` rows assign keys *directly* to the
+  map literal, bypassing canonicalization (e.g. `"k1"`, `"NewlineInKey\r\n"`).
+  The test reproduces this with a raw-insert `make` helper (`{ Header.entries =
+  pairs }`) rather than `add`, which would canonicalize the keys — a Go-specific
+  test-data artifact, so the fixtures (not the implementation) carry the
+  non-canonical keys. Go's nil-vs-empty value-slice distinction (`Clone`,
+  `headerWriteTests` "Nil"/"Empty") is not modeled; both contribute zero output
+  lines, matching observable `Write` behavior.
+- **Commit:** `a06fd61c` (jj change `xzyvzpmw`) — "feat: port Header with canonical keys and Write (Ticket 2)". This commit-id annotation lands in a subsequent working-copy change.
 
 ### Ticket 3 — Sniff
 Status: Planned
