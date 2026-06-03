@@ -1,2 +1,4 @@
 (library
- (public_name gohttp))
+ (name gohttp)
+ (public_name gohttp)
+ (libraries uri lwt lwt.unix tls-lwt))

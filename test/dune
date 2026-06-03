@@ -1,3 +1,3 @@
 (test
  (name test_gohttp)
- (libraries gohttp))
+ (libraries gohttp alcotest))

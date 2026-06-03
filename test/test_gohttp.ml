@@ -1,1 +1,3 @@
-let () = assert (Gohttp.greeting "OCaml" = "Hello, OCaml!")
+let () =
+  Alcotest.run "gohttp"
+    [ ("Method", Test_method.tests); ("Status", Test_status.tests) ]

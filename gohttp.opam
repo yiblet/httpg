@@ -7,6 +7,10 @@ license: "MIT"
 depends: [
   "ocaml" {>= "5.0"}
   "dune" {>= "3.0"}
+  "uri"
+  "lwt"
+  "tls-lwt"
+  "alcotest" {with-test}
 ]
 build: [
   ["dune" "build" "-p" name "-j" jobs]
