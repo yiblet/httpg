@@ -28,6 +28,9 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Gohttp.Body.t Gohttp.Reque
     trailer = None;
     request_uri = "";
     remote_addr = "";
+    form = None;
+    post_form = None;
+    multipart_form = None;
   }
 
 let header pairs =

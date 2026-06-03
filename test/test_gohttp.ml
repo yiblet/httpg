@@ -19,4 +19,5 @@ let () =
       ("Ascii", Test_ascii.tests);
       ("Serve", Test_serve.tests);
       ("Clientserver", Test_clientserver.tests);
+      ("Form", Test_request_form.tests);
     ]

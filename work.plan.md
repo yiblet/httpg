@@ -923,7 +923,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 11 — Form & multipart parsing
-Status: Planned
+Status: Done
 
 **A) Scope** Port the request form API deferred from Ticket 6: `ParseForm`, `ParseMultipartForm`, `FormValue`, `PostFormValue`, `FormFile`, and the `form`/`post_form`/`multipart_form` fields of `Request.t`. URL-encoded form parsing (`application/x-www-form-urlencoded`) is ported faithfully; **multipart/form-data parsing uses the `multipart_form-lwt` opam library as a pragmatic stand-in** (Go hand-rolls `mime/multipart`; a faithful port is a possible future pass).
 
@@ -937,6 +937,94 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
 
-> **Deviation note:** Ticket 11's multipart parsing depends on `multipart_form-lwt` rather than a hand-written port of Go's `mime/multipart`. This is the one intentional fidelity exception in the plan, chosen for expedience; flagged here so it is not mistaken for a complete 1:1 port.
+- **Status:** Done.
+- **Files created:**
+  - `lib/values.ml` + `lib/values.mli` — new; port of `go/src/net/url/url.go`
+    `Values` (= `map[string][]string`) and `ParseQuery`/`parseQuery`. Per the
+    project rule the map is mirrored with a `Hashtbl` (`type t =
+    (string, string list) Hashtbl.t`). Exposes `create`, `get`/`set`/`add`/
+    `del`/`has`/`find`/`length`, `copy_values` (Go `copyValues`),
+    `parse_query`/`parse_query_into` (`ParseQuery`/`parseQuery`: `&`-split,
+    semicolon-rejection, `=`-cut, `QueryUnescape` of key+value, first-error
+    return), `encode` (`Values.Encode`: sorted-by-key, `QueryEscape`), and
+    `query_unescape`/`query_escape` (delegated to `uri` percent-coding, with
+    Go's `' ' <-> '+'` query-component convention applied on top of `%20`).
+  - `lib/form.ml` + `lib/form.mli` — new; port of the form half of
+    `go/src/net/http/request.go` deferred from Ticket 6. `parse_form`
+    (`ParseForm` — returns `(unit, string) result Lwt.t`, the first error,
+    instead of raising), `parse_post_form` (`parsePostForm` — reads the
+    urlencoded body for POST/PUT/PATCH, 10 MB cap, `http: POST too large`),
+    `parse_multipart_form ~max_memory` (`ParseMultipartForm` — multipart via the
+    stand-in, merges text values into Form+PostForm per Issue 9305, calls
+    `parse_form` first and defers its error), `form_value`/`post_form_value`
+    (`FormValue`/`PostFormValue` — lazy parse, ignore errors, first value),
+    `form_file` (`FormFile` — simplified to `(filename, content) option`),
+    `parse_media_type` (a trimmed `mime.ParseMediaType`: lowercased bare type +
+    params, raises `Form_error "mime: invalid media parameter"` on an
+    empty/`=`-less parameter), `multipart_reader_check` (`multipartReader`
+    content-type gate, `Not_multipart` = Go's `ErrNotMultipart`), and
+    `base_filename` (Issue 45789 directory-path strip).
+  - `test/test_request_form.ml` — new; alcotest suite `val tests` (8 cases),
+    Lwt driven via `Lwt_main.run`.
+- **Files modified:**
+  - `lib/request.ml` + `lib/request.mli` — added Go's `Form`/`PostForm`/
+    `MultipartForm` fields as **mutable optionals** (`form`/`post_form :
+    Values.t option`, `multipart_form : multipart_form option`) defaulting to
+    `None`, plus the `file_header` and `multipart_form` record types (analogues
+    of `multipart.FileHeader`/`*multipart.Form`). Mutable-in-place mirrors Go,
+    which mutates the Request; optionals keep every existing constructor valid
+    (only the literal needed the three `= None` fields).
+  - `lib/dune` — added `multipart_form-lwt` to `(libraries ...)`.
+  - `gohttp.opam` — added `"multipart_form-lwt"` to `depends`.
+  - `lib/client.ml`, `lib/io.ml`, `test/test_request.ml`, `test/test_response.ml`,
+    `test/test_requestwrite.ml`, `test/test_responsewrite.ml` — the 7 existing
+    `Request.t` record literals gained `form = None; post_form = None;
+    multipart_form = None;` (mechanical; no behavior change).
+  - `test/test_gohttp.ml` — registered `("Form", Test_request_form.tests)`.
+- **How form fields were added without breaking callers:** the three fields are
+  mutable record fields defaulting to `None` (the least-invasive faithful
+  option, matching Go's in-place mutation). Because OCaml requires every record
+  field at construction, the only churn was appending `= None` to the 7 literal
+  call sites; no return-based side-table was needed. All Ticket-6/9/10 code
+  compiles unchanged otherwise.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.033s. **253 tests run.**" All `[OK]`. New suite `Form` = 8 cases:
+  `parse_urlencoded` (TestParseFormQuery — query+body merge and precedence,
+  including `both=[y;x]` body-first, `q=[foo;bar]` query-only-in-PostForm,
+  orphan/empty/nokey rows), `parse_form_query_methods` (TestParseFormQueryMethods
+  — only POST/PUT/PATCH read the body; FOO does not), `parse_form_semicolon`
+  (TestParseFormSemicolonSeparator — non-encoded `;` errors but valid params
+  still populate Form, all 4 methods), `parse_form_unknown_content_type`
+  (TestParseFormUnknownContentType — text/empty/`boundary=`-error/unknown rows),
+  `multipart` (a boundary + text field + file part: asserts field in
+  Form/PostForm/`mf.value` and FormFile filename+content), `multipart_filename`
+  (TestParseMultipartFormFilename / Issue 45789 — `../usr/foobar.txt/` →
+  `foobar.txt`), `form_value` (FormValue lazily parses a multipart body and
+  returns the first value; asserts `form = None` before, `Some` after), and
+  `values_encode` (url.Values.Encode sorted-by-key + space→`+`). Baseline before
+  ticket: 245.
+- **Go cases omitted (with reason):**
+  - `TestMultipartReader` — exercises the streaming `MultipartReader()` API
+    (and `multipart/mixed`); only the `multipart/form-data` form path is wired
+    (`ParseMultipartForm`). The content-type gate it tests is covered by
+    `multipart_reader_check`.
+  - `TestParseMultipartForm` empty-body row — Go asserts a specific
+    `multipart EOF` error and `err == ErrNotMultipart` identity. The
+    `multipart_form-lwt` stand-in surfaces its own `` `Msg `` for an empty/short
+    body, so the exact Go error value is not reproduced (the text/plain
+    `ErrNotMultipart` branch IS modeled as the `Not_multipart` exception).
+  - `TestParseMultipartFormPopulatesPostForm` exact-row — the Issue 9305 merge
+    semantics (text values into both Form and PostForm) are ported and asserted
+    in the `multipart` case; the verbatim Go fixture (with pre-seeded
+    `req.Form`) is simplified rather than reproduced field-for-field.
+  - `TestMaxInt64ForMultipartFormMaxMemoryOverflow`,
+    `TestParseMultipartFormOrder`, `TestMultipartReaderOrder`,
+    `TestParseMultipartFormSemicolonSeparator` — server/client-coupled
+    (`newClientServerTest`) and/or depend on Go's temp-file spill + `maxMemory`
+    overflow accounting, which the in-memory stand-in does not model. `max_memory`
+    is accepted for signature fidelity only.
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
+
+> **Deviation note:** Ticket 11's multipart parsing depends on `multipart_form-lwt` rather than a hand-written port of Go's `mime/multipart`. This is the one intentional fidelity exception in the plan, chosen for expedience; flagged here so it is not mistaken for a complete 1:1 port. Consequently `max_memory` is accepted but not enforced (the library materializes all parts in memory rather than spilling large parts to temp files), and a few multipart error-surface / ordering rows are omitted (see the Go-cases list above).

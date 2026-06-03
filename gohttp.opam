@@ -11,6 +11,7 @@ depends: [
   "lwt"
   "tls-lwt"
   "base64"
+  "multipart_form-lwt"
   "fmt" {with-test}
   "alcotest" {with-test}
 ]

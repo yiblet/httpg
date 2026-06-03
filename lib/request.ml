@@ -2,6 +2,21 @@
    The body field is parametric so the type stays IO-agnostic; io.ml
    instantiates ['body] to {!Body.t}. *)
 
+(* A multipart file part, the analogue of Go's multipart.FileHeader. Contents
+   are held in memory (the multipart_form-lwt stand-in materializes parts as
+   strings; Go spills large parts to temp files). *)
+type file_header = {
+  filename : string;
+  fh_header : (string * string) list;  (** the part's MIME header fields *)
+  content : string;
+}
+
+(* The analogue of Go's *multipart.Form: named text values plus file parts. *)
+type multipart_form = {
+  value : Values.t;
+  file : (string, file_header list) Hashtbl.t;
+}
+
 type 'body t = {
   mutable meth : string;
   mutable url : Uri.t;
@@ -17,6 +32,12 @@ type 'body t = {
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
+  (* Form parsing state (Ticket 11), populated lazily by {!Form}. Optionals
+     default to [None] so existing constructors are unaffected. Go mutates the
+     Request in place; these mutable fields mirror that. *)
+  mutable form : Values.t option;
+  mutable post_form : Values.t option;
+  mutable multipart_form : multipart_form option;
 }
 
 (* defaultUserAgent (request.go). *)

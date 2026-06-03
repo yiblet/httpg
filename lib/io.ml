@@ -226,6 +226,9 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
                 trailer;
                 request_uri;
                 remote_addr = "";
+                form = None;
+                post_form = None;
+                multipart_form = None;
               }
           end
       end)

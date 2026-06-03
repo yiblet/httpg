@@ -38,6 +38,9 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1) ?(header = Gohttp.
     trailer = None;
     request_uri = "";
     remote_addr = "";
+    form = None;
+    post_form = None;
+    multipart_form = None;
   }
 
 let write r = capture (fun oc -> Gohttp.Io.write_request oc r)

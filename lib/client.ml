@@ -113,6 +113,9 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
               trailer = None;
               request_uri = "";
               remote_addr = "";
+              form = None;
+              post_form = None;
+              multipart_form = None;
             }
           in
           (match c.check_redirect via with
@@ -147,6 +150,9 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     trailer = None;
     request_uri = "";
     remote_addr = "";
+    form = None;
+    post_form = None;
+    multipart_form = None;
   }
 
 let get c url = do_ c (make_request Method.get url)

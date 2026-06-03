@@ -3,6 +3,21 @@
    parsing, GetBody, Cancel, TLS and context fields are intentionally omitted
    (deferred). *)
 
+(** A multipart file part, the analogue of Go's [multipart.FileHeader]. The
+    contents are held in memory (the multipart_form-lwt stand-in materializes
+    parts as strings). *)
+type file_header = {
+  filename : string;
+  fh_header : (string * string) list;
+  content : string;
+}
+
+(** The analogue of Go's [*multipart.Form]: named text values and file parts. *)
+type multipart_form = {
+  value : Values.t;
+  file : (string, file_header list) Hashtbl.t;
+}
+
 (** A request mirroring Go's [Request] struct. The body field is parametric so
     the type carries no IO dependency; {!Io} instantiates ['body] to
     {!Body.t}. *)
@@ -21,6 +36,10 @@ type 'body t = {
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
+  mutable form : Values.t option;
+      (** Go [Form]: query + urlencoded body params; [None] until parsed. *)
+  mutable post_form : Values.t option;  (** Go [PostForm]: body params only. *)
+  mutable multipart_form : multipart_form option;  (** Go [MultipartForm]. *)
 }
 
 (** [defaultUserAgent]. *)

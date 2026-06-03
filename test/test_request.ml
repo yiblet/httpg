@@ -67,6 +67,9 @@ let dummy_req () : Gohttp.Body.t Gohttp.Request.t =
     trailer = None;
     request_uri = "";
     remote_addr = "";
+    form = None;
+    post_form = None;
+    multipart_form = None;
   }
 
 let basic_auth_roundtrip () =
