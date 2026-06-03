@@ -289,3 +289,20 @@ Status: Done.
 ---
 
 **Streaming plan complete.** All 5 tickets are Done. Bodies now stream first-class on every read path (server request bodies, client response bodies, h1 + h2) and write where Go streams (server responses via the 2048 buffer-then-chunk model with `flush`; h2 DATA per ~4 KiB), with the full body lifecycle (`Body.drain`/EOF-release) gating keep-alive reuse on both ends and context cancellation covering mid-stream reads. The one remaining whole-body buffer on a hot path is `Transfer.write_body`'s request/response-write branch, which the plan scoped "as today" (Non-Goal) and is recorded as a follow-up above.
+
+### Ticket 6 — Stream the request-body write path (Transfer.write_body)
+Status: Planned
+
+**A) Scope** Close the last whole-body buffer on a hot path. `Transfer.write_body`'s **chunked** branch (`transfer.ml:519`) and **fixed-length** branch (`:527`) currently `Body.read_all` the entire body; rewrite both to pull from the `Body.Stream` chunk-by-chunk (Go's `io.Copy` / `io.CopyN` + counted length check). Required for "request bodies … 100 MB … memory minimal" on the client send path (`Io.write_request` → `write_body`). The unknown-length branch (`:524`, `Body.write`) already streams.
+
+**B) Migration Strategy** Internal to `write_body`; no signature change. `String`/`Empty` bodies unchanged. Optionally add a `Body.iter`/`fold` helper. All transfer/requestwrite/responsewrite tests stay green (byte-identical output).
+
+**C) Exit State** A `Body.Stream` with chunked TE or a known Content-Length streams chunk-by-chunk; the fixed-length branch still raises on a body/Content-Length mismatch (via a running counter). Build + tests green.
+
+**D) Detailed Design** chunked: loop `next ()` -> `chunked_writer_write oc chunk` -> `chunked_writer_close` at EOF. fixed-length: loop `next ()` -> `Lwt_io.write oc chunk`, accumulate `n`, verify `n = content_length` at EOF else raise the existing `Chunk_error`. Mirror Go's `transferWriter.writeBody`.
+
+**E) Testing Plan** *Unit* (extend `test/test_transfer.ml`): a multi-chunk `Body.Stream` written chunked round-trips (dechunked == concatenation); a fixed-length stream writes correctly and a wrong-length stream raises; existing buffered cases unchanged.
+
+**F) End-of-Ticket Verification** `dune build && dune test` clean.
+
+**G) Execution Record** _(tbd)_
