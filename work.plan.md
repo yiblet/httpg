@@ -573,7 +573,7 @@ Status: Done
 - **Commit:** `(see below)`
 
 ### Ticket 8 — ServeMux internals (pattern, routing_tree, mapping)
-Status: Planned
+Status: Done
 
 **A) Scope** Port `pattern.go`, `routing_tree.go`, `mapping.go` — pattern parsing and the routing tree used by `ServeMux`.
 
@@ -587,7 +587,94 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/mapping.ml` + `lib/mapping.mli` — new; port of
+    `go/src/net/http/mapping.go`. `type ('k, 'v) t` is the hybrid
+    slice-or-map container: stores entries in a list (`s`) while
+    `len < max_slice` (= 8, Go's `maxSlice`), then switches to a `Hashtbl`
+    (`m`) once over the threshold — mirroring Go's `mapping[K,V]{ s, m }`. Ports
+    `create` (Go's zero value), `add`, `find` (`'v option` for Go's
+    `(v, found)`), `each_pair` (with early-exit when `f` returns `false`), and
+    `using_map` (exposes Go's `m.m != nil` for the threshold-switch test). Uses
+    `Hashtbl` for the map representation per the project rule.
+  - `lib/pattern.ml` + `lib/pattern.mli` — new; port of
+    `go/src/net/http/pattern.go`. `type segment = { s; wild; multi }` and
+    `type t = { str; method_; host; segments }` mirror Go's `segment`/`pattern`
+    structs. Ports `parse` (Go's `parsePattern`, returning `(t, string) result`
+    with Go's faithful `"at offset N: ..."` messages), `to_string`,
+    `last_segment`, the `relationship` variant + `relationship_to_string` /
+    `inverse_relationship` / `combine_relationships`, `compare_methods`,
+    `compare_segments`, `compare_paths`, `compare_paths_and_methods`,
+    `conflicts_with`, `describe_conflict`, `common_path`, `difference_path`, and
+    the helpers `valid_method` (Go `validMethod`/`isToken`),
+    `is_valid_wildcard_name`, `path_unescape` (Go `pathUnescape` via a self-
+    contained `%XX` decoder), and `path_clean` (Go `cleanPath`/`path.Clean`, to
+    reject unclean non-CONNECT patterns).
+  - `lib/routing_tree.ml` + `lib/routing_tree.mli` — new; port of
+    `go/src/net/http/routing_tree.go`. `type 'h node` mirrors Go's
+    `routingNode` (leaf `pattern`+`handler` as `(Pattern.t * 'h) option`;
+    interior `children : (string, _) Mapping.t`, `multi_child`, `empty_child`),
+    keeping the handler polymorphic since the server is not wired yet. Ports
+    `add_pattern` (host → method → path levels), `add_segments`, `set`,
+    `add_child`/`find_child`, `match_` (Go's `match`: host then no-host
+    fallback), `match_method_and_path` (exact method, then GET-for-HEAD, then
+    no-method), `match_path` (literal → single-wildcard → multi-wildcard with
+    backtracking, trailing-slash special case, wildcard capture), `first_segment`,
+    `matching_methods`/`matching_methods_path`, and `print` (Go's
+    `(routingNode).print` with `%q` quoting via a local `go_quote`).
+    `children` uses `Mapping` (the `map`→`Hashtbl` analog) as Go does.
+  - `test/test_mapping.ml` — new; alcotest suite `val tests` (4 cases) ported
+    from `mapping_test.go`: `mapping_slice_to_map` (TestMapping: stays slice up
+    to `max_slice`, `using_map` flips on the next add), `each_pair`
+    (TestMappingEachPair: visits all pairs in the map representation, compared
+    order-independently), `each_pair_stop` (early-exit when `f` returns false),
+    `find_absent` (slice-representation present/absent lookups). (The
+    `BenchmarkFindChild` benchmark is omitted — see notes.)
+  - `test/test_pattern.ml` — new; alcotest suite `val tests` (8 cases) ported
+    from `pattern_test.go`: `parse_pattern` (all 20 `TestParsePattern` rows incl.
+    multi-space method, `%`-escapes, `{$}`, `{rest...}`), `parse_pattern_error`
+    (all 21 `TestParsePatternError` rows, substring-matched), `compare_methods`
+    (TestCompareMethods + inverse), `compare_paths` (a representative+edge subset
+    of TestComparePaths with self-equivalence + inverse checks), `conflicts_with`
+    (all 21 TestConflictsWith rows + commutativity), `describe_conflict`
+    (TestDescribeConflict), `common_path` (TestCommonPath), `difference_path`
+    (TestDifferencePath).
+  - `test/test_routing_tree.ml` — new; alcotest suite `val tests` (4 cases)
+    ported from `routing_tree_test.go` (handlers are `()` for Go's `nil`):
+    `first_segment` (TestRoutingFirstSegment), `add_pattern` (TestRoutingAddPattern
+    tree-structure rendering via `print`), `node_match` (the full
+    TestRoutingNodeMatch: the 8-pattern tree, the 11-pattern host/method tree,
+    and the `{$}`/`{w}`/`{w...}` precedence trees — longest-match, wildcard
+    capture, HEAD-matches-GET, case-sensitive methods, host fallback),
+    `matching_methods` (TestMatchingMethods incl. GET⇒HEAD).
+  - `test/test_gohttp.ml` — registered `("Mapping", …)`, `("Pattern", …)`,
+    `("RoutingTree", …)`.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.031s. **234 tests run.**" All `[OK]`. New suites: `Mapping` (4), `Pattern`
+  (8), `RoutingTree` (4) = 16 new, alongside the 218 baseline.
+- **Porting notes / intentionally omitted Go cases:**
+  - `mapping_test.go`'s `BenchmarkFindChild` / `findChildLinear` are Go
+    benchmarks (perf-only), omitted; the slice-vs-map behavior they exercise is
+    covered by the functional tests.
+  - These modules are pure (no IO/Lwt) and are **not** wired into a server —
+    that is Ticket 9. `routing_index.go` (the `routingIndex` optimization that
+    pre-filters candidate patterns before tree search) is intentionally **not**
+    ported: it is a performance optimization layered over the same tree; the
+    tree's `add_pattern`/`match`/`matching_methods` semantics (the spec the mux
+    relies on) are ported in full. The Go-side `TestRegisterConflict` lives in
+    `pattern_test.go` but exercises `ServeMux.registerErr` (server wiring), so it
+    is deferred to Ticket 9; the underlying `conflicts_with`/`describe_conflict`
+    logic it depends on is fully covered here.
+  - `is_valid_wildcard_name` uses ASCII letter/digit/`_` classification rather
+    than Go's full `unicode.IsLetter`/`IsDigit`; sufficient for the ported test
+    surface (all wildcard names are ASCII), flagged as a faithful narrowing.
+  - `each_pair` / `print` iterate the map representation in `Hashtbl` order; the
+    `print` test sorts child keys exactly as Go's `print` does, so output is
+    deterministic, and `each_pair` results are compared order-independently.
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 9 — Server + ServeMux dispatch
 Status: Planned

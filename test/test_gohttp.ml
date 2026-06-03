@@ -13,4 +13,7 @@ let () =
       ("Response", Test_response.tests);
       ("ResponseWrite", Test_responsewrite.tests);
       ("Net", Test_net.tests);
+      ("Mapping", Test_mapping.tests);
+      ("Pattern", Test_pattern.tests);
+      ("RoutingTree", Test_routing_tree.tests);
     ]
