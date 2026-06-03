@@ -291,7 +291,7 @@ Status: Done.
 **Streaming plan complete.** All 5 tickets are Done. Bodies now stream first-class on every read path (server request bodies, client response bodies, h1 + h2) and write where Go streams (server responses via the 2048 buffer-then-chunk model with `flush`; h2 DATA per ~4 KiB), with the full body lifecycle (`Body.drain`/EOF-release) gating keep-alive reuse on both ends and context cancellation covering mid-stream reads. The one remaining whole-body buffer on a hot path is `Transfer.write_body`'s request/response-write branch, which the plan scoped "as today" (Non-Goal) and is recorded as a follow-up above.
 
 ### Ticket 6 — Stream the request-body write path (Transfer.write_body)
-Status: Planned
+Status: Done
 
 **A) Scope** Close the last whole-body buffer on a hot path. `Transfer.write_body`'s **chunked** branch (`transfer.ml:519`) and **fixed-length** branch (`:527`) currently `Body.read_all` the entire body; rewrite both to pull from the `Body.Stream` chunk-by-chunk (Go's `io.Copy` / `io.CopyN` + counted length check). Required for "request bodies … 100 MB … memory minimal" on the client send path (`Io.write_request` → `write_body`). The unknown-length branch (`:524`, `Body.write`) already streams.
 
@@ -305,4 +305,26 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+*Baseline:* `jj st` clean (working copy empty, parent = the Ticket-6 plan-doc commit `fb1aa2b7`); `dune build && dune test` green — **449 tests**.
+
+*Files modified (with `.mli` updates):*
+- `lib/body.ml` + `lib/body.mli` — added `Body.iter : (string -> unit Lwt.t) -> t -> unit Lwt.t`, the analogue of Go's `io.Copy` pulling from a body reader chunk-by-chunk. `Empty` → no calls; `String s` → exactly one call `f s`; `Stream next` → one call per chunk until `next ()` returns `None`. No body in memory beyond the current chunk. `read_all`/`drain`/`write`/the variant shape unchanged.
+- `lib/transfer.ml` — rewrote the two buffering branches of `write_body` (no signature change):
+  - **chunked** (was `:519`): replaced `Body.read_all` + single `chunked_writer_write` with `Body.iter (fun chunk -> chunked_writer_write oc chunk) t.tw_body`, then `chunked_writer_close oc`, then `after_body ()`. Streams each source chunk straight through the chunked writer (Go's `io.Copy` into the `chunkedWriter`). `chunked_writer_write` already skips zero-length chunks, so empty source chunks emit no frame.
+  - **fixed-length** (was `:527`): replaced `Body.read_all` + length check + single write with `Body.iter` writing each chunk via `Lwt_io.write oc` and accumulating a running byte counter `n` (a `int64 ref`); at EOF verifies `n = tw_content_length`, else raises the existing `Chunk_error` with the **identical** message format `"http: ContentLength=%Ld with Body length %Ld"` (Go's `io.CopyN` + the count check).
+  - **unknown-length** (`:524`, `Body.write`): already streams — left unchanged.
+
+*Byte-identical output preserved:* for a `String`/`Empty` body (every existing wire-format test sets `Body.of_string`/`Body.empty`), `iter` makes exactly one (or zero) `f` call — so the chunked branch emits the same single chunk + close + CRLF and the fixed-length branch writes the same single buffer + count, byte-for-byte identical to the pre-change output. The only behavioral difference is for a multi-chunk `Body.Stream` (new capability), which frames one chunk per source chunk rather than collapsing to one.
+
+*Existing chunked-framing tests affected:* **none.** `test_write_body_chunked` (asserts exact bytes `"5\r\nhello\r\n0\r\n\r\n"`) and `test_write_body_fixed`/`test_write_body_length_mismatch` all use `Body.of_string "hello"` (a single chunk), so their assertions stayed green unchanged — no assertion was weakened or adjusted. The full suite (`test_requestwrite`/`test_responsewrite`/`test_transfer` etc.) stayed byte-exact green.
+
+*New tests (extend `test/test_transfer.ml`, driven via `Lwt_main.run`) — 3 cases, plus a `stream_body : string list -> Body.t` helper:*
+  - `write_body_chunked_stream` — a `Body.Stream` of `["alpha";"beta";"gamma"]` written chunked produces the exact wire bytes `"5\r\nalpha\r\n4\r\nbeta\r\n5\r\ngamma\r\n0\r\n\r\n"` (one chunk per source chunk) and the body portion dechunks (via `new_chunked_reader`) to the concatenation `"alphabetagamma"`.
+  - `write_body_fixed_stream` — a fixed-length `Body.Stream` whose total equals `Content-Length` writes exactly the concatenation `"alphabetagamma"` and the written length matches the declared length.
+  - `write_body_fixed_stream_mismatch` — a fixed-length `Body.Stream` whose total (9) disagrees with `Content-Length=20` raises `Transfer.Chunk_error` (via the running byte counter).
+
+*Evidence / counts:* `dune build` clean (dev profile, warnings-as-errors). `dune exec test/test_gohttp.exe` → **452 tests run, 0 FAIL, Test Successful in ~1.7s** (terminates). New total **452** = 449 prior all green + 3 new Transfer cases (`write_body_chunked_stream`, `write_body_fixed_stream`, `write_body_fixed_stream_mismatch` all `[OK]`). Confirmed existing byte-exact `write_body_chunked`/`write_body_fixed`/`write_body_length_mismatch` still pass unchanged. The last whole-body buffer on the request/response write hot path is now gone — `write_body` streams chunk-by-chunk (Go's `io.Copy`/`io.CopyN` parity).
+
+Status: Done.

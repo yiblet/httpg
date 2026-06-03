@@ -46,6 +46,24 @@ let drain (b : t) : unit Lwt.t =
     in
     loop ()
 
+(* Apply [f] to each successive chunk of the body, in order, until EOF.
+   [Empty] yields no calls; [String s] yields exactly one call [f s]; a
+   [Stream] yields one call per chunk pulled until [next ()] returns [None].
+   Used by streaming writers (the analogue of Go's [io.Copy] pulling from a
+   body reader). *)
+let iter (f : string -> unit Lwt.t) (b : t) : unit Lwt.t =
+  match b with
+  | Empty -> Lwt.return_unit
+  | String s -> f s
+  | Stream next ->
+    let rec loop () =
+      Lwt.bind (next ()) (fun chunk ->
+          match chunk with
+          | None -> Lwt.return_unit
+          | Some s -> Lwt.bind (f s) loop)
+    in
+    loop ()
+
 (* Write the raw body bytes to [oc] (no framing). *)
 let write (oc : Lwt_io.output_channel) (b : t) : unit Lwt.t =
   match b with

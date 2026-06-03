@@ -333,6 +333,59 @@ let test_write_body_length_mismatch () =
   | _ -> Alcotest.fail "expected ContentLength mismatch error"
   | exception Transfer.Chunk_error _ -> Alcotest.(check pass) "mismatch errors" () ()
 
+(* A [Body.Stream] yielding each element of [chunks] in order, then EOF. *)
+let stream_body (chunks : string list) : Body.t =
+  let remaining = ref chunks in
+  Body.of_stream (fun () ->
+      match !remaining with
+      | [] -> Lwt.return None
+      | c :: rest ->
+        remaining := rest;
+        Lwt.return (Some c))
+
+(* A multi-chunk streaming body written chunked streams per source chunk (Go's
+   io.Copy into the chunkedWriter) and dechunks back to the concatenation. *)
+let test_write_body_chunked_stream () =
+  let chunks = [ "alpha"; "beta"; "gamma" ] in
+  let tw =
+    Transfer.make_transfer_writer ~method_:"PUT" ~body:(stream_body chunks)
+      ~content_length:(-1L) ~transfer_encoding:[ "chunked" ] ()
+  in
+  let out = with_output_string (fun oc -> Transfer.write_body oc tw) in
+  (* One chunk per source chunk, then the 0-chunk + terminating CRLF. *)
+  Alcotest.(check string)
+    "chunked stream wire format" "5\r\nalpha\r\n4\r\nbeta\r\n5\r\ngamma\r\n0\r\n\r\n" out;
+  (* Dechunked (drop the trailing CRLF the http layer appends) == concatenation. *)
+  let body_part = "5\r\nalpha\r\n4\r\nbeta\r\n5\r\ngamma\r\n0\r\n" in
+  Alcotest.(check string)
+    "chunked stream dechunks to concatenation" "alphabetagamma"
+    (read_chunked_all body_part)
+
+(* A fixed-length streaming body whose total matches Content-Length writes the
+   concatenation (Go's io.CopyN). *)
+let test_write_body_fixed_stream () =
+  let chunks = [ "alpha"; "beta"; "gamma" ] in
+  let total = String.length (String.concat "" chunks) in
+  let tw =
+    Transfer.make_transfer_writer ~method_:"PUT" ~body:(stream_body chunks)
+      ~content_length:(Int64.of_int total) ~transfer_encoding:[] ()
+  in
+  let out = with_output_string (fun oc -> Transfer.write_body oc tw) in
+  Alcotest.(check string) "fixed-length stream == concatenation" "alphabetagamma" out;
+  Alcotest.(check int) "fixed-length stream length" total (String.length out)
+
+(* A fixed-length streaming body whose total disagrees with Content-Length
+   raises Chunk_error (the running byte counter). *)
+let test_write_body_fixed_stream_mismatch () =
+  let chunks = [ "alpha"; "beta" ] (* 9 bytes *) in
+  let tw =
+    Transfer.make_transfer_writer ~method_:"PUT" ~body:(stream_body chunks)
+      ~content_length:20L ~transfer_encoding:[] ()
+  in
+  match with_output_string (fun oc -> Transfer.write_body oc tw) with
+  | _ -> Alcotest.fail "expected ContentLength mismatch error"
+  | exception Transfer.Chunk_error _ -> Alcotest.(check pass) "stream mismatch errors" () ()
+
 (* --- read_transfer: end-to-end chunked response body decode
    (TestFinalChunkedBodyReadEOF analogue, without the Response struct). *)
 let test_read_transfer_chunked () =
@@ -400,6 +453,9 @@ let tests =
     ("write_body_chunked", `Quick, test_write_body_chunked);
     ("write_body_fixed", `Quick, test_write_body_fixed);
     ("write_body_length_mismatch", `Quick, test_write_body_length_mismatch);
+    ("write_body_chunked_stream", `Quick, test_write_body_chunked_stream);
+    ("write_body_fixed_stream", `Quick, test_write_body_fixed_stream);
+    ("write_body_fixed_stream_mismatch", `Quick, test_write_body_fixed_stream_mismatch);
     ("read_transfer_chunked", `Quick, test_read_transfer_chunked);
     ("read_transfer_content_length", `Quick, test_read_transfer_content_length);
   ]

@@ -516,19 +516,28 @@ let write_body (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
   in
   if not body_present then after_body ()
   else if chunked t.tw_transfer_encoding then
-    Lwt.bind (Body.read_all t.tw_body) (fun data ->
-        Lwt.bind (chunked_writer_write oc data) (fun () ->
-            Lwt.bind (chunked_writer_close oc) (fun () -> after_body ())))
+    (* Chunked: stream each source chunk through the chunked writer (Go's
+       [io.Copy] into the chunkedWriter), then the terminating 0-chunk. *)
+    Lwt.bind
+      (Body.iter (fun chunk -> chunked_writer_write oc chunk) t.tw_body)
+      (fun () -> Lwt.bind (chunked_writer_close oc) (fun () -> after_body ()))
   else if Int64.compare t.tw_content_length (-1L) = 0 then
     (* Unknown length: copy entire body. *)
     Lwt.bind (Body.write oc t.tw_body) (fun () -> after_body ())
   else
-    (* Fixed length: copy body, verify the byte count matches ContentLength. *)
-    Lwt.bind (Body.read_all t.tw_body) (fun data ->
-        let ncopy = Int64.of_int (String.length data) in
-        if Int64.compare t.tw_content_length ncopy <> 0 then
+    (* Fixed length: stream the body (Go's [io.CopyN]), counting bytes, then
+       verify the byte count matches ContentLength. *)
+    let n = ref 0L in
+    Lwt.bind
+      (Body.iter
+         (fun chunk ->
+           n := Int64.add !n (Int64.of_int (String.length chunk));
+           Lwt_io.write oc chunk)
+         t.tw_body)
+      (fun () ->
+        if Int64.compare t.tw_content_length !n <> 0 then
           raise
             (Chunk_error
                (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld" t.tw_content_length
-                  ncopy));
-        Lwt.bind (Lwt_io.write oc data) (fun () -> after_body ()))
+                  !n));
+        after_body ())
