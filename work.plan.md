@@ -1,4 +1,4 @@
-# gohttp — OCaml port of Go `net/http` (HTTP/1.1) — Plan
+# gohttp — OCaml port of Go `net/http` (HTTP/1.x: 1.0 + 1.1) — Plan
 
 ## Operating Requirements
 
@@ -20,11 +20,12 @@
 
 ## Problem
 
-- **Goal:** A faithful 1:1 OCaml port of Go's `net/http` package supporting **HTTP/1.1 only** — both server (`Handler`, `ServeMux`, `ResponseWriter`, `Server.ListenAndServe`) and client (`Client`, `Transport`, `RoundTripper`) — mirroring Go's file layout, type names, and function names.
+- **Goal:** A faithful 1:1 OCaml port of Go's `net/http` package supporting **all HTTP/1.x versions Go supports — i.e. HTTP/1.0 and HTTP/1.1** (no HTTP/2+) — both server (`Handler`, `ServeMux`, `ResponseWriter`, `Server.ListenAndServe`) and client (`Client`, `Transport`, `RoundTripper`) — mirroring Go's file layout, type names, and function names.
+- **HTTP version scope:** Match Go's HTTP/1.x behavior exactly. Requests/responses carry `proto`/`proto_major`/`proto_minor`; framing and connection management are **version-sensitive** per Go: HTTP/1.0 defaults to `Connection: close` and has no chunked transfer-encoding (keep-alive only via `Connection: keep-alive`); HTTP/1.1 defaults to keep-alive and supports chunked. Go also tolerates the `HTTP/0.9`-style simple requests only insofar as its parser does — replicate exactly what `request.go`/`transfer.go` do, no more.
 - **Success Criteria (as tests):**
   - *Unit:* `header.canonical_key` ⇒ alcotest case `Header.canonical` asserts `canonical_header_key "uSER-aGeNT" = "User-Agent"`; `Transfer.chunked_roundtrip` encodes then decodes a body and asserts byte-equality with Go's `transfer_test.go` fixtures.
   - *Integration:* `Clientserver.get_roundtrip` starts a `Gohttp.Server` on a loopback port via the Lwt backend, issues `Gohttp.Client.do` GET, and asserts status `200` and body equality — mirroring Go's `clientserver_test.go` happy path.
-- **Non-Goals:** HTTP/2, HTTP/3, ALPN h2 (`http2.go`, `clientconn.go`, `socks_bundle.go`, h2 bundles); `net/url` reimplementation (use `uri`); CGI/FCGI/pprof/httputil subpackages; the monad/IO-functor abstraction (deferred — write directly against Lwt).
+- **Non-Goals:** HTTP/2, HTTP/3, ALPN h2 (`http2.go`, `clientconn.go`, `socks_bundle.go`, h2 bundles) — but HTTP/1.0 **is in scope**; `net/url` reimplementation (use `uri`); CGI/FCGI/pprof/httputil subpackages; the monad/IO-functor abstraction (deferred — write directly against Lwt).
 - **Constraints:** OCaml ≥ 5.0, dune ≥ 3.0. Deps: `uri`, `lwt`, `tls-lwt`, `alcotest` (already installed in the local switch, alongside `tls`/`x509`). Pure data modules must not depend on Lwt. Cross-reference every module against its `go/src/net/http/*.go` source. **When a ported test fails, fix the implementation, not the test** (unless the failure is a documented Go-specific porting artifact).
 
 ## Discovery
@@ -96,7 +97,7 @@ Status: Done
   - `test/test_status.ml` — new; asserts `status_text` mappings (200→"OK", 404→"Not Found", 418→"I'm a teapot", 100→"Continue", 500→"Internal Server Error", 999→"", 306→"").
   - `gohttp.opam` — added `uri`, `lwt`, `tls-lwt`, and `alcotest {with-test}` to depends. (`gohttp.opam` is hand-written; `dune-project` has no `(generate_opam_files ...)`.)
 - **Test evidence:** `dune build` clean; `dune test` → "Test Successful in 0.001s. 16 tests run." All `[OK]`. Suite `Method` (9 cases: get/head/post/put/patch/delete/connect/options/trace) and suite `Status` (7 cases: 200→OK, 404→Not Found, 418→I'm a teapot, 100→Continue, 500→Internal Server Error, 999→"", 306→"").
-- **Commit id:** _(captured below after `jj commit`)_
+- **Commit id:** `38d183b1` (jj change `ktsztlxm`) — "feat: scaffold multi-module lib with Method and Status (Ticket 1)". This plan-file edit recording the commit id lands in a subsequent working-copy change.
 
 ### Ticket 2 — Header
 Status: Planned
@@ -159,13 +160,13 @@ Status: Planned
 
 **B) Migration Strategy** New `lib/body.ml` + `lib/transfer.ml` using Lwt directly. Drive tests with in-memory `Lwt_io.pipe` channels — no sockets yet.
 
-**C) Exit State** Encoding a body then decoding it round-trips byte-for-byte; chunked + content-length paths both covered.
+**C) Exit State** Encoding a body then decoding it round-trips byte-for-byte; chunked + content-length paths both covered. **Version-sensitive:** `fix_length`/`fix_trailer` must respect proto version — chunked TE is HTTP/1.1-only; HTTP/1.0 bodies are content-length- or close-delimited (mirror `transfer.go` exactly).
 
 **D) Detailed Design**
 - `lib/body.ml`: `type t = Empty | String of string | Stream of (unit -> string option Lwt.t)`.
 - `lib/transfer.ml`: `val write_body : Lwt_io.output_channel -> transfer_writer -> unit Lwt.t`; `val read_transfer : [request|response] -> Lwt_io.input_channel -> unit Lwt.t`; helpers `chunked`, `fix_length`, `fix_trailer` mirroring Go line-for-line.
 
-**E) Testing Plan** *Unit* (`test/test_transfer.ml`, ported from `transfer_test.go`): `Transfer.chunked_roundtrip` (encode→decode byte-equality), `Transfer.fix_length` (status/method-driven length rules), `Transfer.bad_chunk` (malformed chunk errors).
+**E) Testing Plan** *Unit* (`test/test_transfer.ml`, ported from `transfer_test.go`): `Transfer.chunked_roundtrip` (encode→decode byte-equality), `Transfer.fix_length` (status/method-driven length rules, incl. HTTP/1.0 vs 1.1 differences), `Transfer.bad_chunk` (malformed chunk errors).
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
@@ -178,7 +179,7 @@ Status: Planned
 
 **B) Migration Strategy** `lib/request.ml`, `lib/response.ml` (pure types + pure helpers), `lib/io.ml` (Lwt read/write). Compose `Header`, `Transfer`, `Body`, `Uri`. Tests driven by `Lwt_io.pipe`.
 
-**C) Exit State** Round-trip: parse a raw HTTP/1.1 request/response then re-serialize to the canonical bytes.
+**C) Exit State** Round-trip: parse a raw HTTP/1.0 **and** HTTP/1.1 request/response then re-serialize to the canonical bytes. `proto`/`proto_major`/`proto_minor` parsed and preserved per Go's `ParseHTTPVersion`.
 
 **D) Detailed Design**
 - `'body Request.t` / `'body Response.t` records as in the approved plan (fields mirror Go).
@@ -227,15 +228,15 @@ Status: Planned
 ### Ticket 9 — Server + ServeMux dispatch
 Status: Planned
 
-**A) Scope** Port `server.go` (HTTP/1.1 subset): `Handler`, `handler_func`, `ResponseWriter`, the per-conn serve loop, `Server`, `listen_and_serve`, `ServeMux` dispatch.
+**A) Scope** Port `server.go` (HTTP/1.x subset): `Handler`, `handler_func`, `ResponseWriter`, the per-conn serve loop, `Server`, `listen_and_serve`, `ServeMux` dispatch.
 
-**B) Migration Strategy** New `lib/server.ml` composing `Io`, `Net`, `Routing_tree`. Keep-alive + implicit `WriteHeader(200)` semantics per Go.
+**B) Migration Strategy** New `lib/server.ml` composing `Io`, `Net`, `Routing_tree`. Keep-alive + implicit `WriteHeader(200)` semantics per Go. **Version-sensitive:** honor Go's connection-reuse rules — HTTP/1.0 closes by default unless `Connection: keep-alive`, HTTP/1.1 keeps alive unless `Connection: close`; emit responses with the request's protocol.
 
-**C) Exit State** A server started on loopback serves a registered handler and returns the expected response.
+**C) Exit State** A server started on loopback serves a registered handler and returns the expected response for both HTTP/1.0 and HTTP/1.1 requests.
 
 **D) Detailed Design** `ResponseWriter` interface (`header`, `write`, `write_header`); `Server.listen_and_serve : addr -> handler -> unit Lwt.t`; `ServeMux.handle`/`handle_func`.
 
-**E) Testing Plan** *Integration* (`test/test_serve.ml`, ported subset of `serve_test.go`): `Serve.hello_handler` (200 + body), `Serve.not_found` (unregistered path → 404), `Serve.mux_routing` (path/method dispatch).
+**E) Testing Plan** *Integration* (`test/test_serve.ml`, ported subset of `serve_test.go`): `Serve.hello_handler` (200 + body), `Serve.not_found` (unregistered path → 404), `Serve.mux_routing` (path/method dispatch), `Serve.http10_close` (HTTP/1.0 request closes connection by default; keep-alive honored when requested).
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; serve tests bounded by timeout.
 
@@ -244,9 +245,9 @@ Status: Planned
 ### Ticket 10 — Client + Transport
 Status: Planned
 
-**A) Scope** Port `client.go` + `transport.go` (HTTP/1.1 keep-alive only): `RoundTripper`, `Transport`, `Client`, `Client.do`.
+**A) Scope** Port `client.go` + `transport.go` (HTTP/1.x): `RoundTripper`, `Transport`, `Client`, `Client.do`.
 
-**B) Migration Strategy** New `lib/client.ml` + `lib/transport.ml` composing `Io`, `Net`. Connection reuse keyed by scheme/host/port.
+**B) Migration Strategy** New `lib/client.ml` + `lib/transport.ml` composing `Io`, `Net`. Connection reuse keyed by scheme/host/port. **Version-sensitive:** keep-alive reuse follows Go's rules (HTTP/1.1 default reuse; HTTP/1.0 only with `Connection: keep-alive`); requests default to HTTP/1.1 as Go does.
 
 **C) Exit State** End-to-end: client GETs the Ticket-9 server and reads status+body. Satisfies the integration success criterion.
 
