@@ -32,7 +32,7 @@ let demo_h2 () =
     handler
   >>= fun (srv, port, serve_loop) ->
   Lwt.async (fun () -> serve_loop);
-  let transport = Transport.create () in
+  let transport = Transport.create ~insecure:true () in
   let client = Client.create ~transport () in
   let url = Printf.sprintf "https://127.0.0.1:%d/h2-demo" port in
   Lwt.finalize

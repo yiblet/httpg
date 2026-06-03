@@ -16,9 +16,18 @@ val default_user_agent : string
     keep-alive toggle. *)
 type t
 
-(** Go's [&Transport{}]: a fresh transport with an empty pool and keep-alives
-    enabled. *)
-val create : unit -> t
+(** [create ?insecure ?authenticator ()] is Go's [&Transport{}]: a fresh
+    transport with an empty pool and keep-alives enabled.
+
+    The TLS verification policy for https dials (reduced from Go's
+    [Transport.TLSClientConfig]) is secure by default — the server certificate
+    is verified against the system trust store and its name matched. Override:
+    [?authenticator] supplies an explicit [X509.Authenticator.t] (highest
+    precedence); [?insecure:true] disables verification entirely (Go's
+    [InsecureSkipVerify], suitable only for self-signed/loopback test servers).
+    See {!Net.connect_alpn}. *)
+val create :
+  ?insecure:bool -> ?authenticator:X509.Authenticator.t -> unit -> t
 
 (** [round_trip t req] is Go's [Transport.RoundTrip] (HTTP/1.x path): pick
     scheme/host/port from [req.url] (TLS when the scheme is ["https"]), reuse an

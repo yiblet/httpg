@@ -384,6 +384,40 @@ Status: Done
 
 ---
 
+## Follow-up — TLS server-certificate verification (security fix)
+
+The HTTP/2 work shipped the TLS client substrate with a **null authenticator**
+(`Net.null_authenticator`, accept-any), which is MITM-vulnerable and does NOT
+match Go's `http.Client` (which verifies against the system trust store unless
+`InsecureSkipVerify` is set). Fixed:
+
+- **`Net`** — added `default_authenticator : unit -> X509.Authenticator.t`
+  (built from the OS trust store via `Ca_certs.authenticator ()`; raises with a
+  clear message if the store can't be loaded). `connect`/`connect_alpn`/
+  `client_config` now take `?authenticator` / `?insecure` and **verify by
+  default** (chain via system trust + hostname via the `?host` already passed to
+  `Tls_lwt.Unix.client_of_fd` for SNI). `null_authenticator` is kept as the
+  documented insecure opt-out (`?insecure:true`); an explicit `?authenticator`
+  overrides. `ca-certs` added to `lib/dune` + `gohttp.opam`.
+- **`Transport`** — `create ?insecure ?authenticator ()` stores the policy on
+  `t` and threads it into the https `connect_alpn` dial; secure by default.
+- **`Client`** — `create ?insecure ?authenticator ()`; with no explicit
+  `?transport` an override builds a fresh transport carrying it, else reuses the
+  secure `default_transport`.
+- **Tests/demo** — `test/test_h2_tls.ml`, `test/test_h2_clientserver.ml` and
+  `bin/main.ml`'s h2 demo hit a **self-signed cert over a `127.0.0.1` literal**,
+  which legitimately fails verification (untrusted chain + IP, no hostname), so
+  they now pass `~insecure:true`. No status/body assertion was weakened; the
+  production default stays secure.
+- **Evidence:** `dune build` clean; `dune test` = **434 tests, Test Successful**
+  (terminates ~1.4s). Verified the default path actually verifies: a secure
+  (no-`?insecure`) client connecting to the self-signed loopback server is
+  **rejected** at the handshake (X509 validation error) rather than connecting.
+
+Commit: `feat(tls): verify server certificates by default via system trust, with insecure opt-out`.
+
+---
+
 ## HTTP/2 plan complete
 
 All 10 tickets are **Done**. gohttp now ports Go's `net/http` HTTP/2 stack end-to-end: HPACK (Huffman + static/dynamic tables + encoder/decoder), the frame layer (Framer + all frame types), flow control / data buffer / stream pipe, the write framers + round-robin scheduler, the `H2_server` connection (serverConn + stream state machine), the `H2_transport` client (multiplexed `ClientConn` + pool), server-side TLS + ALPN in `Net`, and — this ticket — the public `Server`/`Client` transparently selecting HTTP/2 over TLS via ALPN with HTTP/1.1 fallback. Final suite: **434 tests green**. The two RFC Success Criteria (`Hpack.roundtrip`, `Frame.roundtrip`) and the integration Success Criterion (`H2.clientserver_roundtrip`: real TLS+ALPN gohttp server ↔ client over `h2`, GET + POST on one multiplexed connection) all pass.

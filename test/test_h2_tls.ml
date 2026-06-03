@@ -27,7 +27,13 @@ let with_tls_pair ~server_alpn ~client_alpn ~server ~client () =
     in
     let client_fiber =
       let* ic, oc, proto =
-        Net.connect_alpn ~host:"127.0.0.1" ~port ~tls:true ~alpn:client_alpn ()
+        (* Self-signed loopback cert reached via an IP literal: verification
+           would legitimately fail (untrusted chain + no hostname match), so the
+           client opts out, the analogue of Go's tls.Config.InsecureSkipVerify.
+           The production default ([Net.connect_alpn] with no [?insecure])
+           verifies against the system trust store. *)
+        Net.connect_alpn ~host:"127.0.0.1" ~port ~tls:true ~alpn:client_alpn
+          ~insecure:true ()
       in
       client ~ic ~oc ~proto
     in

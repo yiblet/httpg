@@ -1,5 +1,5 @@
 (library
  (name gohttp)
  (public_name gohttp)
- (libraries uri lwt lwt.unix tls-lwt tls x509 ptime mirage-crypto-rng.unix fmt
-   base64 multipart_form-lwt gohttp_internal))
+ (libraries uri lwt lwt.unix tls-lwt tls x509 ca-certs ptime
+   mirage-crypto-rng.unix fmt base64 multipart_form-lwt gohttp_internal))

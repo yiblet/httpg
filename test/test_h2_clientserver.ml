@@ -40,7 +40,7 @@ let with_tls_server ~alpn body =
    h2 and performs GET + POST on one multiplexed connection. *)
 let test_clientserver_roundtrip () =
   with_tls_server ~alpn:[ "h2"; "http/1.1" ] (fun port ->
-      let transport = Transport.create () in
+      let transport = Transport.create ~insecure:true () in
       let client = Client.create ~transport () in
       let base = Printf.sprintf "https://127.0.0.1:%d" port in
       (* GET *)
@@ -69,7 +69,7 @@ let test_clientserver_roundtrip () =
    served by the HTTP/1.x path and still gets 200 + body (no h2 used). *)
 let test_http11_fallback () =
   with_tls_server ~alpn:[ "http/1.1" ] (fun port ->
-      let transport = Transport.create () in
+      let transport = Transport.create ~insecure:true () in
       let client = Client.create ~transport () in
       let base = Printf.sprintf "https://127.0.0.1:%d" port in
       let* resp = Client.get client (base ^ "/hello") in

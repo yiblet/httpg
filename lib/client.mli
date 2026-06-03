@@ -14,12 +14,24 @@ val default_check_redirect : check_redirect
     overall timeout (Go's [Client.Timeout]). *)
 type t
 
-(** [create ?transport ?check_redirect ?timeout ()] builds a client. Defaults:
-    {!Transport.default_transport}, {!default_check_redirect}, no timeout. *)
+(** [create ?transport ?check_redirect ?timeout ?insecure ?authenticator ()]
+    builds a client. Defaults: {!Transport.default_transport},
+    {!default_check_redirect}, no timeout, and {b TLS verification secure by
+    default} (system trust + hostname), mirroring Go's [http.Client].
+
+    [?insecure]/[?authenticator] set the TLS verification policy (see
+    {!Transport.create}): [?insecure:true] disables verification (Go's
+    [InsecureSkipVerify], for self-signed/loopback test servers);
+    [?authenticator] supplies an explicit one. They take effect only when no
+    explicit [?transport] is given (an explicit transport already carries its
+    own policy); supplying any override with no transport builds a fresh
+    transport carrying it instead of the shared default. *)
 val create :
   ?transport:Transport.t ->
   ?check_redirect:check_redirect ->
   ?timeout:float ->
+  ?insecure:bool ->
+  ?authenticator:X509.Authenticator.t ->
   unit ->
   t
 

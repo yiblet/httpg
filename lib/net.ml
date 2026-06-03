@@ -42,10 +42,25 @@ let channels_of_fd fd =
 let ensure_rng () = Mirage_crypto_rng_unix.use_default ()
 
 (* A null authenticator: accept any peer certificate without verification.
-   Acceptable for the smoke-test substrate only -- a production client must
-   supply a real authenticator (e.g. X509 system trust). *)
+   Acceptable for the smoke-test substrate / explicit insecure opt-out only --
+   a production client must supply a real authenticator (e.g. X509 system
+   trust). This mirrors Go's [tls.Config.InsecureSkipVerify = true]. *)
 let null_authenticator : X509.Authenticator.t =
   fun ?ip:_ ~host:_ _certs -> Ok None
+
+(* Build an authenticator from the operating-system trust store via [ca-certs]
+   (which also checks expiry and, when [~host] is supplied at handshake time,
+   the certificate's name). This is the SECURE default, the analogue of Go's
+   [http.Client] verifying the server certificate against the system roots
+   unless [InsecureSkipVerify] is set. Raises [Failure] with a clear message if
+   the trust store cannot be loaded. *)
+let default_authenticator () : X509.Authenticator.t =
+  match Ca_certs.authenticator () with
+  | Ok auth -> auth
+  | Error (`Msg m) ->
+      failwith
+        (Printf.sprintf
+           "Net: cannot load the system trust store for TLS verification: %s" m)
 
 let host_to_domain_name host =
   match Domain_name.of_string host with
@@ -61,12 +76,22 @@ let dial host port =
   let* () = Lwt_unix.connect fd addr in
   Lwt.return fd
 
-(* Build a [Tls.Config.client] with the null authenticator and optional ALPN. *)
-let client_config ?(alpn = []) () =
+(* Resolve the effective authenticator for a TLS client. Precedence (mirroring
+   how Go composes [tls.Config]): an explicit [?authenticator] wins; otherwise
+   [~insecure:true] selects {!null_authenticator}; otherwise the SECURE default
+   built from the system trust store ({!default_authenticator}). *)
+let resolve_authenticator ?authenticator ?(insecure = false) () =
+  match authenticator with
+  | Some a -> a
+  | None -> if insecure then null_authenticator else default_authenticator ()
+
+(* Build a [Tls.Config.client] with the resolved authenticator and optional
+   ALPN. By default this verifies the server certificate chain against the
+   system trust store (and, with [?host] at handshake time, the hostname). *)
+let client_config ?(alpn = []) ?authenticator ?insecure () =
   let alpn_protocols = match alpn with [] -> None | l -> Some l in
-  match
-    Tls.Config.client ~authenticator:null_authenticator ?alpn_protocols ()
-  with
+  let authenticator = resolve_authenticator ?authenticator ?insecure () in
+  match Tls.Config.client ~authenticator ?alpn_protocols () with
   | Ok c -> c
   | Error (`Msg m) ->
       failwith (Printf.sprintf "Net.connect: bad TLS config: %s" m)
@@ -78,7 +103,8 @@ let negotiated_alpn (t : Tls_lwt.Unix.t) =
   | Ok ed -> ed.Tls.Core.alpn_protocol
   | Error () -> None
 
-let connect_alpn ~host ~port ?(tls = false) ?(alpn = []) () =
+let connect_alpn ~host ~port ?(tls = false) ?(alpn = []) ?authenticator
+    ?insecure () =
   let open Lwt.Syntax in
   let* fd = dial host port in
   if not tls then
@@ -86,7 +112,7 @@ let connect_alpn ~host ~port ?(tls = false) ?(alpn = []) () =
     Lwt.return (ic, oc, None)
   else begin
     ensure_rng ();
-    let cfg = client_config ~alpn () in
+    let cfg = client_config ~alpn ?authenticator ?insecure () in
     let host_dn = host_to_domain_name host in
     let* t = Tls_lwt.Unix.client_of_fd cfg ?host:host_dn fd in
     let proto = negotiated_alpn t in
@@ -94,9 +120,11 @@ let connect_alpn ~host ~port ?(tls = false) ?(alpn = []) () =
     Lwt.return (ic, oc, proto)
   end
 
-let connect ~host ~port ?(tls = false) () =
+let connect ~host ~port ?(tls = false) ?authenticator ?insecure () =
   let open Lwt.Syntax in
-  let* ic, oc, _proto = connect_alpn ~host ~port ~tls () in
+  let* ic, oc, _proto =
+    connect_alpn ~host ~port ~tls ?authenticator ?insecure ()
+  in
   Lwt.return (ic, oc)
 
 (* ----- Server-side TLS + ALPN ----- *)

@@ -41,15 +41,24 @@ type t = {
   h2_conns : (string, H2_transport.client_conn) Hashtbl.t;
   (* Test hook: how many requests this transport has served over h2. *)
   mutable h2_round_trips : int;
+  (* TLS verification policy for https dials, reduced from Go's
+     [Transport.TLSClientConfig]: when [insecure] is set the server certificate
+     is not verified (Go's [InsecureSkipVerify]); an explicit [authenticator]
+     overrides both. When neither is set, {!Net.connect_alpn} verifies against
+     the system trust store (secure by default). *)
+  insecure : bool;
+  authenticator : X509.Authenticator.t option;
 }
 
-let create () =
+let create ?(insecure = false) ?authenticator () =
   {
     idle_conn = Hashtbl.create 8;
     disable_keep_alives = false;
     dials = 0;
     h2_conns = Hashtbl.create 8;
     h2_round_trips = 0;
+    insecure;
+    authenticator;
   }
 
 (* Go's connectMethodKey.String(): "scheme|host:port" (no proxy here). *)
@@ -109,7 +118,9 @@ let dial_alpn t ~scheme ~host ~port ~force_h2 =
     else if tls then Some h2_alpn_protocols
     else None
   in
-  Net.connect_alpn ~host ~port ~tls ?alpn () >>= fun (ic, oc, negotiated) ->
+  Net.connect_alpn ~host ~port ~tls ?alpn ~insecure:t.insecure
+    ?authenticator:t.authenticator ()
+  >>= fun (ic, oc, negotiated) ->
   Lwt.return ({ ic; oc }, negotiated)
 
 let dial t ~scheme ~host ~port =

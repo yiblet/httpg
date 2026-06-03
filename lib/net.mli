@@ -21,32 +21,45 @@ val accept : Lwt_unix.file_descr -> (Lwt_unix.file_descr * Unix.sockaddr) Lwt.t
 val channels_of_fd :
   Lwt_unix.file_descr -> Lwt_io.input_channel * Lwt_io.output_channel
 
-(** [connect ~host ~port ?tls ()] resolves [host]/[port], connects a client
-    TCP socket, and returns buffered [Lwt_io] channels. When [tls] is [true]
-    (default [false]) the connection is upgraded with [tls-lwt].
+(** [connect ~host ~port ?tls ?authenticator ?insecure ()] resolves
+    [host]/[port], connects a client TCP socket, and returns buffered [Lwt_io]
+    channels. When [tls] is [true] (default [false]) the connection is upgraded
+    with [tls-lwt].
 
-    {b TLS verification:} the TLS client uses a {e null authenticator} that
-    accepts any server certificate without verification (see {!null_authenticator}).
-    This is acceptable for the smoke-test substrate only; a production client
-    must supply a real authenticator (e.g. [X509] system trust). *)
+    {b TLS verification (secure by default).} The TLS client verifies the server
+    certificate chain against the operating-system trust store and matches the
+    [host] name (SNI is also derived from [host]), mirroring Go's [http.Client],
+    which verifies unless [InsecureSkipVerify] is set. Override with:
+    - [?authenticator] — use this [X509.Authenticator.t] (highest precedence);
+    - [?insecure:true] — use {!null_authenticator} (no verification at all), the
+      analogue of Go's [InsecureSkipVerify = true].
+    When neither is given the secure {!default_authenticator} is used. Note that
+    verifying against an IP literal [host] (no valid hostname) legitimately
+    fails name matching; such callers must opt out via [?insecure]. *)
 val connect :
   host:string ->
   port:int ->
   ?tls:bool ->
+  ?authenticator:X509.Authenticator.t ->
+  ?insecure:bool ->
   unit ->
   (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t
 
-(** [connect_alpn ~host ~port ?tls ?alpn ()] is like {!connect} but additionally
-    advertises the ALPN protocols [alpn] (in descending order of preference,
-    e.g. [["h2"; "http/1.1"]]) when [tls] is [true], and returns the negotiated
-    protocol as the third element (the analogue of Go's
-    [tls.ConnectionState.NegotiatedProtocol]). For a non-TLS connection, or when
-    no ALPN protocol was agreed, the negotiated protocol is [None]. *)
+(** [connect_alpn ~host ~port ?tls ?alpn ?authenticator ?insecure ()] is like
+    {!connect} but additionally advertises the ALPN protocols [alpn] (in
+    descending order of preference, e.g. [["h2"; "http/1.1"]]) when [tls] is
+    [true], and returns the negotiated protocol as the third element (the
+    analogue of Go's [tls.ConnectionState.NegotiatedProtocol]). For a non-TLS
+    connection, or when no ALPN protocol was agreed, the negotiated protocol is
+    [None]. The [?authenticator]/[?insecure] verification policy is identical to
+    {!connect}: secure (system-trust) by default. *)
 val connect_alpn :
   host:string ->
   port:int ->
   ?tls:bool ->
   ?alpn:string list ->
+  ?authenticator:X509.Authenticator.t ->
+  ?insecure:bool ->
   unit ->
   (Lwt_io.input_channel * Lwt_io.output_channel * string option) Lwt.t
 
@@ -114,6 +127,15 @@ val sockaddr_to_string : Unix.sockaddr -> string
 val with_timeout : float -> 'a Lwt.t -> 'a Lwt.t
 
 (** A null [X509] authenticator that accepts any peer certificate without
-    verification. Documented and exposed so callers (and tests) can see the
-    deliberate no-verification policy of the TLS client. *)
+    verification. Exposed as the explicit, documented {e insecure} opt-out (the
+    analogue of Go's [tls.Config.InsecureSkipVerify = true]); selected by
+    [connect ?insecure:true]. NOT used by default. *)
 val null_authenticator : X509.Authenticator.t
+
+(** [default_authenticator ()] builds the SECURE default [X509] authenticator
+    from the operating-system trust store via [ca-certs] (it also checks expiry
+    and, at handshake time with a [host], the certificate name). This is what
+    {!connect}/{!connect_alpn} use unless overridden, mirroring Go's
+    [http.Client] verifying against the system roots. Raises [Failure] if the
+    trust store cannot be loaded. *)
+val default_authenticator : unit -> X509.Authenticator.t

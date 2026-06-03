@@ -23,8 +23,20 @@ type t = {
   timeout : float option;  (** Go's [Client.Timeout]; [None] = no timeout. *)
 }
 
-let create ?(transport = Transport.default_transport)
-    ?(check_redirect = default_check_redirect) ?timeout () =
+let create ?transport ?(check_redirect = default_check_redirect) ?timeout
+    ?insecure ?authenticator () =
+  (* Resolve the transport. An explicit [?transport] is used as-is (it already
+     carries its own TLS policy). Otherwise, if a TLS verification override is
+     requested, build a fresh transport carrying it; with no override at all we
+     reuse the shared [default_transport] (secure by default). *)
+  let transport =
+    match transport with
+    | Some t -> t
+    | None -> (
+        match (insecure, authenticator) with
+        | None, None -> Transport.default_transport
+        | _ -> Transport.create ?insecure ?authenticator ())
+  in
   { transport; check_redirect; timeout }
 
 let default_client = create ()
