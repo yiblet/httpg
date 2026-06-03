@@ -211,7 +211,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 4 — Cookie
-Status: Planned
+Status: Done
 
 **A) Scope** Port `cookie.go`: `Cookie.t`, `read_cookies`, `read_set_cookies`, `set_cookie`/`String`, sanitization.
 
@@ -225,7 +225,67 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/cookie.ml` — new; port of `go/src/net/http/cookie.go`. Exposes
+    `type same_site` (variant mirroring Go's `SameSite` iota+1 constants, plus a
+    `Same_site_unset` modeling Go's zero value) and `type t` mirroring Go's
+    `Cookie` struct field-for-field (`name`, `value`, `quoted`, `path`,
+    `domain`, `expires`, `raw_expires`, `max_age`, `secure`, `http_only`,
+    `same_site`, `partitioned`, `raw`, `unparsed : string list`). `expires` is a
+    Unix-epoch `float` (`0.` = unset, mirroring Go's zero-`time.Time`/`IsZero`).
+    Ports `read_set_cookies` (Go `readSetCookies`), `read_cookies ~filter`
+    (Go `readCookies`), `set_cookie` (Go `(*Cookie).String`, the Set-Cookie /
+    Cookie serialization), `valid` (Go `(*Cookie).Valid`, returns
+    `(unit, string) result`), and the sanitization/parse helpers
+    `sanitize_cookie_name`/`sanitize_cookie_value`/`sanitize_cookie_path`,
+    `valid_cookie_domain`, `is_cookie_name_valid`, `parse_cookie_value`, plus an
+    internal `parse_set_cookie` (Go `ParseSetCookie`). Includes a faithful
+    self-contained GMT formatter for `TimeFormat`
+    (`Mon, 02 Jan 2006 15:04:05 GMT`) and parsers for RFC1123 and
+    `Mon, 02-Jan-2006 15:04:05 MST`, built on Hinnant civil/day conversions (no
+    new opam deps), and `is_token`/`isCookieDomainName`/IPv4 validity helpers.
+  - `lib/cookie.mli` — new; hand-written interface exposing only the faithful
+    public surface (the type definitions, `default`, `read_set_cookies`,
+    `read_cookies`, `set_cookie`, `valid`, and the sanitization/validity/parse
+    helpers).
+  - `test/test_cookie.ml` — new; alcotest suite `val tests` (90 cases) ported
+    from `go/src/net/http/cookie_test.go`: `writeSetCookiesTests` (33 rows →
+    `set_cookie` formatting), `readSetCookiesTests` (22 rows, each run twice to
+    confirm no input mutation), `readCookiesTests` (10 rows, run twice),
+    `TestCookieSanitizeValue` (14), `TestCookieSanitizePath` (3), and
+    `TestCookieValid` (11). Uses a custom `cookie_t` Alcotest testable for full
+    struct equality.
+  - `test/test_gohttp.ml` — added `("Cookie", Test_cookie.tests)` to the
+    `Alcotest.run "gohttp"` list.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.027s. 164 tests run." All `[OK]`. New suite `Cookie` = 90 cases, alongside
+  `Method` (9), `Status` (7), `Header` (20), `Sniff` (38) for 164 total
+  (baseline was 74).
+- **Porting notes / intentionally omitted Go cases:**
+  - The GODEBUG `httpcookiemaxnum` override is not modeled; the port always uses
+    the default limit of 3000 (`defaultCookieMaxNum`). The default-limit-exceeded
+    rows (return empty slice) ARE ported; the GODEBUG-override rows (custom
+    `httpcookiemaxnum=5` / `=0` / `=defaultMax+1`) are omitted (no env knob in
+    the pure port). The within-limit override successes are equivalent to
+    ordinary within-limit parses.
+  - `TestSetCookie`, `TestAddCookie`, `TestSetCookieDoubleQuotes` depend on
+    `ResponseWriter`/`Request` (later tickets); the underlying `set_cookie`
+    formatting and `read_set_cookies` parsing they exercise are fully covered by
+    the write/read tables here.
+  - Log-output assertions (`"dropping invalid bytes"` / `"dropping domain
+    attribute"`) are Go-specific: there is no `log.Printf` analog in the pure
+    port, so `sanitizeOrWarn` drops bytes silently. Behavior (the dropped bytes)
+    is identical and tested; only the side-effect logging is omitted.
+  - Go's `time.Unix(0,0)` (1970-01-01) is **not** the zero time, so its
+    `Valid()` cases treat `Expires` as set-and-valid (year 1970 ≥ 1601). Since
+    `0.` denotes "unset" in this port, the `valid-expires`/`valid-all-fields`
+    fixtures use a small positive epoch (`1.`) to faithfully reproduce "set and
+    valid". The bare `SameSite` (no value) row parses to
+    `Same_site_default_mode`, matching Go's `SameSite: SameSiteDefaultMode`.
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 5 — Body + Transfer (framing)
 Status: Planned
