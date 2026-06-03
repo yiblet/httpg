@@ -111,6 +111,12 @@ let new_chunked_reader = Gohttp_internal.Chunked.new_chunked_reader
 let chunked_writer_write = Gohttp_internal.Chunked.chunked_writer_write
 let chunked_writer_close = Gohttp_internal.Chunked.chunked_writer_close
 
+(* Body-read window for the fixed-length and close-delimited readers. Mirrors
+   the 32 KiB default copy buffer Go's [io.Copy]/[io.CopyN] use, so a large body
+   is consumed in bounded 32 KiB chunks (memory stays flat regardless of body
+   size) with ~8x fewer read iterations/allocations than a 4 KiB window. *)
+let copy_buf_size = 32 * 1024
+
 (* ------------------------------------------------------------------ *)
 (* transfer.go helpers.                                                *)
 (* ------------------------------------------------------------------ *)
@@ -367,7 +373,7 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) : result Lwt.t =
         (fun () ->
           if Int64.compare !remaining 0L <= 0 then Lwt.return None
           else
-            let want = min 4096 (Int64.to_int !remaining) in
+            let want = min copy_buf_size (Int64.to_int !remaining) in
             let b = Bytes.create want in
             Lwt.bind
               (Lwt.catch
@@ -388,7 +394,7 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) : result Lwt.t =
       (* realLength < 0 and closing (HTTP/1.0 close-delimited): read until EOF. *)
       Body.Stream
         (fun () ->
-          let want = 4096 in
+          let want = copy_buf_size in
           let b = Bytes.create want in
           Lwt.bind
             (Lwt.catch
