@@ -6,6 +6,7 @@ let () =
       ("HttpTime", Test_http_time.tests);
       ("Httptest", Test_httptest.tests);
       ("HttptestServer", Test_httptest_server.tests);
+      ("Fs", Test_fs.tests);
       ("Header", Test_header.tests);
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);

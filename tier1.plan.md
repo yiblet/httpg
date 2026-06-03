@@ -127,7 +127,7 @@ Status: Done
 **Status: Done.** Commit: see below.
 
 ### Ticket 3 — fs core: FileSystem/Dir/File, ServeContent (no ranges), ServeFile, FileServer, dir listing
-Status: Planned
+Status: Done
 
 **A) Scope** Port the `fs.go` core: `file_system`/`file` interfaces; `Dir` (a root dir, with dot-dot/traversal rejection); `serve_content` WITHOUT range handling yet (full-body stream + Content-Type (ext table → `Sniff` fallback) + `Last-Modified` via `Http_time` + `Accept-Ranges: bytes`); `serve_file`/`serve_file_fs`; `file_server : file_system -> Server.handler` (clean path, dir → `index.html` or `dir_list`, file → `serve_content`); `dir_list` (HTML listing, escaped); `to_http_error`; `local_redirect`.
 
@@ -141,7 +141,30 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean; tests terminate; temp dirs cleaned.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Baseline:** `jj st` clean (`@` empty `7f5238a4`, parent `5f3245bb` Ticket 2); `dune build && dune test` green at **471** tests.
+- **Files created:**
+  - `lib/fs.ml` + `lib/fs.mli` — port of the `fs.go` core.
+    - `type file_info = { fi_name; fi_size:int64; fi_mod_time:float; fi_is_dir }` (Go `fs.FileInfo` subset). `type file = { stat; read_window:(off:int64 -> len:int -> string Lwt.t); readdir; close }` (Go `http.File` — `read_window` models seek+read; for THIS ticket only `off:0L` windows are used since no ranges). `type file_system = { open_ : string -> (file, exn) result Lwt.t }` (Go `FileSystem.Open`).
+    - `dir : string -> file_system` (Go `Dir`): `path.Clean("/"+name)[1:]` via `Pattern.path_clean`, empty→".", rejects residual ".." via `contains_dot_dot` → `Invalid_unsafe_path` (Go `filepath.Localize`/`errInvalidUnsafePath`), `Filename.concat root path`, then `Lwt_unix.stat` + (dir) `opendir/readdir/closedir` per-entry-stat listing or (file) `openfile O_RDONLY` with a seek+read `read_window`. OS errors mapped: `ENOENT`/`ENOTDIR` → `Not_found`, `EACCES`/`EPERM` → the raw Unix error (→403), else 500.
+    - `serve_content` (Go `serveContent`, full-200 path): `set_last_modified` (`Http_time.format_gmt`, skipped for zero/epoch modtime), `check_preconditions` (stub), Content-Type via the extension table → `Sniff.detect_content_type` on a ≤512-byte probe when unset (handler-set CT respected), `Accept-Ranges: bytes`, Content-Length (unless Content-Encoding set), `write_header 200`, then streams the whole file in 32 KiB windows (skipped for HEAD).
+    - `serve_file` (Go `serveFile`): `.../index.html`→`./` redirect; with `redirect:true` dir-without-slash→`base/`, file-with-slash→`../base` (or 500 "traverse a non-directory" for `/`/`.`); directory serves `index.html` if present else `dir_list` (with `Last-Modified`); regular file → `serve_content`. Open/stat errors via `to_http_error`. Files closed via `Lwt.finalize`.
+    - `file_server : file_system -> Server.handler` (Go `FileServer`/`fileHandler.ServeHTTP`): slash-prefixes + (via `Uri.with_path`) updates `r.url`, `path.Clean`s, dispatches `serve_file ~redirect:true`.
+    - `dir_list` (Go `dirList`): sorts entries by name, `Content-Type: text/html; charset=utf-8`, `<!doctype html>` + viewport `<meta>` + `<pre>` with one `<a href="...">name</a>` per entry; href percent-escaped via `Uri.pct_encode ~component:`Path`, link text via a local `html_escape` (Go `htmlReplacer`); 500 "Error reading directory" on readdir failure.
+    - `to_http_error` (Go `toHTTPError`): `Not_found`/`Invalid_unsafe_path` → 404 "404 page not found"; permission → 403 "403 Forbidden"; else 500.
+    - `local_redirect` (Go `localRedirect`): 301 + `Location` with the raw query (`Uri.verbatim_query`) preserved, no absolutization.
+    - `contains_dot_dot` (Go `containsDotDot`/`isSlashRune`), `check_preconditions` (Ticket-3 stub).
+- **Files modified:**
+  - `test/test_gohttp.ml` — wired `("Fs", Test_fs.tests)`.
+  - `test/test_fs.ml` (created; `val tests`, 5 cases ported from `fs_test.go`, each `Lwt_main.run` bounded by `Net.with_timeout 10.`, served via `Httptest.Server` over a unique temp dir under `Filename.get_temp_dir_name ()`, removed in `Lwt.finalize` via `rm_rf`): `serve_known_file` (GET → 200 + exact bytes + `Content-Type: text/plain; charset=utf-8` + `Last-Modified` present + `Accept-Ranges: bytes`); `dir_listing` (GET `/` → 200, `text/html; charset=utf-8`, body lists `alpha.txt`/`beta.txt`); `traversal_blocked` (`/../../../../etc/passwd` → 404, never escapes the root); `missing_file` (→ 404); `dir_redirect` (`/sub` via `Transport.round_trip` to observe the raw 301 → 301 + `Location: sub/`).
+- **What is stubbed for Tickets 4/5 (with hooks):**
+  - **Ticket 4 (preconditions):** `check_preconditions w r ~modtime` returns `(false, <raw Range header>)` — never short-circuits to 304/412. Hook comments mark the `check_preconditions` body and the `if done_` branch in `serve_content`. `serve_file` does NOT yet apply the directory `If-Modified-Since`→304 (Go's `checkIfModifiedSince` on `d.ModTime()`); it always lists. Ticket 4 fills in `checkIfMatch`/`checkIfUnmodifiedSince`/`checkIfNoneMatch`/`checkIfModifiedSince`/`scanETag` + `writeNotModified`.
+  - **Ticket 5 (ranges):** `serve_content` always sends a full 200; the parsed `_range_req` is unused. A `TICKET 5 HOOK` comment marks where to parse it and switch to 206 (single / `multipart/byteranges`) / 416 with `Content-Range`. `read_window` already supports seeking (`off`) so the range window slots in without an interface change.
+- **Evidence:** `dune build` clean; `dune test` green — **476** tests (471 baseline + 5 Fs). `dune exec test/test_gohttp.exe -- test Fs` → 5/5 OK in 0.005s (terminates). No leaked temp dirs (`/tmp/gohttp_fs_*` empty after the run). Full run 1.809s.
+- **Omissions / stand-ins noted:** `mime_by_ext` is a small built-in extension→MIME table (`.html .htm .css .js .mjs .json .png .jpg .jpeg .gif .svg .txt .xml .pdf .wasm .ico .woff .woff2`) — a deliberate stand-in for Go's `mime.TypeByExtension` (the `mime` package is not ported); everything else falls back to `Sniff.detect_content_type`. `ServeFile`/`ServeFileFS`/`FileServerFS`/`FS(fs.FS)` (the `io/fs` adapter and the top-level free functions over `Dir(dir)`) are out of scope here — the ticket targets `Dir` + `FileServer`; `serve_file` is exposed directly. `mapOpenError`'s non-directory-parent walk is reduced to the direct `ENOTDIR`→`Not_found` mapping (same observable 404). The `httpservecontentkeepheaders` GODEBUG / `serveError` header-stripping is reduced to `Server.error` (the headers it would strip are not set on this ticket's success path before an error). Directory `Last-Modified` is set before `dir_list` (Go does too) but the directory `If-Modified-Since` check is deferred to Ticket 4.
+
+**Status: Done.** Commit: see below.
 
 ### Ticket 4 — fs conditional requests (preconditions + ETag + time headers)
 Status: Planned
