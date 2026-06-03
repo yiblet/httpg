@@ -6,4 +6,5 @@ let () =
       ("Header", Test_header.tests);
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);
+      ("Transfer", Test_transfer.tests);
     ]

@@ -288,7 +288,7 @@ Status: Done
 - **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 5 — Body + Transfer (framing)
-Status: Planned
+Status: Done
 
 **A) Scope** Port the wire framing from `transfer.go`: chunked encode/decode, content-length framing, trailers, plus a concrete `Body.t` over Lwt.
 
@@ -304,7 +304,94 @@ Status: Planned
 
 **F) End-of-Ticket Verification** `dune build && dune test` clean.
 
-**G) Execution Record** _(tbd)_
+**G) Execution Record**
+
+- **Status:** Done.
+- **Files changed:**
+  - `lib/body.ml` + `lib/body.mli` — new; a concrete body over Lwt,
+    `type t = Empty | String of string | Stream of (unit -> string option Lwt.t)`
+    (the analogue of Go's `io.ReadCloser` body field; `Empty` ≈ `http.NoBody`,
+    `Stream` yields chunks until `None` ≈ `io.EOF`). Helpers `empty`,
+    `of_string`, `of_stream`, `read_all : t -> string Lwt.t`, and
+    `write : Lwt_io.output_channel -> t -> unit Lwt.t` (raw bytes, no framing).
+  - `lib/transfer.ml` + `lib/transfer.mli` — new; port of
+    `go/src/net/http/transfer.go` + `go/src/net/http/internal/chunked.go`.
+    - **Chunked codec:** `new_chunked_reader` (port of `internal.chunkedReader`:
+      `readChunkLine` incl. CRLF/bare-LF/stray-CR validation and `maxLineLength`,
+      `trimTrailingWhitespace`, `removeChunkExtension`, `parseHexUint`, and the
+      excess-overhead accounting `excess -= 16 + 2*n` capped at 16KiB). Returns a
+      pull function yielding decoded chunk payloads then `None` at the 0-length
+      chunk — and, like Go's internal reader, **does not** consume the trailing
+      CRLF/trailers (that is the body/readTrailer layer's job). Errors:
+      `Err_line_too_long` (`internal.ErrLineTooLong`) and `Chunk_error` (carries
+      Go's malformed-chunk / bad-size / too-much-overhead / unexpected-EOF
+      messages). Writer: `chunked_writer_write` (`%x\r\n` + data + `\r\n`,
+      no-op on empty data) and `chunked_writer_close` (`0\r\n`).
+    - **transfer.go:** `chunked`, `is_identity`, `no_response_body_expected`,
+      `body_allowed_for_status`, `parse_content_length` (rejects empty / `+3` /
+      `-3` / overflow via `Bad_string_error`), `fix_length` (version-sensitive:
+      HEAD/1xx/204/304 → 0; chunked → -1 and drops Content-Length; dedups
+      identical Content-Length and errors on conflicting ones; request-no-CL → 0
+      vs response-no-CL → -1), `should_close` (HTTP/1.0 close-by-default unless
+      `keep-alive`, HTTP/1.1 keep-alive unless `close`, `major<1` always close),
+      `fix_trailer` (chunked-only; canonicalizes keys, rejects
+      Transfer-Encoding/Trailer/Content-Length keys), `parse_transfer_encoding`
+      (HTTP/1.0 ignores TE per Issue 12785; single-`chunked`-only, else
+      unsupported/too-many error), `read_transfer` (the `transferReader` logic
+      over a `message` record mirroring the *Request/*Response inputs; emits a
+      `result` with the body reader — chunked / fixed-length LimitReader /
+      HTTP/1.0 close-delimited / persistent-no-body), and `write_body` +
+      `make_transfer_writer` (the pure `newTransferWriter` Body/ContentLength/
+      TransferEncoding sanitization and `transferWriter.writeBody`: chunked,
+      fixed-length with a ContentLength/body-length mismatch check, or
+      unknown-length, plus trailer + terminating CRLF for chunked).
+  - `test/test_transfer.ml` — new; alcotest suite `val tests` (17 cases),
+    driving Lwt via `Lwt_main.run` over in-memory `Lwt_io` channels
+    (`Lwt_io.of_bytes` for input, `Lwt_io.pipe` for output capture).
+  - `test/dune` — added `lwt lwt.unix str` to libraries.
+  - `test/test_gohttp.ml` — added `("Transfer", Test_transfer.tests)`.
+- **Test evidence:** `dune build` clean; `dune test` → "Test Successful in
+  0.027s. **181 tests run.**" All `[OK]`. New suite `Transfer` = 17 cases:
+  `chunk_writer_format` (TestChunk wire format), **`chunked_roundtrip`**
+  (Success Criterion: encode→decode byte-equality), `chunk_ignores_extensions`
+  (TestChunkReadingIgnoresExtensions), `parse_hex_uint` (TestParseHexUint incl.
+  error rows + sampled value rows), `chunk_invalid_inputs`
+  (TestChunkInvalidInputs, 4 rows), `chunk_read_partial` (TestChunkReadPartial
+  malformed tail), `incomplete_chunk` (TestIncompleteChunk: every prefix →
+  unexpected-EOF, full stream OK), `parse_content_length` (TestParseContentLength),
+  `parse_transfer_encoding` (TestParseTransferEncoding + HTTP/1.0-ignores row),
+  `fix_length`, `should_close`, `fix_trailer`, `write_body_chunked` /
+  `write_body_fixed` / `write_body_length_mismatch`
+  (TestTransferWriterWriteBodyReaderTypes analogue — wire-bytes assertions, see
+  notes), `read_transfer_chunked` (TestFinalChunkedBodyReadEOF analogue) and
+  `read_transfer_content_length`. (Baseline before ticket: 164.)
+- **Porting notes / intentionally omitted Go cases:**
+  - `TestTransferWriterWriteBodyReaderTypes` uses Go `reflect.Type` to assert
+    which concrete reader (`*os.File` vs `*bytes.Buffer`, `LimitedReader`
+    unwrapping, `ReadFrom` vs `Write`) the writer hands to the destination —
+    those are zero-copy/`io.ReaderFrom` optimization details with no OCaml/Lwt
+    analogue. Ported instead as the observable wire output for the chunked,
+    fixed-length and length-mismatch paths (the behavior those rows exercise).
+  - The chunked reader surfaces a malformed-tail error eagerly (on the pull that
+    consumes the chunk) rather than on the *next* Read as Go's streaming
+    `chunkedReader` does (Go defers the CRLF check via `checkEnd`). Same error,
+    same input rejected — a streaming-vs-batch artifact of the pull-based model;
+    `chunk_read_partial` asserts the error regardless of which pull raises it.
+  - `incomplete_chunk` uses Go's exact "valid" stream; note its second chunk
+    declares size 5 over data `"abc\r\n"` (the data itself contains a CRLF), so
+    the decoded bytes are `"abcdabc\r\n"`. The reader stops at the 0-chunk
+    without consuming any trailing CRLF (matching `internal.chunkedReader`).
+  - `probeRequestBody` / `shouldSendChunkedRequestBody` / the 200ms async
+    byte-sniff (`ByteReadCh`, `finishAsyncByteRead`), `unwrapNopCloser` /
+    `isKnownInMemoryReader` / `FlushAfterChunkWriter` flush behavior, and the
+    `body` mutex/`Close`/`readTrailer`/`onHitEOF` machinery are
+    Go-runtime/connection-management concerns deferred to later tickets
+    (Request/Response read-write and Server/Transport); the framing they wrap is
+    ported. `TestDetectInMemoryReaders`, `TestBodyReadBadTrailer` (depends on the
+    `body` struct) and `TestChunkReaderAllocs` (Go GC allocation assertion) are
+    omitted accordingly. The `httplaxcontentlength` GODEBUG knob is not modeled
+    (default behavior only).
+- **Commit:** _(commit id annotation lands in a subsequent working-copy change)_
 
 ### Ticket 6 — Request/Response types + read/write
 Status: Planned
