@@ -1,0 +1,4 @@
+(executable
+ (public_name gohttp)
+ (name main)
+ (libraries gohttp))
