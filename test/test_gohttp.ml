@@ -25,4 +25,7 @@ let () =
       ("HpackTables", Test_hpack_tables.tests);
       ("Hpack", Test_hpack.tests);
       ("H2Frame", Test_h2_frame.tests);
+      ("H2Flow", Test_h2_flow.tests);
+      ("H2DataBuffer", Test_h2_databuffer.tests);
+      ("H2Pipe", Test_h2_pipe.tests);
     ]

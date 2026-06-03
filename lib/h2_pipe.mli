@@ -1,0 +1,64 @@
+(* Port of go/src/net/http/internal/http2/pipe.go *)
+
+(** Raised by {!write} on a closed/broken pipe. Mirrors Go's
+    [errClosedPipeWrite] ("write on closed buffer"). *)
+exception Closed_pipe_write
+
+(** Raised by {!write} when the buffer was never initialized via
+    {!set_buffer}. Mirrors Go's [errUninitializedPipeWrite]. *)
+exception Uninitialized_pipe_write
+
+val closed_pipe_write_msg : string
+val uninitialized_pipe_write_msg : string
+
+(** A fiber-safe Reader/Writer pair backed by an internal {!H2_databuffer.t},
+    with error/close propagation. Mirrors Go's [pipe]; a blocked {!read} awaits
+    an [Lwt_condition] that {!write}/{!close_with_error}/{!break_with_error}
+    broadcast (replacing Go's [sync.Cond]). *)
+type t
+
+(** A fresh pipe with no buffer set. Mirrors Go's zero-valued [pipe]. *)
+val create : unit -> t
+
+(** [set_buffer p b] installs the backing buffer. No effect if [p] is already
+    closed/broken. Mirrors [pipe.setBuffer]. *)
+val set_buffer : t -> H2_databuffer.t -> unit
+
+(** [len p] is the number of unread bytes (the recorded [unread] count once
+    done reading). Mirrors [pipe.Len]. *)
+val len : t -> int
+
+(** [read p max] resolves with up to [max] bytes once data is available. If the
+    pipe is empty it waits until a {!write}, {!close_with_error} or
+    {!break_with_error} occurs. On close-with-error, buffered data is returned
+    first and the error is raised only once drained; on break, the error is
+    raised immediately. Mirrors [pipe.Read]. *)
+val read : t -> int -> string Lwt.t
+
+(** [write p d] appends [d] and wakes a waiting reader, returning the count
+    written. Raises {!Closed_pipe_write} if closed/broken, or
+    {!Uninitialized_pipe_write} if no buffer was set. Mirrors [pipe.Write]. *)
+val write : t -> string -> int
+
+(** [close_with_error p err] causes the next {!read} (waking a blocked reader)
+    to raise [err] after all buffered data has been read. Mirrors
+    [pipe.CloseWithError]. *)
+val close_with_error : t -> exn -> unit
+
+(** [break_with_error p err] causes the next {!read} to raise [err]
+    immediately, discarding unread data (recorded in {!len}). Mirrors
+    [pipe.BreakWithError]. *)
+val break_with_error : t -> exn -> unit
+
+(** [close_with_error_and_code p err fn] is like {!close_with_error} but runs
+    [fn] in the reader before raising the error. Mirrors
+    [pipe.closeWithErrorAndCode]. *)
+val close_with_error_and_code : t -> exn -> (unit -> unit) -> unit
+
+(** [err p] is the error first set by {!break_with_error} or
+    {!close_with_error}. Mirrors [pipe.Err]. *)
+val err : t -> exn option
+
+(** [done_ p] is a promise resolved when the pipe is closed/broken with an
+    error. Mirrors [pipe.Done]. *)
+val done_ : t -> unit Lwt.t
