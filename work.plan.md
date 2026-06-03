@@ -574,3 +574,22 @@ Status: Planned
 **F) End-of-Ticket Verification** `dune build && dune test` clean; round-trip tests bounded by timeout.
 
 **G) Execution Record** _(tbd)_
+
+### Ticket 11 — Form & multipart parsing
+Status: Planned
+
+**A) Scope** Port the request form API deferred from Ticket 6: `ParseForm`, `ParseMultipartForm`, `FormValue`, `PostFormValue`, `FormFile`, and the `form`/`post_form`/`multipart_form` fields of `Request.t`. URL-encoded form parsing (`application/x-www-form-urlencoded`) is ported faithfully; **multipart/form-data parsing uses the `multipart_form-lwt` opam library as a pragmatic stand-in** (Go hand-rolls `mime/multipart`; a faithful port is a possible future pass).
+
+**B) Migration Strategy** Additive: add `form`/`post_form` (`(string, string list) Hashtbl.t` mirroring `url.Values`) and `multipart_form` fields to `Request.t` as optionals so existing Ticket-6 round-trips are unaffected. Add `multipart_form-lwt` to deps. Feed the existing `Body.t`/`Lwt_io` body stream into the parser.
+
+**C) Exit State** `parse_form` populates `form`/`post_form` from the query string + urlencoded body; `parse_multipart_form` populates `multipart_form` for `multipart/form-data` bodies; `form_value`/`form_file` read from them. Build + tests green.
+
+**D) Detailed Design** `val parse_form : Body.t Request.t -> unit Lwt.t`; `val parse_multipart_form : Body.t Request.t -> max_memory:int64 -> unit Lwt.t`; `val form_value : Body.t Request.t -> string -> string`; `val form_file : Body.t Request.t -> string -> (file_header) option`. `url.Values` → `(string, string list) Hashtbl.t` with `get`/`set`/`add`/`encode` helpers (a small `Values` module).
+
+**E) Testing Plan** *Unit* (`test/test_request_form.ml`, ported from `request_test.go` form tests): `Form.parse_urlencoded` (query + body merge, precedence), `Form.multipart` (parse a multipart/form-data body, assert field + file values), `Form.form_value`. Note any rows skipped due to the library stand-in.
+
+**F) End-of-Ticket Verification** `dune build && dune test` clean.
+
+**G) Execution Record** _(tbd)_
+
+> **Deviation note:** Ticket 11's multipart parsing depends on `multipart_form-lwt` rather than a hand-written port of Go's `mime/multipart`. This is the one intentional fidelity exception in the plan, chosen for expedience; flagged here so it is not mistaken for a complete 1:1 port.
