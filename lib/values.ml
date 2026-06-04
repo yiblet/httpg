@@ -67,7 +67,15 @@ let cut s sep =
 
 (* parseQuery(m, query): mutate [m], returning the first error (if any).
    Semicolon separators are invalid (Go rejects a key containing ';'). *)
-let parse_query_into (m : t) (query : string) : (unit, string) result =
+type error =
+  | Invalid_semicolon_separator
+  | Invalid_escape of string
+
+let error_to_string = function
+  | Invalid_semicolon_separator -> "invalid semicolon separator in query"
+  | Invalid_escape s -> Printf.sprintf "invalid URL escape %S" s
+
+let parse_query_into (m : t) (query : string) : (unit, error) result =
   let err = ref None in
   let set_err e = match !err with None -> err := Some e | Some _ -> () in
   let rec loop query =
@@ -75,7 +83,7 @@ let parse_query_into (m : t) (query : string) : (unit, string) result =
     else begin
       let key, rest, _ = cut query '&' in
       if String.contains key ';' then begin
-        set_err "invalid semicolon separator in query";
+        set_err Invalid_semicolon_separator;
         loop rest
       end
       else if key = "" then loop rest
@@ -93,7 +101,7 @@ let parse_query_into (m : t) (query : string) : (unit, string) result =
 
 (* ParseQuery(query): always returns a non-nil map; Error carries the first
    decode error encountered. *)
-let parse_query (query : string) : t * (unit, string) result =
+let parse_query (query : string) : t * (unit, error) result =
   let m = create () in
   (m, parse_query_into m query)
 

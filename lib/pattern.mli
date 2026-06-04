@@ -27,9 +27,23 @@ type t = {
   segments : segment list;
 }
 
-(** [parse s] parses a string into a pattern (Go's [parsePattern]). Returns
-    [Error msg] with Go's faithful "at offset N: ..." error messages. *)
-val parse : string -> (t, string) result
+(** A parse failure (Go's [parsePattern] error cases). The [int] in the
+    offset-bearing arms is the byte offset into the original pattern string
+    (Go's "at offset N" prefix); the [string] is the offending fragment. *)
+type error =
+  | Empty_pattern  (** the empty string *)
+  | Invalid_method of string  (** the bad method token *)
+  | Missing_path of int  (** host/path missing the leading '/' (offset) *)
+  | Host_has_brace of int  (** host contains '{' (missing initial '/'?) *)
+  | Unclean_path of int  (** non-CONNECT pattern with an unclean path *)
+  | Bad_wildcard of int * string  (** malformed wildcard segment (offset, why) *)
+  | Duplicate_wildcard of int * string  (** repeated wildcard name (offset, name) *)
+
+(** Render [error] as Go's faithful "at offset N: ..." message. *)
+val error_to_string : error -> string
+
+(** [parse s] parses a string into a pattern (Go's [parsePattern]). *)
+val parse : string -> (t, error) result
 
 (** [to_string p] is the original pattern string (Go's [pattern.String]). *)
 val to_string : t -> string

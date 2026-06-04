@@ -210,8 +210,10 @@ exception Register_error of string
 let register mux patstr handler =
   if patstr = "" then raise (Register_error "http: invalid pattern");
   match Pattern.parse patstr with
-  | Error msg ->
-      raise (Register_error (Printf.sprintf "parsing %S: %s" patstr msg))
+  | Error e ->
+      raise
+        (Register_error
+           (Printf.sprintf "parsing %S: %s" patstr (Pattern.error_to_string e)))
   | Ok pat ->
       List.iter
         (fun pat2 ->

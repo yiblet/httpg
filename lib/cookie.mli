@@ -51,9 +51,23 @@ val read_cookies : Header.t -> filter:string -> t list
     [Cookie.String]). Returns "" if the name is invalid. *)
 val set_cookie : t -> string
 
-(** [valid c] reports [Ok ()] if the cookie is valid, else [Error msg]
+(** A cookie-validation failure (Go's [Cookie.Valid] error cases). The [char]
+    arms carry the first offending byte. *)
+type error =
+  | Invalid_name  (** [name] is not a valid token *)
+  | Invalid_expires  (** [expires] is out of range *)
+  | Invalid_value of char  (** byte not allowed in a cookie value *)
+  | Invalid_path of char  (** byte not allowed in a cookie path *)
+  | Invalid_domain  (** [domain] is not a valid cookie domain *)
+  | Partitioned_without_secure
+      (** partitioned cookie set without the Secure attribute *)
+
+(** Render [error] as Go's faithful "http: ..." message. *)
+val error_to_string : error -> string
+
+(** [valid c] reports [Ok ()] if the cookie is valid, else [Error e]
     (Go's [Cookie.Valid]). *)
-val valid : t -> (unit, string) result
+val valid : t -> (unit, error) result
 
 (** [sanitize_cookie_value v ~quoted] produces a suitable cookie-value from [v]
     (Go's [sanitizeCookieValue]). *)

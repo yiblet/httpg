@@ -558,6 +558,39 @@ let valid_cases =
           Alcotest.(check bool) "valid" want_valid got_valid ))
     valid_tests
 
+(* Representative invalid cookies map to the right typed [Cookie.error] arm. *)
+let valid_typed_cases =
+  let check name c pred () =
+    match valid c with
+    | Ok () -> Alcotest.failf "%s: expected Error, got Ok" name
+    | Error e ->
+        if not (pred e) then
+          Alcotest.failf "%s: got %s, wrong arm" name (error_to_string e)
+  in
+  [
+    ( "valid_typed bad name",
+      `Quick,
+      check "bad name"
+        { default with name = "in valid"; value = "v" }
+        (function Invalid_name -> true | _ -> false) );
+    ( "valid_typed bad value",
+      `Quick,
+      check "bad value"
+        { default with name = "ok"; value = "bad\x00value" }
+        (function Invalid_value _ -> true | _ -> false) );
+    ( "valid_typed partitioned without secure",
+      `Quick,
+      check "partitioned"
+        { default with name = "ok"; value = "v"; partitioned = true; secure = false }
+        (function Partitioned_without_secure -> true | _ -> false) );
+    ( "valid_typed ok",
+      `Quick,
+      fun () ->
+        match valid { default with name = "ok"; value = "v" } with
+        | Ok () -> ()
+        | Error e -> Alcotest.failf "expected Ok, got %s" (error_to_string e) );
+  ]
+
 let tests =
   write_set_cookies_cases @ read_set_cookies_cases @ read_cookies_cases
-  @ sanitize_value_cases @ sanitize_path_cases @ valid_cases
+  @ sanitize_value_cases @ sanitize_path_cases @ valid_cases @ valid_typed_cases

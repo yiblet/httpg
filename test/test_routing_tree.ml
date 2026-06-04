@@ -8,7 +8,7 @@ let build_tree pats =
     (fun p ->
       match Pattern.parse p with
       | Ok pat -> Routing_tree.add_pattern root pat ()
-      | Error e -> Alcotest.failf "parse %S: %s" p e)
+      | Error e -> Alcotest.failf "parse %S: %s" p (Pattern.error_to_string e))
     pats;
   root
 

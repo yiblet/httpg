@@ -9,7 +9,7 @@ let multi name = { Pattern.s = name; wild = true; multi = true }
 let must_parse s =
   match Pattern.parse s with
   | Ok p -> p
-  | Error e -> Alcotest.failf "parse %S failed: %s" s e
+  | Error e -> Alcotest.failf "parse %S failed: %s" s (Pattern.error_to_string e)
 
 (* equal: same as Go's pattern.equal — method, host, segments. *)
 let pat_equal (p1 : Pattern.t) (p2 : Pattern.t) =
@@ -115,9 +115,33 @@ let test_parse_pattern_error () =
       match Pattern.parse in_ with
       | Ok _ -> Alcotest.failf "%S: expected error containing %S, got Ok" in_ want
       | Error e ->
+        let e = Pattern.error_to_string e in
         if not (contains e want) then
           Alcotest.failf "%S: got error %S, want containing %S" in_ e want)
     cases
+
+(* Representative bad patterns map to the right typed [Pattern.error] arm; a
+   valid pattern parses to [Ok]. *)
+let test_parse_errors_typed () =
+  let check name in_ pred =
+    match Pattern.parse in_ with
+    | Ok _ -> Alcotest.failf "%s: %S parsed Ok, expected Error" name in_
+    | Error e ->
+        if not (pred e) then
+          Alcotest.failf "%s: %S got %s, wrong arm" name in_ (Pattern.error_to_string e)
+  in
+  check "empty" "" (function Pattern.Empty_pattern -> true | _ -> false);
+  check "method" "A=B /" (function Pattern.Invalid_method _ -> true | _ -> false);
+  check "missing_path" " " (function Pattern.Missing_path _ -> true | _ -> false);
+  check "host_brace" "{a}/b" (function Pattern.Host_has_brace _ -> true | _ -> false);
+  check "unclean" "GET //" (function Pattern.Unclean_path _ -> true | _ -> false);
+  check "bad_wildcard" "/x{w}" (function Pattern.Bad_wildcard _ -> true | _ -> false);
+  check "empty_wildcard" "/{}" (function Pattern.Bad_wildcard _ -> true | _ -> false);
+  check "dup_wildcard" "/a/{x}/b/{x...}"
+    (function Pattern.Duplicate_wildcard (_, "x") -> true | _ -> false);
+  match Pattern.parse "GET /a/{id}" with
+  | Ok _ -> ()
+  | Error e -> Alcotest.failf "valid pattern returned Error %s" (Pattern.error_to_string e)
 
 let rel_testable = Alcotest.testable (fun fmt r -> Format.pp_print_string fmt (Pattern.relationship_to_string r)) ( = )
 
@@ -321,6 +345,7 @@ let tests =
   [
     ("parse_pattern", `Quick, test_parse_pattern);
     ("parse_pattern_error", `Quick, test_parse_pattern_error);
+    ("parse_errors_typed", `Quick, test_parse_errors_typed);
     ("compare_methods", `Quick, test_compare_methods);
     ("compare_paths", `Quick, test_compare_paths);
     ("conflicts_with", `Quick, test_conflicts_with);

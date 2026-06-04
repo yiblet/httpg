@@ -481,10 +481,27 @@ let set_cookie c =
 
 (* ---- Cookie.Valid ---- *)
 
+type error =
+  | Invalid_name
+  | Invalid_expires
+  | Invalid_value of char
+  | Invalid_path of char
+  | Invalid_domain
+  | Partitioned_without_secure
+
+let error_to_string = function
+  | Invalid_name -> "http: invalid Cookie.Name"
+  | Invalid_expires -> "http: invalid Cookie.Expires"
+  | Invalid_value b -> Printf.sprintf "http: invalid byte %C in Cookie.Value" b
+  | Invalid_path b -> Printf.sprintf "http: invalid byte %C in Cookie.Path" b
+  | Invalid_domain -> "http: invalid Cookie.Domain"
+  | Partitioned_without_secure ->
+      "http: partitioned cookies must be set with Secure"
+
 let valid c =
-  if not (is_token c.name) then Error "http: invalid Cookie.Name"
+  if not (is_token c.name) then Error Invalid_name
   else if c.expires <> 0. && not (valid_cookie_expires c.expires) then
-    Error "http: invalid Cookie.Expires"
+    Error Invalid_expires
   else
     let invalid_value =
       let bad = ref None in
@@ -496,7 +513,7 @@ let valid c =
       !bad
     in
     match invalid_value with
-    | Some b -> Error (Printf.sprintf "http: invalid byte %C in Cookie.Value" b)
+    | Some b -> Error (Invalid_value b)
     | None ->
         let invalid_path =
           if String.length c.path > 0 then begin
@@ -511,10 +528,10 @@ let valid c =
           else None
         in
         (match invalid_path with
-        | Some b -> Error (Printf.sprintf "http: invalid byte %C in Cookie.Path" b)
+        | Some b -> Error (Invalid_path b)
         | None ->
             if String.length c.domain > 0 && not (valid_cookie_domain c.domain)
-            then Error "http: invalid Cookie.Domain"
+            then Error Invalid_domain
             else if c.partitioned && not c.secure then
-              Error "http: partitioned cookies must be set with Secure"
+              Error Partitioned_without_secure
             else Ok ())

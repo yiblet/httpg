@@ -37,11 +37,22 @@ val query_unescape : string -> string
 (** [QueryEscape]: percent-encode a query component (space -> '+'). *)
 val query_escape : string -> string
 
+(** A query-parse failure (Go's [ParseQuery] error cases). [Invalid_escape]
+    carries the offending escape fragment; it is declared for fidelity with
+    Go's [QueryUnescape] error, though this port's [query_unescape] (via the
+    [uri] lib) does not currently surface bad-escape errors. *)
+type error =
+  | Invalid_semicolon_separator
+  | Invalid_escape of string
+
+(** Render [error] as Go's faithful message. *)
+val error_to_string : error -> string
+
 (** [ParseQuery query]: a non-nil map plus the first decode error, if any. *)
-val parse_query : string -> t * (unit, string) result
+val parse_query : string -> t * (unit, error) result
 
 (** [parseQuery m query]: parse into an existing map (Go's internal helper). *)
-val parse_query_into : t -> string -> (unit, string) result
+val parse_query_into : t -> string -> (unit, error) result
 
 (** [Values.Encode]: "k=v&..." sorted by key. *)
 val encode : t -> string

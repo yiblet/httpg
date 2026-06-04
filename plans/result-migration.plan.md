@@ -149,7 +149,7 @@ no behavior change, as expected.)
 Resolve the current git commit hash with `jj log -r vwsywrln`.
 
 ### Ticket 2 — Pure parsers → typed `error` variants (pattern, values, cookie)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Normalize the modules that *already* return `result` (but with `string`/`exn` payloads) to **typed variants**, establishing the idiom on the safest, purely-functional surface. Converts `Pattern.parse`, `Values.parse_query`/`parse_query_into`, `Cookie.valid`.
@@ -190,7 +190,80 @@ Exact arms refined against Go's error strings in `pattern.go`/`url.go`/`cookie.g
 `dune build` clean; `dune test` passes incl. new named tests.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done.
+
+**What changed (pure parsers normalized from `string`/`exn` payloads to typed variants):**
+- **`pattern`** (`lib/pattern.mli` + `lib/pattern.ml`): added
+  ```
+  type error =
+    | Empty_pattern
+    | Invalid_method of string
+    | Missing_path of int
+    | Host_has_brace of int
+    | Unclean_path of int
+    | Bad_wildcard of int * string
+    | Duplicate_wildcard of int * string
+  ```
+  `parse : string -> (t, error) result` (was `(t, string) result`). Added
+  `error_to_string : error -> string` rendering Go's faithful "at offset N: ..."
+  messages (so the offset-bearing arms preserve the `pattern_test.go`
+  substrings). Internal `exception Parse_error` now carries `error`; each `fail`
+  site constructs the right arm. The `let exception Done` and `failwith`
+  invariants stay (allowlisted, Ticket 8 docs).
+- **`values`** (`lib/values.mli` + `lib/values.ml`): added
+  `type error = Invalid_semicolon_separator | Invalid_escape of string` +
+  `error_to_string`. `parse_query : string -> t * (unit, error) result` and
+  `parse_query_into : t -> string -> (unit, error) result` (were `string`).
+  `Invalid_escape` is declared for Go fidelity but not currently produced (the
+  port's `query_unescape` uses the `uri` lib, which does not surface bad-escape
+  errors) — noted in the `.mli`.
+- **`cookie`** (`lib/cookie.mli` + `lib/cookie.ml`): added
+  ```
+  type error =
+    | Invalid_name | Invalid_expires
+    | Invalid_value of char | Invalid_path of char
+    | Invalid_domain | Partitioned_without_secure
+  ```
+  + `error_to_string`. `valid : t -> (unit, error) result` (was `string`).
+- **Callers updated (kept compiling; full migration deferred to T6):**
+  - `lib/server.ml` `register`: matches `Pattern.parse` `Error e`, renders via
+    `Pattern.error_to_string` into the existing `Register_error` string.
+  - `lib/form.ml` (×2 `Values.parse_query` sites): map `Values.error` →
+    `string` via `Result.map_error Values.error_to_string` so `Form`'s
+    `(unit, string) result` API is unchanged.
+  - `test/test_routing_tree.ml`, `test/test_pattern.ml` `must_parse` and the
+    `parse_pattern_error` substring test: render via `Pattern.error_to_string`.
+
+**Named tests added (registered in `test/test_gohttp.ml`):**
+- `Pattern.parse_errors_typed` (`test/test_pattern.ml`) — `""`→`Empty_pattern`,
+  `"A=B /"`→`Invalid_method`, `" "`→`Missing_path`, `"{a}/b"`→`Host_has_brace`,
+  `"GET //"`→`Unclean_path`, `"/x{w}"`/`"/{}"`→`Bad_wildcard`,
+  `"/a/{x}/b/{x...}"`→`Duplicate_wildcard (_, "x")`; a valid pattern → `Ok`.
+- `Values.parse_query_typed` (new `test/test_values.ml`, new `Values` suite) —
+  `"a;b=c"` → `Error Invalid_semicolon_separator`; a well-formed query → `Ok`
+  with values populated.
+- `Cookie.valid_typed_*` (×4, `test/test_cookie.ml`) — bad name → `Invalid_name`,
+  bad value byte → `Invalid_value _`, partitioned-without-secure →
+  `Partitioned_without_secure`, valid → `Ok`.
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+=== BUILD EXIT: 0 ===
+$ dune test --root <worktree> --force
+Test Successful in 1.869s. 493 tests run.
+=== TEST EXIT: 0 ===
+```
+(Baseline before the change: 487 tests run, all OK. +6 from the new named
+tests: 1 pattern, 1 values, 4 cookie.) Per-suite spot checks confirm the new
+cases run and pass: `Pattern parse_errors_typed [OK]`, `Values
+parse_query_typed [OK]`, `Cookie valid_typed * [OK]`. `grep` confirms no
+`(_, string) result` / `(_, exn) result` signatures remain in
+`pattern.mli`/`values.mli`/`cookie.mli`.
+
+**Commit id:** jj change **`wqmtwlyq`** (canonical, stable id)
+(`refactor(errors): typed error variants for pattern/values/cookie (Result migration T2)`).
 
 ### Ticket 3 — HPACK codec → `result` (hpack, hpack_huffman)
 Status: Planned

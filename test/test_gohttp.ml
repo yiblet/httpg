@@ -12,6 +12,7 @@ let () =
       ("Header", Test_header.tests);
       ("Sniff", Test_sniff.tests);
       ("Cookie", Test_cookie.tests);
+      ("Values", Test_values.tests);
       ("Transfer", Test_transfer.tests);
       ("Request", Test_request.tests);
       ("ReadRequest", Test_readrequest.tests);

@@ -152,13 +152,35 @@ let cut_suffix s suffix =
 
 (* --- parsePattern --- *)
 
-exception Parse_error of string
+type error =
+  | Empty_pattern
+  | Invalid_method of string
+  | Missing_path of int
+  | Host_has_brace of int
+  | Unclean_path of int
+  | Bad_wildcard of int * string
+  | Duplicate_wildcard of int * string
 
-let parse s : (t, string) result =
-  if String.length s = 0 then Error "empty pattern"
+let error_to_string = function
+  | Empty_pattern -> "empty pattern"
+  | Invalid_method m -> Printf.sprintf "at offset 0: invalid method %S" m
+  | Missing_path off -> Printf.sprintf "at offset %d: host/path missing /" off
+  | Host_has_brace off ->
+      Printf.sprintf "at offset %d: host contains '{' (missing initial '/'?)" off
+  | Unclean_path off ->
+      Printf.sprintf
+        "at offset %d: non-CONNECT pattern with unclean path can never match" off
+  | Bad_wildcard (off, why) -> Printf.sprintf "at offset %d: %s" off why
+  | Duplicate_wildcard (off, name) ->
+      Printf.sprintf "at offset %d: duplicate wildcard name %S" off name
+
+exception Parse_error of error
+
+let parse s : (t, error) result =
+  if String.length s = 0 then Error Empty_pattern
   else begin
     let off = ref 0 in
-    let fail msg = raise (Parse_error (Printf.sprintf "at offset %d: %s" !off msg)) in
+    let fail e = raise (Parse_error e) in
     try
       let method_, rest, found =
         let i = index_any s " \t" in
@@ -170,21 +192,21 @@ let parse s : (t, string) result =
       in
       let method_, rest = if not found then ("", method_) else (method_, rest) in
       if method_ <> "" && not (valid_method method_) then
-        fail (Printf.sprintf "invalid method %S" method_);
+        fail (Invalid_method method_);
       (if found then off := String.length method_ + 1);
       let i = index_byte rest '/' in
-      if i < 0 then fail "host/path missing /";
+      if i < 0 then fail (Missing_path !off);
       let host = String.sub rest 0 i in
       let rest = ref (String.sub rest i (String.length rest - i)) in
       let j = index_byte host '{' in
       if j >= 0 then begin
         off := !off + j;
-        fail "host contains '{' (missing initial '/'?)"
+        fail (Host_has_brace !off)
       end;
       off := !off + i;
       (* An unclean path with a method other than CONNECT can never match. *)
       if method_ <> "" && method_ <> "CONNECT" && !rest <> path_clean !rest then
-        fail "non-CONNECT pattern with unclean path can never match";
+        fail (Unclean_path !off);
       let segments = ref [] in
       let push seg = segments := seg :: !segments in
       let seen_names = Hashtbl.create 8 in
@@ -206,23 +228,26 @@ let parse s : (t, string) result =
           if bi < 0 then push { s = path_unescape seg; wild = false; multi = false }
           else begin
             (* Wildcard. *)
-            if bi <> 0 then fail "bad wildcard segment (must start with '{')";
+            if bi <> 0 then
+              fail (Bad_wildcard (!off, "bad wildcard segment (must start with '{')"));
             if seg.[String.length seg - 1] <> '}' then
-              fail "bad wildcard segment (must end with '}')";
+              fail (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"));
             let name = String.sub seg 1 (String.length seg - 2) in
             if name = "$" then begin
-              if String.length !rest <> 0 then fail "{$} not at end";
+              if String.length !rest <> 0 then
+                fail (Bad_wildcard (!off, "{$} not at end"));
               push { s = "/"; wild = false; multi = false };
               break := true
             end
             else begin
               let name, multi = cut_suffix name "..." in
-              if multi && String.length !rest <> 0 then fail "{...} wildcard not at end";
-              if name = "" then fail "empty wildcard";
+              if multi && String.length !rest <> 0 then
+                fail (Bad_wildcard (!off, "{...} wildcard not at end"));
+              if name = "" then fail (Bad_wildcard (!off, "empty wildcard"));
               if not (is_valid_wildcard_name name) then
-                fail (Printf.sprintf "bad wildcard name %S" name);
+                fail (Bad_wildcard (!off, Printf.sprintf "bad wildcard name %S" name));
               if Hashtbl.mem seen_names name then
-                fail (Printf.sprintf "duplicate wildcard name %S" name);
+                fail (Duplicate_wildcard (!off, name));
               Hashtbl.replace seen_names name ();
               push { s = name; wild = true; multi }
             end
@@ -230,7 +255,7 @@ let parse s : (t, string) result =
         end
       done;
       Ok { str = s; method_; host; segments = List.rev !segments }
-    with Parse_error msg -> Error msg
+    with Parse_error e -> Error e
   end
 
 (* --- relationships --- *)

@@ -124,6 +124,7 @@ let parse_post_form (r : Body.t Request.t) : (Values.t * (unit, string) result) 
         Lwt.return (Values.create (), Error "http: POST too large")
       else
         let m, res = Values.parse_query b in
+        let res = Result.map_error Values.error_to_string res in
         Lwt.return (m, res)
     end
     else
@@ -166,7 +167,7 @@ let parse_form (r : Body.t Request.t) : (unit, string) result Lwt.t =
     (* parse query from URL *)
     let raw_query = match Uri.verbatim_query r.Request.url with Some q -> q | None -> "" in
     let new_values, qres = Values.parse_query raw_query in
-    set_err qres;
+    set_err (Result.map_error Values.error_to_string qres);
     (match form with
     | None -> r.Request.form <- Some new_values
     | Some f ->
