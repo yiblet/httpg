@@ -49,9 +49,7 @@ let get h key =
 
 (* MIMEHeader.Values: all values for the key (or [] when absent). *)
 let values h key =
-  match find_opt h (canonical_header_key key) with
-  | Some vs -> vs
-  | None -> []
+  match find_opt h (canonical_header_key key) with Some vs -> vs | None -> []
 
 (* MIMEHeader.Del. *)
 let del h key = Hashtbl.remove h (canonical_header_key key)
@@ -69,8 +67,7 @@ let valid_header_field_name s =
   && String.for_all Gohttp_base.Textproto.valid_header_field_byte s
 
 (* headerNewlineToSpace: replace '\n' and '\r' with ' '. *)
-let newline_to_space s =
-  String.map (function '\n' | '\r' -> ' ' | c -> c) s
+let newline_to_space s = String.map (function '\n' | '\r' -> ' ' | c -> c) s
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
 let trim_string s =
@@ -91,7 +88,9 @@ let trim_string s =
 let write_subset h buf ~exclude =
   let excluded k = List.mem k exclude in
   let kvs =
-    Hashtbl.fold (fun k vs acc -> if excluded k then acc else (k, vs) :: acc) h []
+    Hashtbl.fold
+      (fun k vs acc -> if excluded k then acc else (k, vs) :: acc)
+      h []
   in
   let kvs = List.sort (fun (a, _) (b, _) -> String.compare a b) kvs in
   List.iter

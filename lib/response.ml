@@ -30,8 +30,12 @@ let proto_at_least (r : 'a t) major minor =
 let location (r : 'a t) : Uri.t option =
   match Header.get r.header "Location" with
   | "" -> None
-  | lv ->
-    let loc = Uri.of_string lv in
-    (match r.request with
-    | Some req -> Some (Uri.resolve (Uri.scheme req.Request.url |> Option.value ~default:"http") req.Request.url loc)
-    | None -> Some loc)
+  | lv -> (
+      let loc = Uri.of_string lv in
+      match r.request with
+      | Some req ->
+          Some
+            (Uri.resolve
+               (Uri.scheme req.Request.url |> Option.value ~default:"http")
+               req.Request.url loc)
+      | None -> Some loc)

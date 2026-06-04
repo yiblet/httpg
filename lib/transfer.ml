@@ -38,7 +38,8 @@ let error_to_string = function
   | Line_too_long -> "http: chunk line too long"
   | Chunk msg -> msg
   | Bad_content_length cl -> Printf.sprintf "bad Content-Length: %s" cl
-  | Unsupported_transfer_encoding te -> Printf.sprintf "unsupported transfer encoding: %s" te
+  | Unsupported_transfer_encoding te ->
+      Printf.sprintf "unsupported transfer encoding: %s" te
   | Bad_header (what, value) -> Printf.sprintf "%s: %s" what value
   | Unexpected_eof -> "unexpected EOF"
 
@@ -71,9 +72,13 @@ let is_ows b = b = ' ' || b = '\t'
 let trim_ows x =
   let n = String.length x in
   let i = ref 0 in
-  while !i < n && is_ows x.[!i] do incr i done;
+  while !i < n && is_ows x.[!i] do
+    incr i
+  done;
   let j = ref (n - 1) in
-  while !j >= !i && is_ows x.[!j] do decr j done;
+  while !j >= !i && is_ows x.[!j] do
+    decr j
+  done;
   String.sub x !i (!j - !i + 1)
 
 (* httpguts.tokenEqual: ASCII case-insensitive equality, no non-ASCII. *)
@@ -93,8 +98,8 @@ let header_value_contains_token v token =
   let rec loop v =
     match String.index_opt v ',' with
     | Some comma ->
-      if token_equal (trim_ows (String.sub v 0 comma)) token then true
-      else loop (String.sub v (comma + 1) (String.length v - comma - 1))
+        if token_equal (trim_ows (String.sub v 0 comma)) token then true
+        else loop (String.sub v (comma + 1) (String.length v - comma - 1))
     | None -> token_equal (trim_ows v) token
   in
   loop v
@@ -111,8 +116,8 @@ let foreach_header_element v fn =
   else
     String.split_on_char ',' v
     |> List.iter (fun f ->
-           let f = trim_string f in
-           if f <> "" then fn f)
+        let f = trim_string f in
+        if f <> "" then fn f)
 
 (* ------------------------------------------------------------------ *)
 (* Chunked codec (go/src/net/http/internal/chunked.go).                *)
@@ -201,59 +206,59 @@ let parse_content_length (cl_headers : string list) : (int64, error) result =
   match cl_headers with
   | [] -> Ok (-1L)
   | cl0 :: _ ->
-    let cl = trim_string cl0 in
-    if cl = "" then Error (Bad_content_length cl)
-    else begin
-      (* strconv.ParseUint(cl, 10, 63): non-negative, no sign, fits in 63 bits. *)
-      let valid_digits = String.for_all (fun c -> c >= '0' && c <= '9') cl in
-      if not valid_digits then Error (Bad_content_length cl)
-      else
-        match Int64.of_string_opt cl with
-        (* must fit in 63 bits, i.e. < 2^63. Int64.of_string rejects > max_int64
+      let cl = trim_string cl0 in
+      if cl = "" then Error (Bad_content_length cl)
+      else begin
+        (* strconv.ParseUint(cl, 10, 63): non-negative, no sign, fits in 63 bits. *)
+        let valid_digits = String.for_all (fun c -> c >= '0' && c <= '9') cl in
+        if not valid_digits then Error (Bad_content_length cl)
+        else
+          match Int64.of_string_opt cl with
+          (* must fit in 63 bits, i.e. < 2^63. Int64.of_string rejects > max_int64
            already; ParseUint(_, _, 63) additionally forbids the top bit. *)
-        | Some n when Int64.compare n 0L >= 0 -> Ok n
-        | _ -> Error (Bad_content_length cl)
-    end
+          | Some n when Int64.compare n 0L >= 0 -> Ok n
+          | _ -> Error (Bad_content_length cl)
+      end
 
 (* fixLength: determine the expected body length per RFC 7230 3.3.
    [header] is mutated (dedup / delete Content-Length) exactly as Go does.
    Returns [result]: header-parse boundary errors (conflicting / invalid
    Content-Length) surface as [Error]. *)
-let fix_length ~is_response ~status ~request_method ~(header : Header.t) ~chunked:is_chunked :
-    (int64, error) result =
+let fix_length ~is_response ~status ~request_method ~(header : Header.t)
+    ~chunked:is_chunked : (int64, error) result =
   let open Result in
   let is_request = not is_response in
   let content_lens = ref (Header.values header "Content-Length") in
 
   (* Hardening against request smuggling: collapse duplicate Content-Length. *)
   let dup_check : (unit, error) result =
-    if List.length !content_lens > 1 then begin
-      match !content_lens with
+    if List.length !content_lens > 1 then
+      begin match !content_lens with
       | first0 :: rest ->
-        let first = trim_string first0 in
-        let conflict =
-          List.exists (fun ct -> first <> trim_string ct) rest
-        in
-        if conflict then
-          Error
-            (Chunk
-               (Printf.sprintf
-                  "http: message cannot contain multiple Content-Length headers; got %s"
-                  (String.concat " " !content_lens)))
-        else begin
-          Header.del header "Content-Length";
-          Header.add header "Content-Length" first;
-          content_lens := Header.values header "Content-Length";
-          Ok ()
-        end
+          let first = trim_string first0 in
+          let conflict = List.exists (fun ct -> first <> trim_string ct) rest in
+          if conflict then
+            Error
+              (Chunk
+                 (Printf.sprintf
+                    "http: message cannot contain multiple Content-Length \
+                     headers; got %s"
+                    (String.concat " " !content_lens)))
+          else begin
+            Header.del header "Content-Length";
+            Header.add header "Content-Length" first;
+            content_lens := Header.values header "Content-Length";
+            Ok ()
+          end
       | [] -> Ok ()
-    end
+      end
     else Ok ()
   in
   bind dup_check (fun () ->
       (* Reject invalid Content-Length; compute n if present. *)
       let parsed_n : (int64, error) result =
-        if !content_lens <> [] then parse_content_length !content_lens else Ok 0L
+        if !content_lens <> [] then parse_content_length !content_lens
+        else Ok 0L
       in
       bind parsed_n (fun n ->
           if is_response && no_response_body_expected request_method then Ok 0L
@@ -271,7 +276,8 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t) ~chunke
 
 (* shouldClose: whether to hang up after this message. Version-sensitive.
    [remove_close_header] mutates [header] to drop a Connection: close. *)
-let should_close ~major ~minor ~(header : Header.t) ~remove_close_header : bool =
+let should_close ~major ~minor ~(header : Header.t) ~remove_close_header : bool
+    =
   if major < 1 then true
   else
     let conv = Header.values header "Connection" in
@@ -286,52 +292,55 @@ let should_close ~major ~minor ~(header : Header.t) ~remove_close_header : bool 
 (* fixTrailer: parse the Trailer header into a trailer Header. Only meaningful
    for chunked encoding. Returns [Ok None] when there is no usable trailer;
    [Error (Bad_header _)] on a forbidden trailer key (header-parse boundary). *)
-let fix_trailer ~(header : Header.t) ~chunked:is_chunked : (Header.t option, error) result =
+let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
+    (Header.t option, error) result =
   match Header.values header "Trailer" with
   | [] -> Ok None
   | vv ->
-    if not is_chunked then Ok None
-    else begin
-      Header.del header "Trailer";
-      let trailer = Header.create () in
-      let err = ref None in
-      List.iter
-        (fun v ->
-          foreach_header_element v (fun key ->
-              let key = Header.canonical_header_key key in
-              (match key with
-              | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
-                if !err = None then err := Some (Bad_header ("bad trailer key", key))
-              | _ -> ());
-              (* trailer[key] = nil : record the key with no values. *)
-              Hashtbl.replace trailer key []))
-        vv;
-      match !err with
-      | Some e -> Error e
-      | None -> Ok (if Hashtbl.length trailer = 0 then None else Some trailer)
-    end
+      if not is_chunked then Ok None
+      else begin
+        Header.del header "Trailer";
+        let trailer = Header.create () in
+        let err = ref None in
+        List.iter
+          (fun v ->
+            foreach_header_element v (fun key ->
+                let key = Header.canonical_header_key key in
+                (match key with
+                | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
+                    if !err = None then
+                      err := Some (Bad_header ("bad trailer key", key))
+                | _ -> ());
+                (* trailer[key] = nil : record the key with no values. *)
+                Hashtbl.replace trailer key []))
+          vv;
+        match !err with
+        | Some e -> Error e
+        | None -> Ok (if Hashtbl.length trailer = 0 then None else Some trailer)
+      end
 
 (* parseTransferEncoding equivalent: set whether chunked, version-sensitive.
    Mutates [header] (deletes Transfer-Encoding). Raises Chunk_error for
    unsupported encodings (the unsupportedTEError analogue). HTTP/1.0 ignores
    Transfer-Encoding entirely (Issue 12785). *)
-let parse_transfer_encoding ~major ~minor ~(header : Header.t) : (bool, error) result =
+let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
+    (bool, error) result =
   match Header.values header "Transfer-Encoding" with
   | [] -> Ok false
   | raw ->
-    Header.del header "Transfer-Encoding";
-    let proto_at_least m n = major > m || (major = m && minor >= n) in
-    if not (proto_at_least 1 1) then Ok false
-    else if List.length raw <> 1 then
-      Error
-        (Chunk
-           (Printf.sprintf "too many transfer encodings: %s"
-              (String.concat " " (List.map (Printf.sprintf "%S") raw))))
-    else
-      let only = List.hd raw in
-      if not (ascii_equal_fold only "chunked") then
-        Error (Unsupported_transfer_encoding only)
-      else Ok true
+      Header.del header "Transfer-Encoding";
+      let proto_at_least m n = major > m || (major = m && minor >= n) in
+      if not (proto_at_least 1 1) then Ok false
+      else if List.length raw <> 1 then
+        Error
+          (Chunk
+             (Printf.sprintf "too many transfer encodings: %s"
+                (String.concat " " (List.map (Printf.sprintf "%S") raw))))
+      else
+        let only = List.hd raw in
+        if not (ascii_equal_fold only "chunked") then
+          Error (Unsupported_transfer_encoding only)
+        else Ok true
 
 (* ------------------------------------------------------------------ *)
 (* read_transfer: the transferReader logic.                            *)
@@ -379,18 +388,24 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
      should_close); for requests it's rr.Close. We re-derive for responses to
      match Go's readTransfer, which calls shouldClose for *Response. *)
   let close =
-    if is_response then should_close ~major ~minor ~header ~remove_close_header:true
+    if is_response then
+      should_close ~major ~minor ~header ~remove_close_header:true
     else msg.close
   in
 
-  let* is_chunked = Lwt_result.lift (parse_transfer_encoding ~major ~minor ~header) in
+  let* is_chunked =
+    Lwt_result.lift (parse_transfer_encoding ~major ~minor ~header)
+  in
 
   let* real_length =
-    Lwt_result.lift (fix_length ~is_response ~status ~request_method ~header ~chunked:is_chunked)
+    Lwt_result.lift
+      (fix_length ~is_response ~status ~request_method ~header
+         ~chunked:is_chunked)
   in
   let* content_length =
     if is_response && request_method = "HEAD" then
-      Lwt_result.lift (parse_content_length (Header.values header "Content-Length"))
+      Lwt_result.lift
+        (parse_content_length (Header.values header "Content-Length"))
     else Lwt_result.return real_length
   in
 
@@ -398,8 +413,11 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
 
   (* Unbounded-body -> close, for responses. *)
   let close =
-    if is_response && Int64.compare real_length (-1L) = 0 && (not is_chunked)
-       && body_allowed_for_status status
+    if
+      is_response
+      && Int64.compare real_length (-1L) = 0
+      && (not is_chunked)
+      && body_allowed_for_status status
     then true
     else close
   in
@@ -407,7 +425,10 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
   (* Prepare body reader. *)
   let body : Body.t =
     if is_chunked then
-      if is_response && (no_response_body_expected request_method || not (body_allowed_for_status status))
+      if
+        is_response
+        && (no_response_body_expected request_method
+           || not (body_allowed_for_status status))
       then Body.Empty
       else Body.Stream (new_chunked_reader ic)
     else if Int64.compare real_length 0L = 0 then Body.Empty
@@ -445,13 +466,16 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
             (Lwt.catch
                (fun () -> Lwt_io.read_into ic b 0 want)
                (function End_of_file -> Lwt.return 0 | e -> Lwt.fail e))
-            (fun got -> if got = 0 then Lwt.return None else Lwt.return (Some (Bytes.sub_string b 0 got))))
+            (fun got ->
+              if got = 0 then Lwt.return None
+              else Lwt.return (Some (Bytes.sub_string b 0 got))))
     else
       (* Persistent connection, no length -> no body. *)
       Body.Empty
   in
 
-  Lwt_result.return { body; content_length; is_chunked; result_close = close; trailer }
+  Lwt_result.return
+    { body; content_length; is_chunked; result_close = close; trailer }
 
 (* ------------------------------------------------------------------ *)
 (* write_body: the transferWriter body-writing logic.                  *)
@@ -474,9 +498,10 @@ type transfer_writer = {
 
 (* newTransferWriter's Body/ContentLength/TransferEncoding sanitization, the
    pure part (no probeRequestBody async sniffing). *)
-let make_transfer_writer ?(is_response = false) ?(method_ = "GET") ?(response_to_head = false)
-    ?(trailer = None) ?(at_least_http11 = true) ?(close = false) ?header ~(body : Body.t)
-    ~(content_length : int64) ~(transfer_encoding : string list) () : transfer_writer =
+let make_transfer_writer ?(is_response = false) ?(method_ = "GET")
+    ?(response_to_head = false) ?(trailer = None) ?(at_least_http11 = true)
+    ?(close = false) ?header ~(body : Body.t) ~(content_length : int64)
+    ~(transfer_encoding : string list) () : transfer_writer =
   let header = match header with Some h -> h | None -> Header.create () in
   let body_is_nil = body = Body.Empty in
   let te = ref transfer_encoding in
@@ -509,43 +534,50 @@ let should_send_content_length (t : transfer_writer) : bool =
   if chunked t.tw_transfer_encoding then false
   else if Int64.compare t.tw_content_length 0L > 0 then true
   else if Int64.compare t.tw_content_length 0L < 0 then false
-  else if t.tw_method = "POST" || t.tw_method = "PUT" || t.tw_method = "PATCH" then true
-  else if Int64.compare t.tw_content_length 0L = 0 && is_identity t.tw_transfer_encoding then
-    if t.tw_method = "GET" || t.tw_method = "HEAD" then false else true
+  else if t.tw_method = "POST" || t.tw_method = "PUT" || t.tw_method = "PATCH"
+  then true
+  else if
+    Int64.compare t.tw_content_length 0L = 0
+    && is_identity t.tw_transfer_encoding
+  then if t.tw_method = "GET" || t.tw_method = "HEAD" then false else true
   else false
 
 (* transferWriter.writeHeader: write Connection/Content-Length/Transfer-Encoding/
    Trailer header lines derived from the sanitized triple. Raises Bad_string_error
    on an invalid Trailer key. *)
-let write_transfer_header (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
+let write_transfer_header (oc : Lwt_io.output_channel) (t : transfer_writer) :
+    unit Lwt.t =
   let open Lwt.Infix in
-  (if t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close") then
-     Lwt_io.write oc "Connection: close\r\n"
+  (if
+     t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close")
+   then Lwt_io.write oc "Connection: close\r\n"
    else Lwt.return_unit)
   >>= fun () ->
   (if should_send_content_length t then
-     Lwt_io.write oc (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
-   else if chunked t.tw_transfer_encoding then Lwt_io.write oc "Transfer-Encoding: chunked\r\n"
+     Lwt_io.write oc
+       (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
+   else if chunked t.tw_transfer_encoding then
+     Lwt_io.write oc "Transfer-Encoding: chunked\r\n"
    else Lwt.return_unit)
   >>= fun () ->
   match t.tw_trailer with
   | None -> Lwt.return_unit
   | Some tr ->
-    let keys =
-      Hashtbl.fold
-        (fun k _ acc ->
-          let k = Header.canonical_header_key k in
-          (match k with
-          | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
-            raise (bad_string_error "invalid Trailer key" k)
-          | _ -> ());
-          k :: acc)
-        tr []
-    in
-    if keys = [] then Lwt.return_unit
-    else
-      let keys = List.sort String.compare keys in
-      Lwt_io.write oc ("Trailer: " ^ String.concat "," keys ^ "\r\n")
+      let keys =
+        Hashtbl.fold
+          (fun k _ acc ->
+            let k = Header.canonical_header_key k in
+            (match k with
+            | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
+                raise (bad_string_error "invalid Trailer key" k)
+            | _ -> ());
+            k :: acc)
+          tr []
+      in
+      if keys = [] then Lwt.return_unit
+      else
+        let keys = List.sort String.compare keys in
+        Lwt_io.write oc ("Trailer: " ^ String.concat "," keys ^ "\r\n")
 
 (* writeBody: write the body (and trailers) to [oc] in wire format. Raises
    Chunk_error on a ContentLength/body-length mismatch. *)
@@ -557,9 +589,9 @@ let write_body (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
       Lwt.bind
         (match t.tw_trailer with
         | Some tr ->
-          let buf = Buffer.create 64 in
-          Header.write tr buf;
-          Lwt_io.write oc (Buffer.contents buf)
+            let buf = Buffer.create 64 in
+            Header.write tr buf;
+            Lwt_io.write oc (Buffer.contents buf)
         | None -> Lwt.return_unit)
         (fun () -> Lwt_io.write oc "\r\n")
     end
@@ -589,6 +621,6 @@ let write_body (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
         if Int64.compare t.tw_content_length !n <> 0 then
           raise
             (Chunk_error
-               (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld" t.tw_content_length
-                  !n));
+               (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld"
+                  t.tw_content_length !n));
         after_body ())

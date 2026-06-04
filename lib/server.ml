@@ -11,8 +11,20 @@ open Lwt.Infix
 let weekday_names = [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |]
 
 let month_names =
-  [| "Jan"; "Feb"; "Mar"; "Apr"; "May"; "Jun"; "Jul"; "Aug"; "Sep"; "Oct";
-     "Nov"; "Dec" |]
+  [|
+    "Jan";
+    "Feb";
+    "Mar";
+    "Apr";
+    "May";
+    "Jun";
+    "Jul";
+    "Aug";
+    "Sep";
+    "Oct";
+    "Nov";
+    "Dec";
+  |]
 
 let utc_of_unix t =
   let secs = int_of_float (Float.floor t) in
@@ -21,7 +33,7 @@ let utc_of_unix t =
   let h = rem / 3600 in
   let mi = rem mod 3600 / 60 in
   let s = rem mod 60 in
-  let weekday = (((days mod 7) + 4) mod 7 + 7) mod 7 in
+  let weekday = ((((days mod 7) + 4) mod 7) + 7) mod 7 in
   let z = days + 719468 in
   let era = (if z >= 0 then z else z - 146096) / 146097 in
   let doe = z - (era * 146097) in
@@ -38,7 +50,8 @@ let utc_of_unix t =
 let http_time_now () =
   let y, mo, d, h, mi, s, wd = utc_of_unix (Unix.gettimeofday ()) in
   Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday_names.(wd) d
-    month_names.(mo - 1) y h mi s
+    month_names.(mo - 1)
+    y h mi s
 
 (* ---- ResponseWriter / Handler ---- *)
 
@@ -54,7 +67,9 @@ type response_writer = {
 }
 
 (* Go's Handler interface: ServeHTTP(ResponseWriter, *Request). *)
-type handler = { serve_http : response_writer -> Body.t Request.t -> unit Lwt.t }
+type handler = {
+  serve_http : response_writer -> Body.t Request.t -> unit Lwt.t;
+}
 
 (* Go's HandlerFunc adapter. *)
 let handler_func f = { serve_http = f }
@@ -132,8 +147,11 @@ let redirect w (r : Body.t Request.t) url code =
       in
       let cleaned = Pattern.path_clean url in
       let cleaned =
-        if trailing && not (String.length cleaned > 0
-                            && cleaned.[String.length cleaned - 1] = '/')
+        if
+          trailing
+          && not
+               (String.length cleaned > 0
+               && cleaned.[String.length cleaned - 1] = '/')
         then cleaned ^ "/"
         else cleaned
       in
@@ -156,8 +174,7 @@ let redirect w (r : Body.t Request.t) url code =
   else Lwt.return_unit
 
 (* Go's RedirectHandler. *)
-let redirect_handler url code =
-  handler_func (fun w r -> redirect w r url code)
+let redirect_handler url code = handler_func (fun w r -> redirect w r url code)
 
 (* ---- ServeMux ---- *)
 
@@ -168,13 +185,14 @@ let clean_path p =
   else begin
     let p = if p.[0] <> '/' then "/" ^ p else p in
     let np = Pattern.path_clean p in
-    if p.[String.length p - 1] = '/' && np <> "/" then begin
-      if String.length p = String.length np + 1
-         && String.length np <= String.length p
-         && String.sub p 0 (String.length np) = np
+    if p.[String.length p - 1] = '/' && np <> "/" then
+      begin if
+        String.length p = String.length np + 1
+        && String.length np <= String.length p
+        && String.sub p 0 (String.length np) = np
       then p
       else np ^ "/"
-    end
+      end
     else np
   end
 
@@ -189,8 +207,10 @@ let strip_host_port h =
     | Some i ->
         let host = String.sub h 0 i in
         (* strip [] brackets for IPv6 literals *)
-        if String.length host >= 2 && host.[0] = '['
-           && host.[String.length host - 1] = ']'
+        if
+          String.length host >= 2
+          && host.[0] = '['
+          && host.[String.length host - 1] = ']'
         then String.sub host 1 (String.length host - 2)
         else host
 
@@ -221,15 +241,15 @@ let register mux patstr handler : (unit, error) result =
                 (Pattern.error_to_string e)))
     | Ok pat -> (
         let conflict =
-          List.find_opt (fun pat2 -> Pattern.conflicts_with pat pat2)
+          List.find_opt
+            (fun pat2 -> Pattern.conflicts_with pat pat2)
             mux.patterns
         in
         match conflict with
         | Some pat2 ->
             Error
               (Register
-                 (Printf.sprintf
-                    "pattern %S conflicts with pattern %S:\n%s"
+                 (Printf.sprintf "pattern %S conflicts with pattern %S:\n%s"
                     (Pattern.to_string pat) (Pattern.to_string pat2)
                     (Pattern.describe_conflict pat pat2)))
         | None ->
@@ -274,9 +294,10 @@ let match_or_redirect mux ~host ~method_ ~path ~try_redirect ~raw_query =
   let is_exact =
     match m with Some ((pat, _), _) -> exact_match pat path | None -> false
   in
-  if (not is_exact) && try_redirect
-     && not (String.length path > 0 && path.[String.length path - 1] = '/')
-     && path <> ""
+  if
+    (not is_exact) && try_redirect
+    && (not (String.length path > 0 && path.[String.length path - 1] = '/'))
+    && path <> ""
   then begin
     let path2 = path ^ "/" in
     let m2 = Routing_tree.match_ mux.tree ~host ~method_ ~path:path2 in
@@ -339,9 +360,7 @@ let find_handler mux (r : Body.t Request.t) =
     | None ->
         if path <> escaped_path then begin
           (* Redirect to cleaned path. *)
-          let u =
-            if raw_query <> "" then path ^ "?" ^ raw_query else path
-          in
+          let u = if raw_query <> "" then path ^ "?" ^ raw_query else path in
           redirect_handler u Status.status_temporary_redirect
         end
         else find_handler_finish mux ~host ~path m
@@ -412,9 +431,7 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
   let req_should_close = r.close in
   (* mutable "close after reply" flag (Go's w.closeAfterReply). *)
   let close_after_reply = ref req_should_close in
-  let proto =
-    if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0"
-  in
+  let proto = if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0" in
   (* Emit the status line + headers, deciding the framing. [final_cl] is
      [Some n] when we know the exact Content-Length (handler done, fits, no
      explicit CL); otherwise framing is chunked (HTTP/1.1) or close (HTTP/1.0).
@@ -438,7 +455,8 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
              if String.length buffered > 512 then String.sub buffered 0 512
              else buffered
            in
-           Header.set header "Content-Type" (Sniff.detect_content_type sniff_src));
+           Header.set header "Content-Type"
+             (Sniff.detect_content_type sniff_src));
     (* Date header (Go always sets it if absent). *)
     if not (Header.has header "Date") then
       Header.set header "Date" (http_time_now ());
@@ -466,7 +484,7 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
     (* Framing: HEAD / no-body status -> no body framing. Else CL present ->
        Content-Length, no chunking. Else HTTP/1.1 -> chunked; HTTP/1.0 unknown
        length -> close-delimited (server.go:1503). *)
-    if (not body_allowed) || (is_head && not auto_cl && not has_explicit_cl)
+    if (not body_allowed) || (is_head && (not auto_cl) && not has_explicit_cl)
     then chunking := false
     else if content_length <> None then chunking := false
     else if Request.proto_at_least r 1 1 then chunking := true
@@ -490,11 +508,11 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
       is_head || content_length <> None || not body_allowed
     in
     let advertise10_keep_alive = ref false in
-    if not (Request.proto_at_least r 1 1) then begin
-      if wants10_keep_alive && sent_known_length && not req_should_close then
-        advertise10_keep_alive := true
+    if not (Request.proto_at_least r 1 1) then
+      begin if wants10_keep_alive && sent_known_length && not req_should_close
+      then advertise10_keep_alive := true
       else close_after_reply := true
-    end;
+      end;
     let keep_alive = not !close_after_reply in
     let status_text = Status.status_text code in
     let status_line =
@@ -505,15 +523,16 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
     let out = Buffer.create 256 in
     Buffer.add_string out status_line;
     (match content_length with
-    | Some n -> Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" n)
-    | None -> if !chunking then Buffer.add_string out "Transfer-Encoding: chunked\r\n");
+    | Some n ->
+        Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" n)
+    | None ->
+        if !chunking then Buffer.add_string out "Transfer-Encoding: chunked\r\n");
     if not keep_alive then Buffer.add_string out "Connection: close\r\n"
     else if !advertise10_keep_alive then
       Buffer.add_string out "Connection: keep-alive\r\n";
     Header.write_subset header out ~exclude:excluded_headers;
     Buffer.add_string out "\r\n";
-    Lwt_io.write oc (Buffer.contents out) >>= fun () ->
-    Lwt.return keep_alive
+    Lwt_io.write oc (Buffer.contents out) >>= fun () -> Lwt.return keep_alive
   in
   (* Push the currently-buffered bytes to the wire under the decided framing.
      Only called after [emit_headers]; clears the buffer. *)
@@ -549,8 +568,9 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
             (* Overflow past 2048 with headers not yet emitted: force the
                framing decision now (handler is NOT done -> chunked/close, not
                Content-Length), emit headers, stream the buffer. *)
-            if (not !headers_emitted)
-               && Buffer.length body_buf > buffer_before_chunking_size
+            if
+              (not !headers_emitted)
+              && Buffer.length body_buf > buffer_before_chunking_size
             then emit_headers () >>= fun _ -> flush_buffered ()
             else if !headers_emitted then flush_buffered ()
             else Lwt.return_unit
@@ -560,7 +580,8 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
           ensure_status ();
           (* Force the framing decision now; handler not necessarily done, so
              length is unknown -> chunked (HTTP/1.1) / close (HTTP/1.0). *)
-          (if not !headers_emitted then emit_headers () >>= fun _ -> Lwt.return_unit
+          (if not !headers_emitted then
+             emit_headers () >>= fun _ -> Lwt.return_unit
            else Lwt.return_unit)
           >>= fun () ->
           flush_buffered () >>= fun () -> Lwt_io.flush oc);
@@ -573,26 +594,26 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
   (* If headers were never emitted (everything fit in <=2048 and no flush),
      emit them now: this is the exact-Content-Length common case. Then write
      the buffered body. If chunking already started, finish the chunk stream. *)
-  (if not !headers_emitted then
-     emit_headers () >>= fun keep_alive ->
-     flush_buffered () >>= fun () -> Lwt_io.flush oc >>= fun () ->
-     Lwt.return keep_alive
-   else begin
-     (* Streaming already started. Flush any residual buffered bytes, then
+  if not !headers_emitted then
+    emit_headers () >>= fun keep_alive ->
+    flush_buffered () >>= fun () ->
+    Lwt_io.flush oc >>= fun () -> Lwt.return keep_alive
+  else begin
+    (* Streaming already started. Flush any residual buffered bytes, then
         terminate the framing: close the chunk stream when chunking. *)
-     flush_buffered () >>= fun () ->
-     (* Terminate the chunk stream: the 0-chunk size line ([chunked_writer_close]
+    flush_buffered () >>= fun () ->
+    (* Terminate the chunk stream: the 0-chunk size line ([chunked_writer_close]
         writes ["0\r\n"]) followed by the trailing CRLF that ends the (empty)
         trailer block — mirroring Go's [chunkWriter.close] and {!Transfer}'s
         [write_body]/[after_body]. Without the final CRLF a kept-alive peer that
         reads the chunked trailer (e.g. {!Io.stream_body}) blocks waiting for
         the blank line. *)
-     (if !chunking then
-        Transfer.chunked_writer_close oc >>= fun () -> Lwt_io.write oc "\r\n"
-      else Lwt.return_unit)
-     >>= fun () -> Lwt_io.flush oc >>= fun () ->
-     Lwt.return (not !close_after_reply)
-   end)
+    (if !chunking then
+       Transfer.chunked_writer_close oc >>= fun () -> Lwt_io.write oc "\r\n"
+     else Lwt.return_unit)
+    >>= fun () ->
+    Lwt_io.flush oc >>= fun () -> Lwt.return (not !close_after_reply)
+  end
 
 (* Note: Io.read_request returns a streaming request body; the serve loop runs
    Body.drain on it before reusing a kept-alive connection (Go's finishRequest
@@ -616,7 +637,7 @@ let create ?(addr = "") ?(port = 0) handler =
 
 (* Minimal Server.Close: resolve the stop promise and close the listener. *)
 let close srv =
-  (if Lwt.is_sleeping srv.stop then Lwt.wakeup_later srv.wake_stop ());
+  if Lwt.is_sleeping srv.stop then Lwt.wakeup_later srv.wake_stop ();
   match srv.listen_fd with
   | Some fd ->
       srv.listen_fd <- None;
@@ -630,10 +651,15 @@ let close srv =
      -> no reply, just close.
    - Any other malformed request (protocol error, missing Host) -> 400 Bad
      Request. *)
-let error_headers = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
+let error_headers =
+  "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
 
 let write_read_error_response oc (e : Io.error) : unit Lwt.t =
-  let write s = Lwt.catch (fun () -> Lwt_io.write oc s >>= fun () -> Lwt_io.flush oc) (fun _ -> Lwt.return_unit) in
+  let write s =
+    Lwt.catch
+      (fun () -> Lwt_io.write oc s >>= fun () -> Lwt_io.flush oc)
+      (fun _ -> Lwt.return_unit)
+  in
   match e with
   | Io.Transfer (Transfer.Unsupported_transfer_encoding _) ->
       let code = Status.status_not_implemented in
@@ -645,7 +671,8 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
       Lwt.return_unit
   | Io.Protocol _ | Io.Missing_host | Io.Transfer _ ->
       let public_err = "400 Bad Request" in
-      write (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
+      write
+        (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
 
 (* The per-connection serve loop: read a request, dispatch, write the response,
    loop while keep-alive holds. *)
@@ -672,16 +699,16 @@ let serve_conn (handler : handler) (cfd, peer) =
            [conn_ctx], when the connection closes. *)
         let req_ctx, cancel_req = Context.with_cancel conn_ctx in
         r.Request.ctx <- req_ctx;
-        Lwt.catch
-          (fun () -> serve_one oc r handler)
-          (fun _ -> Lwt.return false)
+        Lwt.catch (fun () -> serve_one oc r handler) (fun _ -> Lwt.return false)
         >>= fun keep_alive ->
         cancel_req Context.Canceled;
         (* Go's finishRequest: consume/close the request body before reusing the
            connection, so a kept-alive connection is positioned at the next
            message boundary (and any chunked trailer is read). *)
         if keep_alive then
-          Lwt.catch (fun () -> Body.drain r.Request.body) (fun _ -> Lwt.return_unit)
+          Lwt.catch
+            (fun () -> Body.drain r.Request.body)
+            (fun _ -> Lwt.return_unit)
           >>= loop
         else Lwt.return_unit
   in
@@ -712,8 +739,8 @@ let serve srv listen_fd =
 (* Go's Server.ListenAndServe / ListenAndServe: bind addr:port and serve. *)
 let listen_and_serve ~addr ~port handler =
   let srv = create ~addr ~port handler in
-  Net.listen (if addr = "" then "0.0.0.0" else addr) port
-  >>= fun listen_fd -> serve srv listen_fd
+  Net.listen (if addr = "" then "0.0.0.0" else addr) port >>= fun listen_fd ->
+  serve srv listen_fd
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 
@@ -759,7 +786,8 @@ let request_of_server_request (r : Gohttp_http2.Api.server_request) :
    response_writer to the user handler as a {!response_writer} (the H2 writer
    minus [flush]), run the handler, then flush the buffered headers/body. *)
 let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
- fun (h2w : Gohttp_http2.Api.response_writer) (r : Gohttp_http2.Api.server_request) ->
+ fun (h2w : Gohttp_http2.Api.response_writer)
+     (r : Gohttp_http2.Api.server_request) ->
   let w =
     {
       header = h2w.Gohttp_http2.Api.rw_header;
@@ -768,7 +796,8 @@ let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
       flush = h2w.rw_flush;
     }
   in
-  handler.serve_http w (request_of_server_request r) >>= fun () -> h2w.rw_flush ()
+  handler.serve_http w (request_of_server_request r) >>= fun () ->
+  h2w.rw_flush ()
 
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the
@@ -806,7 +835,9 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
             >>= fun keep_alive ->
             cancel_req Context.Canceled;
             if keep_alive then
-              Lwt.catch (fun () -> Body.drain r.Request.body) (fun _ -> Lwt.return_unit)
+              Lwt.catch
+                (fun () -> Body.drain r.Request.body)
+                (fun _ -> Lwt.return_unit)
               >>= loop
             else Lwt.return_unit
       in
@@ -821,9 +852,7 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
 let serve_tls srv (tls_srv : Net.tls_server) =
   srv.listen_fd <- Some (Net.tls_listen_fd tls_srv);
   let rec accept_loop () =
-    let accept_p =
-      Lwt.map (fun c -> `Conn c) (Net.accept_tls tls_srv)
-    in
+    let accept_p = Lwt.map (fun c -> `Conn c) (Net.accept_tls tls_srv) in
     let stop_p = Lwt.map (fun () -> `Stop) srv.stop in
     Lwt.choose [ accept_p; stop_p ] >>= function
     | `Stop -> Lwt.return_unit
@@ -841,7 +870,8 @@ let serve_tls srv (tls_srv : Net.tls_server) =
 let listen_and_serve_tls ~certificates ?(alpn = default_alpn_protocols) ~addr
     ~port handler =
   let srv = create ~addr ~port handler in
-  Net.listen_tls ~certificates ~alpn (if addr = "" then "0.0.0.0" else addr)
+  Net.listen_tls ~certificates ~alpn
+    (if addr = "" then "0.0.0.0" else addr)
     port
   >>= fun tls_srv -> serve_tls srv tls_srv
 
@@ -851,7 +881,8 @@ let listen_and_serve_tls ~certificates ?(alpn = default_alpn_protocols) ~addr
 let listen_and_serve_tls_started ~certificates ?(alpn = default_alpn_protocols)
     ~addr ~port handler =
   let srv = create ~addr ~port handler in
-  Net.listen_tls ~certificates ~alpn (if addr = "" then "0.0.0.0" else addr)
+  Net.listen_tls ~certificates ~alpn
+    (if addr = "" then "0.0.0.0" else addr)
     port
   >>= fun tls_srv ->
   let lfd = Net.tls_listen_fd tls_srv in
@@ -865,8 +896,7 @@ let listen_and_serve_tls_started ~certificates ?(alpn = default_alpn_protocols)
    port and stop the server. *)
 let listen_and_serve_started ~addr ~port handler =
   let srv = create ~addr ~port handler in
-  Net.listen (if addr = "" then "0.0.0.0" else addr) port
-  >>= fun listen_fd ->
+  Net.listen (if addr = "" then "0.0.0.0" else addr) port >>= fun listen_fd ->
   srv.listen_fd <- Some listen_fd;
   let bound = Net.bound_port listen_fd in
   let serve_t = serve srv listen_fd in

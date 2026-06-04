@@ -54,15 +54,14 @@ let default =
 (* Go's defaultCookieMaxNum = 3000. The GODEBUG override (httpcookiemaxnum) is
    not modeled; we always use the default limit. *)
 let default_cookie_max_num = 3000
-
 let cookie_num_within_max n = n <= default_cookie_max_num
 
 (* ---- isToken / cookie name validity ---- *)
 (* Port of httpguts.isTokenTable / ValidHeaderFieldName (== isToken). *)
 let is_token_byte b =
   match b with
-  | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
-  | '`' | '|' | '~' ->
+  | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`'
+  | '|' | '~' ->
       true
   | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
   | _ -> false
@@ -105,8 +104,7 @@ let count_char s c =
   !n
 
 (* strings.Split(s, ";") *)
-let split_char s c =
-  String.split_on_char c s
+let split_char s c = String.split_on_char c s
 
 (* ascii.ToLower: returns (lowered, ok) where ok=false if s is not ASCII
    printable. *)
@@ -133,7 +131,12 @@ let valid_cookie_path_byte b =
 let sanitize_or_warn valid v =
   let ok = ref true in
   (try
-     String.iter (fun c -> if not (valid c) then (ok := false; raise Exit)) v
+     String.iter
+       (fun c ->
+         if not (valid c) then (
+           ok := false;
+           raise Exit))
+       v
    with Exit -> ());
   if !ok then v
   else
@@ -156,7 +159,8 @@ let sanitize_cookie_name = cookie_name_sanitizer
 let parse_cookie_value raw ~allow_double_quote =
   let raw, quoted =
     if
-      allow_double_quote && String.length raw > 1
+      allow_double_quote
+      && String.length raw > 1
       && raw.[0] = '"'
       && raw.[String.length raw - 1] = '"'
     then (String.sub raw 1 (String.length raw - 2), true)
@@ -165,7 +169,10 @@ let parse_cookie_value raw ~allow_double_quote =
   let ok = ref true in
   (try
      String.iter
-       (fun c -> if not (valid_cookie_value_byte c) then (ok := false; raise Exit))
+       (fun c ->
+         if not (valid_cookie_value_byte c) then (
+           ok := false;
+           raise Exit))
        raw
    with Exit -> ());
   if !ok then Some (raw, quoted) else None
@@ -192,13 +199,21 @@ let is_cookie_domain_name s =
              incr partlen
          | '0' .. '9' -> incr partlen
          | '-' ->
-             if !last = '.' then (valid := false; raise Exit);
+             if !last = '.' then (
+               valid := false;
+               raise Exit);
              incr partlen
          | '.' ->
-             if !last = '.' || !last = '-' then (valid := false; raise Exit);
-             if !partlen > 63 || !partlen = 0 then (valid := false; raise Exit);
+             if !last = '.' || !last = '-' then (
+               valid := false;
+               raise Exit);
+             if !partlen > 63 || !partlen = 0 then (
+               valid := false;
+               raise Exit);
              partlen := 0
-         | _ -> valid := false; raise Exit);
+         | _ ->
+             valid := false;
+             raise Exit);
          last := c
        done
      with Exit -> ());
@@ -220,7 +235,8 @@ let is_ipv4 v =
           l >= 1 && l <= 3
           && String.for_all (fun c -> c >= '0' && c <= '9') p
           && (l = 1 || p.[0] <> '0' || false)
-          && int_of_string_opt p |> Option.fold ~none:false ~some:(fun n -> n <= 255))
+          && int_of_string_opt p
+             |> Option.fold ~none:false ~some:(fun n -> n <= 255))
         parts
   | _ -> false
 
@@ -258,7 +274,7 @@ let parse_expires raw =
   (* Find the comma + space, then parse the remainder. *)
   match String.index_opt raw ',' with
   | None -> None
-  | Some ci ->
+  | Some ci -> (
       let rest = String.sub raw (ci + 1) (String.length raw - ci - 1) in
       let rest = trim_string rest in
       (* rest is like "23-Nov-2011 01:05:03 GMT" or "10 Nov 2009 23:00:00 GMT".
@@ -268,17 +284,19 @@ let parse_expires raw =
         (* Replace '-' with ' ' only in the leading date token group.
            Simpler: split into space-separated tokens; the date may itself be
            "DD-Mon-YYYY". *)
-        let toks = String.split_on_char ' ' rest |> List.filter (fun s -> s <> "") in
+        let toks =
+          String.split_on_char ' ' rest |> List.filter (fun s -> s <> "")
+        in
         match toks with
-        | [ date; time; _tz ] when String.contains date '-' ->
+        | [ date; time; _tz ] when String.contains date '-' -> (
             (* DD-Mon-YYYY HH:MM:SS TZ *)
-            (match String.split_on_char '-' date with
+            match String.split_on_char '-' date with
             | [ dd; mon; yyyy ] -> Some (dd, mon, yyyy, time)
             | _ -> None)
         | [ dd; mon; yyyy; time; _tz ] -> Some (dd, mon, yyyy, time)
         | _ -> None
       in
-      (match try_parse rest with
+      match try_parse rest with
       | None -> None
       | Some (dd, mon, yyyy, time) -> (
           match
@@ -289,13 +307,16 @@ let parse_expires raw =
           with
           | Some d, Some m, Some y, [ hh; mi; ss ] -> (
               match
-                (int_of_string_opt hh, int_of_string_opt mi, int_of_string_opt ss)
+                ( int_of_string_opt hh,
+                  int_of_string_opt mi,
+                  int_of_string_opt ss )
               with
               | Some h, Some min_, Some s
                 when d >= 1
-                     && d
-                        <= (if m = 2 && is_leap y then 29
-                            else days_in_month.(m - 1))
+                     && (d
+                        <=
+                        if m = 2 && is_leap y then 29 else days_in_month.(m - 1)
+                        )
                      && h < 24 && min_ < 60 && s < 60 ->
                   Some (unix_of_utc y m d h min_ s)
               | _ -> None)
@@ -319,16 +340,7 @@ let parse_set_cookie line =
           match parse_cookie_value value ~allow_double_quote:true with
           | None -> Error `InvalidValue
           | Some (value, quoted) ->
-              let c =
-                ref
-                  {
-                    default with
-                    name;
-                    value;
-                    quoted;
-                    raw = line;
-                  }
-              in
+              let c = ref { default with name; value; quoted; raw = line } in
               let unparsed_rev = ref [] in
               List.iter
                 (fun part ->
@@ -346,7 +358,8 @@ let parse_set_cookie line =
                           | "samesite" ->
                               let lower_val, ascii = ascii_to_lower v in
                               if not ascii then
-                                c := { !c with same_site = Same_site_default_mode }
+                                c :=
+                                  { !c with same_site = Same_site_default_mode }
                               else
                                 c :=
                                   {
@@ -379,8 +392,7 @@ let parse_set_cookie line =
                               in
                               c := { !c with raw_expires = v; expires = exp }
                           | "path" -> c := { !c with path = v }
-                          | "partitioned" ->
-                              c := { !c with partitioned = true }
+                          | "partitioned" -> c := { !c with partitioned = true }
                           | _ -> unparsed_rev := part :: !unparsed_rev)
                   end)
                 rest_parts;
@@ -396,7 +408,8 @@ let read_set_cookies (h : Header.t) =
   else if not (cookie_num_within_max cookie_count) then []
   else
     List.filter_map
-      (fun line -> match parse_set_cookie line with Ok c -> Some c | Error _ -> None)
+      (fun line ->
+        match parse_set_cookie line with Ok c -> Some c | Error _ -> None)
       lines
 
 (* ---- readCookies ---- *)
@@ -447,8 +460,8 @@ let set_cookie c =
       Buffer.add_string b "; Path=";
       Buffer.add_string b (sanitize_cookie_path c.path)
     end;
-    if String.length c.domain > 0 then begin
-      if valid_cookie_domain c.domain then begin
+    if String.length c.domain > 0 then
+      begin if valid_cookie_domain c.domain then begin
         let d =
           if c.domain.[0] = '.' then
             String.sub c.domain 1 (String.length c.domain - 1)
@@ -456,9 +469,8 @@ let set_cookie c =
         in
         Buffer.add_string b "; Domain=";
         Buffer.add_string b d
-      end
-      (* else: invalid domain dropped (Go logs a warning; omitted). *)
-    end;
+      end (* else: invalid domain dropped (Go logs a warning; omitted). *)
+      end;
     if c.expires <> 0. && valid_cookie_expires c.expires then begin
       Buffer.add_string b "; Expires=";
       Buffer.add_string b (format_time c.expires)
@@ -507,14 +519,13 @@ let valid c =
       let bad = ref None in
       String.iter
         (fun b ->
-          if !bad = None && not (valid_cookie_value_byte b) then
-            bad := Some b)
+          if !bad = None && not (valid_cookie_value_byte b) then bad := Some b)
         c.value;
       !bad
     in
     match invalid_value with
     | Some b -> Error (Invalid_value b)
-    | None ->
+    | None -> (
         let invalid_path =
           if String.length c.path > 0 then begin
             let bad = ref None in
@@ -527,7 +538,7 @@ let valid c =
           end
           else None
         in
-        (match invalid_path with
+        match invalid_path with
         | Some b -> Error (Invalid_path b)
         | None ->
             if String.length c.domain > 0 && not (valid_cookie_domain c.domain)

@@ -119,8 +119,7 @@ let file_of_path full_name : (file, error) result Lwt.t =
                 Lwt.catch
                   (fun () ->
                     Lwt_unix.stat (Filename.concat full_name name)
-                    >>= fun est ->
-                    Lwt.return (file_info_of_stat name est :: acc))
+                    >>= fun est -> Lwt.return (file_info_of_stat name est :: acc))
                   (* Pretend it doesn't exist, like os.File Readdir does. *)
                   (fun _ -> Lwt.return acc)
                 >>= fun acc -> loop acc
@@ -211,8 +210,7 @@ let local_redirect w (r : Body.t Request.t) new_path =
 
 (* Go's url.URL{Path: name}.String(): percent-escape a path segment so that
    '?'/'#'/etc remain part of the path, not a query/fragment. *)
-let escape_path_href name =
-  Uri.pct_encode ~component:`Path name
+let escape_path_href name = Uri.pct_encode ~component:`Path name
 
 (* Go's htmlReplacer (the escaper dirList uses for the link text). Mirrors the
    server's htmlEscape; kept local since it is not exported. *)
@@ -287,9 +285,7 @@ let has_prefix s p =
 let scan_etag s =
   let s = trim_string s in
   let n = String.length s in
-  let start =
-    if n >= 2 && s.[0] = 'W' && s.[1] = '/' then 2 else 0
-  in
+  let start = if n >= 2 && s.[0] = 'W' && s.[1] = '/' then 2 else 0 in
   if n - start < 2 || s.[start] <> '"' then None
   else begin
     (* scan from start+1 for the closing quote, validating ETag chars *)
@@ -306,8 +302,7 @@ let scan_etag s =
   end
 
 (* Go etagStrongMatch: a == b && a != "" && a[0] == '"'. *)
-let etag_strong_match a b =
-  a = b && a <> "" && a.[0] = '"'
+let etag_strong_match a b = a = b && a <> "" && a.[0] = '"'
 
 (* Go etagWeakMatch: strings.TrimPrefix(a,"W/") == strings.TrimPrefix(b,"W/"). *)
 let etag_weak_match a b =
@@ -336,8 +331,7 @@ let check_if_match w (r : Body.t Request.t) =
         match scan_etag im with
         | None -> Cond_false
         | Some (etag, remain) ->
-            if etag_strong_match etag etag_hdr then Cond_true
-            else loop remain
+            if etag_strong_match etag etag_hdr then Cond_true else loop remain
     in
     loop im
   end
@@ -394,23 +388,25 @@ let check_if_range w (r : Body.t Request.t) ~modtime =
   else begin
     let ir = Header.get r.Request.header "If-Range" in
     if ir = "" then Cond_none
-    else begin
-      match scan_etag ir with
+    else
+      begin match scan_etag ir with
       | Some (etag, _) when etag <> "" ->
           if etag_strong_match etag (Header.get (w.Server.header ()) "Etag")
           then Cond_true
           else Cond_false
-      | _ ->
-          (* The If-Range value is typically the ETag, but may also be the
+      | _ -> (
+          if
+            (* The If-Range value is typically the ETag, but may also be the
              modtime date. *)
-          if is_zero_time modtime then Cond_false
+            is_zero_time modtime
+          then Cond_false
           else
             match Http_time.parse_http_time ir with
             | None -> Cond_false
             | Some t ->
                 if int_of_float t = int_of_float modtime then Cond_true
-                else Cond_false
-    end
+                else Cond_false)
+      end
   end
 
 (* Go writeNotModified: clears representation metadata and writes 304. *)
@@ -435,8 +431,8 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
     w.Server.write_header Status.status_precondition_failed;
     (true, "")
   end
-  else begin
-    match check_if_none_match w r with
+  else
+    begin match check_if_none_match w r with
     | Cond_false ->
         if r.Request.meth = "GET" || r.Request.meth = "HEAD" then begin
           write_not_modified w;
@@ -468,7 +464,7 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
           else range_header
         in
         (false, range_header)
-  end
+    end
 
 (* ---- byte ranges (Go fs.go: httpRange / parseRange / mimeHeader) ---- *)
 
@@ -504,9 +500,11 @@ let parse_range s size =
   else
     let b = "bytes=" in
     if not (has_prefix s b) then Error (Invalid_range "")
-    else begin
-      try
-        let body = String.sub s (String.length b) (String.length s - String.length b) in
+    else
+      begin try
+        let body =
+          String.sub s (String.length b) (String.length s - String.length b)
+        in
         let parts = String.split_on_char ',' body in
         let no_overlap = ref false in
         let ranges =
@@ -514,9 +512,11 @@ let parse_range s size =
             (fun acc ra ->
               let ra = trim_string ra in
               if ra = "" then acc
-              else begin
-                match String.index_opt ra '-' with
-                | None -> raise (Invalid_range_sentinel "") (* Go strings.Cut: no '-' *)
+              else
+                begin match String.index_opt ra '-' with
+                | None ->
+                    raise (Invalid_range_sentinel "")
+                    (* Go strings.Cut: no '-' *)
                 | Some dash ->
                     let start = trim_string (String.sub ra 0 dash) in
                     let end_ =
@@ -525,7 +525,8 @@ let parse_range s size =
                     in
                     if start = "" then begin
                       (* suffix-length: last N bytes *)
-                      if end_ = "" || end_.[0] = '-' then raise (Invalid_range_sentinel "");
+                      if end_ = "" || end_.[0] = '-' then
+                        raise (Invalid_range_sentinel "");
                       match parse_int64 end_ with
                       | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
@@ -533,8 +534,8 @@ let parse_range s size =
                           let st = Int64.sub size i in
                           { start = st; length = Int64.sub size st } :: acc
                     end
-                    else begin
-                      match parse_int64 start with
+                    else
+                      begin match parse_int64 start with
                       | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
                           if i >= size then begin
@@ -550,22 +551,25 @@ let parse_range s size =
                               match parse_int64 end_ with
                               | None -> raise (Invalid_range_sentinel "")
                               | Some j ->
-                                  if st > j then raise (Invalid_range_sentinel "");
-                                  let j = if j >= size then Int64.sub size 1L else j in
+                                  if st > j then
+                                    raise (Invalid_range_sentinel "");
+                                  let j =
+                                    if j >= size then Int64.sub size 1L else j
+                                  in
                                   {
                                     start = st;
                                     length = Int64.add (Int64.sub j st) 1L;
                                   }
                                   :: acc
                           end
-                    end
-              end)
+                      end
+                end)
             [] parts
         in
         let ranges = List.rev ranges in
         if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
       with Invalid_range_sentinel m -> Error (Invalid_range m)
-    end
+      end
 
 let sum_ranges_size ranges =
   List.fold_left (fun acc ra -> Int64.add acc ra.length) 0L ranges
@@ -585,7 +589,8 @@ let ranges_mime_size ranges ~content_type ~size =
     (fun idx ra ->
       if idx = 0 then
         Buffer.add_string buf (Printf.sprintf "--%s\r\n" multipart_boundary)
-      else Buffer.add_string buf (Printf.sprintf "\r\n--%s\r\n" multipart_boundary);
+      else
+        Buffer.add_string buf (Printf.sprintf "\r\n--%s\r\n" multipart_boundary);
       List.iter
         (fun (k, v) -> Buffer.add_string buf (Printf.sprintf "%s: %s\r\n" k v))
         (mime_header ra ~content_type ~size);
@@ -633,7 +638,8 @@ let ext_of name =
 
 let set_last_modified w modtime =
   if not (is_zero_time modtime) then
-    Header.set (w.Server.header ()) "Last-Modified" (Http_time.format_gmt modtime)
+    Header.set (w.Server.header ()) "Last-Modified"
+      (Http_time.format_gmt modtime)
 
 (* Sniff probe length, mirroring internal.SniffLen (512). *)
 let sniff_len = 512
@@ -686,7 +692,10 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
            Header.set h "Content-Type" ctype;
            Lwt.return_unit
        | None ->
-           let probe = if size < Int64.of_int sniff_len then Int64.to_int size else sniff_len in
+           let probe =
+             if size < Int64.of_int sniff_len then Int64.to_int size
+             else sniff_len
+           in
            read_window ~off:0L ~len:probe >>= fun buf ->
            Header.set h "Content-Type" (Sniff.detect_content_type buf);
            Lwt.return_unit)
@@ -710,11 +719,9 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
            unreachable here but keep the match exhaustive. *)
         Server.error w "invalid range"
           Status.status_requested_range_not_satisfiable
-    | Ok ranges ->
+    | Ok ranges -> (
         (* If the total range size exceeds the file, treat as no range (Go). *)
-        let ranges =
-          if sum_ranges_size ranges > size then [] else ranges
-        in
+        let ranges = if sum_ranges_size ranges > size then [] else ranges in
         Header.set h "Accept-Ranges" "bytes";
         match ranges with
         | [] -> serve_full w r ~h ~size ~read_window
@@ -744,15 +751,16 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
                   let hdrs =
                     List.fold_left
                       (fun acc (k, v) -> acc ^ Printf.sprintf "%s: %s\r\n" k v)
-                      "" (mime_header ra ~content_type:ctype ~size)
+                      ""
+                      (mime_header ra ~content_type:ctype ~size)
                   in
                   w.Server.write (prefix ^ hdrs ^ "\r\n") >>= fun () ->
-                  stream_window w ~read_window ~start:ra.start
-                    ~length:ra.length)
+                  stream_window w ~read_window ~start:ra.start ~length:ra.length)
                 ranges
               >>= fun () ->
-              w.Server.write (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary)
-            end
+              w.Server.write
+                (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary)
+            end)
   end
 
 (* ---- serveFile ---- *)
@@ -783,7 +791,8 @@ let ends_with s suffix =
   ls >= lf && String.sub s (ls - lf) lf = suffix
 
 let trim_suffix s suffix =
-  if ends_with s suffix then String.sub s 0 (String.length s - String.length suffix)
+  if ends_with s suffix then
+    String.sub s 0 (String.length s - String.length suffix)
   else s
 
 let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
@@ -804,13 +813,12 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
               if not redirect then None
               else begin
                 let url = upath in
-                if d.fi_is_dir then begin
-                  if
-                    String.length url > 0
-                    && url.[String.length url - 1] <> '/'
+                if d.fi_is_dir then
+                  begin if
+                    String.length url > 0 && url.[String.length url - 1] <> '/'
                   then Some (`Local (path_base url ^ "/"))
                   else None
-                end
+                  end
                 else if
                   String.length url > 0 && url.[String.length url - 1] = '/'
                 then begin
@@ -828,9 +836,9 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
             | Some (`Local target) -> local_redirect w r target
             | None ->
                 (* directory: redirect if no trailing slash, else index/list *)
-                if d.fi_is_dir
-                   && (upath = ""
-                      || upath.[String.length upath - 1] <> '/')
+                if
+                  d.fi_is_dir
+                  && (upath = "" || upath.[String.length upath - 1] <> '/')
                 then local_redirect w r (path_base upath ^ "/")
                 else begin
                   (* try index.html for a directory *)
@@ -838,8 +846,7 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                      let index = trim_suffix name "/" ^ index_page in
                      fs.open_ index >>= function
                      | Ok ff ->
-                         ff.stat () >>= fun dd ->
-                         Lwt.return (Some (ff, dd))
+                         ff.stat () >>= fun dd -> Lwt.return (Some (ff, dd))
                      | Error _ -> Lwt.return None
                    end
                    else Lwt.return None)
@@ -852,14 +859,14 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                             ~modtime:dd.fi_mod_time ~size:dd.fi_size
                             ~read_window:ff.read_window)
                         (fun () -> ff.close ())
-                  | index_opt -> (
+                  | index_opt ->
                       (* close an opened-but-unusable index *)
                       (match index_opt with
-                      | Some (ff, _) -> ff.close ()
-                      | None -> Lwt.return_unit)
+                        | Some (ff, _) -> ff.close ()
+                        | None -> Lwt.return_unit)
                       >>= fun () ->
-                      if d.fi_is_dir then begin
-                        if
+                      if d.fi_is_dir then
+                        begin if
                           check_if_modified_since r ~modtime:d.fi_mod_time
                           = Cond_false
                         then begin
@@ -870,11 +877,10 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                           set_last_modified w d.fi_mod_time;
                           dir_list w r f
                         end
-                      end
+                        end
                       else
-                        serve_content w r ~name:d.fi_name
-                          ~modtime:d.fi_mod_time ~size:d.fi_size
-                          ~read_window:f.read_window)
+                        serve_content w r ~name:d.fi_name ~modtime:d.fi_mod_time
+                          ~size:d.fi_size ~read_window:f.read_window
                 end)
           (fun () -> f.close ())
 

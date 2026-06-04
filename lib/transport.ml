@@ -35,10 +35,7 @@ let default_user_agent = "gohttp-client/1.1"
 
 (* A pooled, reusable connection: the buffered channels plus the underlying fd
    (so we can actually close it when the connection is not reusable). *)
-type persist_conn = {
-  ic : Lwt_io.input_channel;
-  oc : Lwt_io.output_channel;
-}
+type persist_conn = { ic : Lwt_io.input_channel; oc : Lwt_io.output_channel }
 
 type t = {
   (* Go's idleConn map[connectMethodKey][]*persistConn: keyed by the
@@ -83,14 +80,18 @@ let conn_key ~scheme ~host ~port = Printf.sprintf "%s|%s:%d" scheme host port
 let scheme_host_port (req : Body.t Request.t) =
   let url = req.Request.url in
   let scheme =
-    match Uri.scheme url with Some s -> String.lowercase_ascii s | None -> "http"
+    match Uri.scheme url with
+    | Some s -> String.lowercase_ascii s
+    | None -> "http"
   in
   let host =
     match Uri.host url with
     | Some h when h <> "" -> h
     | _ -> (
         (* Fall back to the Host header / request host. *)
-        match req.Request.host with h when h <> "" -> h | _ -> "")
+        match req.Request.host with
+        | h when h <> "" -> h
+        | _ -> "")
   in
   let port =
     match Uri.port url with
@@ -114,7 +115,8 @@ let put_idle_conn t key pc =
 
 let close_conn pc =
   Lwt.catch (fun () -> Lwt_io.close pc.oc) (fun _ -> Lwt.return_unit)
-  >>= fun () -> Lwt.catch (fun () -> Lwt_io.close pc.ic) (fun _ -> Lwt.return_unit)
+  >>= fun () ->
+  Lwt.catch (fun () -> Lwt_io.close pc.ic) (fun _ -> Lwt.return_unit)
 
 (* The ALPN protocols advertised for an https dial (Go's
    [Transport.TLSClientConfig.NextProtos] with HTTP/2 enabled): h2 preferred,
@@ -134,8 +136,7 @@ let dial_alpn t ~scheme ~host ~port ~force_h2 =
   in
   Net.connect_alpn ~host ~port ~tls ?alpn ~insecure:t.insecure
     ?authenticator:t.authenticator ()
-  >>= fun (ic, oc, negotiated) ->
-  Lwt.return ({ ic; oc }, negotiated)
+  >>= fun (ic, oc, negotiated) -> Lwt.return ({ ic; oc }, negotiated)
 
 let dial t ~scheme ~host ~port =
   dial_alpn t ~scheme ~host ~port ~force_h2:false >>= fun (pc, _) ->
@@ -147,8 +148,7 @@ let dial t ~scheme ~host ~port =
    asked to close, not if the response asked to close. *)
 let reusable t (req : Body.t Request.t) (resp : Body.t Response.t) =
   (not t.disable_keep_alives)
-  && (not req.Request.close)
-  && not resp.Response.close
+  && (not req.Request.close) && not resp.Response.close
 
 (* Set the default request headers Go's Transport/Request.write would supply:
    Host (from the URL/Host field) and a default User-Agent when the caller has
@@ -206,7 +206,8 @@ let client_request_of_request (req : Body.t Request.t) : Api.client_request =
 let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
   {
     Response.status =
-      string_of_int cr.cres_status_code ^ " "
+      string_of_int cr.cres_status_code
+      ^ " "
       ^ Status.status_text cr.cres_status_code;
     status_code = cr.cres_status_code;
     proto = "HTTP/2.0";
@@ -218,7 +219,8 @@ let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
     transfer_encoding = [];
     close = false;
     uncompressed = cr.cres_uncompressed;
-    trailer = (if Hashtbl.length cr.cres_trailer = 0 then None else Some cr.cres_trailer);
+    trailer =
+      (if Hashtbl.length cr.cres_trailer = 0 then None else Some cr.cres_trailer);
     request = None;
   }
 
@@ -240,169 +242,175 @@ let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
     Body.t Response.t Lwt.t =
   (match context with Some ctx -> req.Request.ctx <- ctx | None -> ());
   let scheme, host, port = scheme_host_port req in
-  if host = "" then
-    Lwt.fail (Io.Protocol_error "http: no Host in request URL")
+  if host = "" then Lwt.fail (Io.Protocol_error "http: no Host in request URL")
   else begin
-  let key = conn_key ~scheme ~host ~port in
-  set_default_headers req ~host;
-  let authority = h2_authority ~host ~port in
-  let want_h2 = force_h2 || scheme = "https" in
-  (* HTTP/2 fast path: reuse a pooled h2 connection for this authority. *)
-  let h2_reuse () =
-    match get_h2_conn t authority with
-    | Some cc -> Some (h2_round_trip t cc req)
-    | None -> None
-  in
-  (* Obtain a connection: reuse an idle one or dial a fresh one. *)
-  let acquire () =
-    match get_idle_conn t key with
-    | Some pc -> Lwt.return (pc, true)
-    | None -> dial t ~scheme ~host ~port >>= fun pc -> Lwt.return (pc, false)
-  in
-  (* Wrap the streaming [resp.body] so that reaching EOF (or being drained)
+    let key = conn_key ~scheme ~host ~port in
+    set_default_headers req ~host;
+    let authority = h2_authority ~host ~port in
+    let want_h2 = force_h2 || scheme = "https" in
+    (* HTTP/2 fast path: reuse a pooled h2 connection for this authority. *)
+    let h2_reuse () =
+      match get_h2_conn t authority with
+      | Some cc -> Some (h2_round_trip t cc req)
+      | None -> None
+    in
+    (* Obtain a connection: reuse an idle one or dial a fresh one. *)
+    let acquire () =
+      match get_idle_conn t key with
+      | Some pc -> Lwt.return (pc, true)
+      | None -> dial t ~scheme ~host ~port >>= fun pc -> Lwt.return (pc, false)
+    in
+    (* Wrap the streaming [resp.body] so that reaching EOF (or being drained)
      runs a one-shot connection-release action: pool the connection if
      [reusable], else close it (Go's [bodyEOFSignal.fn] / [persistConn]
      returning to the pool only after [waitForBodyRead]). A [?context] firing
      mid-body aborts the in-flight read and closes the connection (NOT pooled),
      re-raising the context cause. The action runs at most once. *)
-  let wrap_body_lifecycle pc (resp : Body.t Response.t) : Body.t =
-    let reuse = reusable t req resp in
-    let released = ref false in
-    let release ~reuse_now =
-      if !released then Lwt.return_unit
-      else begin
-        released := true;
-        if reuse_now then (put_idle_conn t key pc; Lwt.return_unit)
-        else close_conn pc
-      end
-    in
-    match resp.Response.body with
-    | (Body.Empty | Body.String _) as b ->
-      (* No streaming body on the wire (e.g. HEAD / no-body status): the
-         connection is immediately free. *)
-      Lwt.async (fun () -> release ~reuse_now:reuse);
-      b
-    | Body.Stream inner ->
-      let next () : string option Lwt.t =
-        (* Race the inner read against the request context (Go aborts an
-           in-flight body read on <-ctx.Done()). *)
-        let ctx_p =
-          Context.done_ req.Request.ctx >>= fun () ->
-          let cause =
-            match Context.err req.Request.ctx with
-            | Some e -> e
-            | None -> Context.Canceled
-          in
-          Lwt.fail cause
-        in
-        Lwt.try_bind
-          (fun () -> Lwt.choose [ inner (); ctx_p ])
-          (fun chunk ->
-            Lwt.cancel ctx_p;
-            match chunk with
-            | Some _ -> Lwt.return chunk
-            | None ->
-              (* io.EOF: release the connection to the pool / close it. *)
-              release ~reuse_now:reuse >>= fun () -> Lwt.return_none)
-          (fun exn ->
-            (* Context fired (or the read failed): close the connection
-               unconditionally (never pool a torn-down/cancelled body). *)
-            Lwt.cancel ctx_p;
-            release ~reuse_now:false >>= fun () -> Lwt.fail exn)
+    let wrap_body_lifecycle pc (resp : Body.t Response.t) : Body.t =
+      let reuse = reusable t req resp in
+      let released = ref false in
+      let release ~reuse_now =
+        if !released then Lwt.return_unit
+        else begin
+          released := true;
+          if reuse_now then (
+            put_idle_conn t key pc;
+            Lwt.return_unit)
+          else close_conn pc
+        end
       in
-      Body.Stream next
-  in
-  (* Consume Io's result API directly; surface a read/write failure through the
+      match resp.Response.body with
+      | (Body.Empty | Body.String _) as b ->
+          (* No streaming body on the wire (e.g. HEAD / no-body status): the
+         connection is immediately free. *)
+          Lwt.async (fun () -> release ~reuse_now:reuse);
+          b
+      | Body.Stream inner ->
+          let next () : string option Lwt.t =
+            (* Race the inner read against the request context (Go aborts an
+           in-flight body read on <-ctx.Done()). *)
+            let ctx_p =
+              Context.done_ req.Request.ctx >>= fun () ->
+              let cause =
+                match Context.err req.Request.ctx with
+                | Some e -> e
+                | None -> Context.Canceled
+              in
+              Lwt.fail cause
+            in
+            Lwt.try_bind
+              (fun () -> Lwt.choose [ inner (); ctx_p ])
+              (fun chunk ->
+                Lwt.cancel ctx_p;
+                match chunk with
+                | Some _ -> Lwt.return chunk
+                | None ->
+                    (* io.EOF: release the connection to the pool / close it. *)
+                    release ~reuse_now:reuse >>= fun () -> Lwt.return_none)
+              (fun exn ->
+                (* Context fired (or the read failed): close the connection
+               unconditionally (never pool a torn-down/cancelled body). *)
+                Lwt.cancel ctx_p;
+                release ~reuse_now:false >>= fun () -> Lwt.fail exn)
+          in
+          Body.Stream next
+    in
+    (* Consume Io's result API directly; surface a read/write failure through the
      transport's existing exception-based error flow (the retry / close-conn
      machinery below catches it) by raising the embedded Io error message. Go's
      RoundTrip returns (resp, err); here a transport error remains an exception
      at the [round_trip] boundary. *)
-  let or_raise r =
-    match r with Ok v -> Lwt.return v | Error e -> Lwt.fail (Io.Protocol_error (Io.error_to_string e))
-  in
-  let exchange pc =
-    (Io.write_request pc.oc req >>= or_raise) >>= fun () ->
-    Lwt_io.flush pc.oc >>= fun () ->
-    (Io.read_response ~request:req pc.ic >>= or_raise) >>= fun resp ->
-    resp.Response.body <- wrap_body_lifecycle pc resp;
-    Lwt.return resp
-  in
-  (* Race the IO against the request context (Go aborts an in-flight round trip
+    let or_raise r =
+      match r with
+      | Ok v -> Lwt.return v
+      | Error e -> Lwt.fail (Io.Protocol_error (Io.error_to_string e))
+    in
+    let exchange pc =
+      Io.write_request pc.oc req >>= or_raise >>= fun () ->
+      Lwt_io.flush pc.oc >>= fun () ->
+      Io.read_response ~request:req pc.ic >>= or_raise >>= fun resp ->
+      resp.Response.body <- wrap_body_lifecycle pc resp;
+      Lwt.return resp
+    in
+    (* Race the IO against the request context (Go aborts an in-flight round trip
      on <-ctx.Done() and returns context.Cause(ctx)). If the context fires
      first we raise its cause exception; [Lwt.choose] then leaves the IO branch
      pending, which we cancel and whose connection we close (the IO read would
      otherwise fail with EBADF and could mask the context cause). On normal IO
      completion the never-resolving context branch (for a background context) or
      resolved-after branch is cancelled, so the watcher does not leak. *)
-  let exchange_with_ctx pc =
-    let io_p = exchange pc in
-    let ctx_p =
-      Context.done_ req.Request.ctx >>= fun () ->
-      let cause =
-        match Context.err req.Request.ctx with
-        | Some e -> e
-        | None -> Context.Canceled
+    let exchange_with_ctx pc =
+      let io_p = exchange pc in
+      let ctx_p =
+        Context.done_ req.Request.ctx >>= fun () ->
+        let cause =
+          match Context.err req.Request.ctx with
+          | Some e -> e
+          | None -> Context.Canceled
+        in
+        Lwt.fail cause
       in
-      Lwt.fail cause
-    in
-    (* Lwt.choose resolves/rejects as soon as the first branch does, without
+      (* Lwt.choose resolves/rejects as soon as the first branch does, without
        cancelling the other. *)
-    Lwt.try_bind
-      (fun () -> Lwt.choose [ io_p; ctx_p ])
-      (fun resp ->
-        (* IO won. Stop watching the context. *)
-        Lwt.cancel ctx_p;
-        Lwt.return resp)
-      (fun exn ->
-        (* Either the context fired (cause exn) or the IO failed. In both cases
+      Lwt.try_bind
+        (fun () -> Lwt.choose [ io_p; ctx_p ])
+        (fun resp ->
+          (* IO won. Stop watching the context. *)
+          Lwt.cancel ctx_p;
+          Lwt.return resp)
+        (fun exn ->
+          (* Either the context fired (cause exn) or the IO failed. In both cases
            cancel the still-pending sibling and close the connection so the fd
            is released; then re-raise. *)
-        Lwt.cancel ctx_p;
-        Lwt.cancel io_p;
-        close_conn pc >>= fun () -> Lwt.fail exn)
-  in
-  let rec attempt ~allow_retry =
-    acquire () >>= fun (pc, was_idle) ->
-    Lwt.catch
-      (fun () -> exchange_with_ctx pc)
-      (fun exn ->
-        (* A reused (idle) connection may have been closed by the server; on a
+          Lwt.cancel ctx_p;
+          Lwt.cancel io_p;
+          close_conn pc >>= fun () -> Lwt.fail exn)
+    in
+    let rec attempt ~allow_retry =
+      acquire () >>= fun (pc, was_idle) ->
+      Lwt.catch
+        (fun () -> exchange_with_ctx pc)
+        (fun exn ->
+          (* A reused (idle) connection may have been closed by the server; on a
            failure with a recycled connection, dial fresh and retry once
            (Go's shouldRetryRequest for an idempotent re-dial). *)
-        close_conn pc >>= fun () ->
-        (* Do not retry when the context cancelled/expired (Go's
+          close_conn pc >>= fun () ->
+          (* Do not retry when the context cancelled/expired (Go's
            shouldRetryRequest declines once the request context is done). *)
-        let ctx_done = Context.err req.Request.ctx <> None in
-        if was_idle && allow_retry && not ctx_done then attempt ~allow_retry:false
-        else Lwt.fail exn)
-  in
-  (* When HTTP/2 is wanted, try a pooled h2 conn first; otherwise dial with
+          let ctx_done = Context.err req.Request.ctx <> None in
+          if was_idle && allow_retry && not ctx_done then
+            attempt ~allow_retry:false
+          else Lwt.fail exn)
+    in
+    (* When HTTP/2 is wanted, try a pooled h2 conn first; otherwise dial with
      ALPN and either establish an h2 ClientConn (negotiated "h2") or fall through
      to the HTTP/1.x path over the freshly-dialed channels (negotiated
      http/1.1 / none). Plaintext http skips all of this. *)
-  if want_h2 then
-    match h2_reuse () with
-    | Some p -> p
-    | None ->
-        dial_alpn t ~scheme ~host ~port ~force_h2 >>= fun (pc, negotiated) ->
-        if negotiated = Some "h2" then
-          H2_transport.new_client_conn pc.ic pc.oc >>= fun cc ->
-          Hashtbl.replace t.h2_conns authority cc;
-          h2_round_trip t cc req
-        else
-          (* Reuse the dialed channels for the HTTP/1.x exchange. *)
-          Lwt.catch
-            (fun () -> exchange_with_ctx pc)
-            (fun exn -> close_conn pc >>= fun () -> Lwt.fail exn)
-  else attempt ~allow_retry:true
+    if want_h2 then
+      match h2_reuse () with
+      | Some p -> p
+      | None ->
+          dial_alpn t ~scheme ~host ~port ~force_h2 >>= fun (pc, negotiated) ->
+          if negotiated = Some "h2" then (
+            H2_transport.new_client_conn pc.ic pc.oc >>= fun cc ->
+            Hashtbl.replace t.h2_conns authority cc;
+            h2_round_trip t cc req)
+          else
+            (* Reuse the dialed channels for the HTTP/1.x exchange. *)
+            Lwt.catch
+              (fun () -> exchange_with_ctx pc)
+              (fun exn -> close_conn pc >>= fun () -> Lwt.fail exn)
+    else attempt ~allow_retry:true
   end
 
 (* Test/inspection hooks. *)
 let dial_count t = t.dials
 let h2_round_trip_count t = t.h2_round_trips
-let idle_count t key = match Hashtbl.find_opt t.idle_conn key with
+
+let idle_count t key =
+  match Hashtbl.find_opt t.idle_conn key with
   | Some l -> List.length l
   | None -> 0
-let conn_key = conn_key
 
+let conn_key = conn_key
 let default_transport = create ()

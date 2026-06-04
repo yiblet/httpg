@@ -53,19 +53,23 @@ let parse_http_version (vers : string) : (int * int) option =
   | "HTTP/1.1" -> Some (1, 1)
   | "HTTP/1.0" -> Some (1, 0)
   | _ ->
-    let prefix = "HTTP/" in
-    let n = String.length vers in
-    if n <> String.length "HTTP/X.Y" then None
-    else if not (String.length vers >= 5 && String.sub vers 0 5 = prefix) then None
-    else if vers.[6] <> '.' then None
-    else begin
-      (* strconv.ParseUint on a single digit: reject non-digit, '+', leading
+      let prefix = "HTTP/" in
+      let n = String.length vers in
+      if n <> String.length "HTTP/X.Y" then None
+      else if not (String.length vers >= 5 && String.sub vers 0 5 = prefix) then
+        None
+      else if vers.[6] <> '.' then None
+      else begin
+        (* strconv.ParseUint on a single digit: reject non-digit, '+', leading
          signs. Single char so leading zeros are not an issue here. *)
-      let parse_digit c = if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0') else None in
-      match (parse_digit vers.[5], parse_digit vers.[7]) with
-      | Some maj, Some min -> Some (maj, min)
-      | _ -> None
-    end
+        let parse_digit c =
+          if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0')
+          else None
+        in
+        match (parse_digit vers.[5], parse_digit vers.[7]) with
+        | Some maj, Some min -> Some (maj, min)
+        | _ -> None
+      end
 
 (* Request.ProtoAtLeast. *)
 let proto_at_least (r : 'a t) major minor =
@@ -83,7 +87,10 @@ let cookies (r : 'a t) = Cookie.read_cookies r.header ~filter:""
 (* Request.Cookie(name): the named cookie, or None (ErrNoCookie). *)
 let cookie (r : 'a t) name =
   if name = "" then None
-  else match Cookie.read_cookies r.header ~filter:name with c :: _ -> Some c | [] -> None
+  else
+    match Cookie.read_cookies r.header ~filter:name with
+    | c :: _ -> Some c
+    | [] -> None
 
 (* Request.AddCookie. *)
 let add_cookie (r : 'a t) (c : Cookie.t) =
@@ -114,9 +121,12 @@ let parse_basic_auth (auth : string) : (string * string) option =
     with
     | None -> None
     | Some cs -> (
-      match String.index_opt cs ':' with
-      | None -> None
-      | Some i -> Some (String.sub cs 0 i, String.sub cs (i + 1) (String.length cs - i - 1)))
+        match String.index_opt cs ':' with
+        | None -> None
+        | Some i ->
+            Some
+              ( String.sub cs 0 i,
+                String.sub cs (i + 1) (String.length cs - i - 1) ))
 
 (* Request.BasicAuth. *)
 let basic_auth (r : 'a t) : (string * string) option =
@@ -125,11 +135,13 @@ let basic_auth (r : 'a t) : (string * string) option =
   | auth -> parse_basic_auth auth
 
 (* basicAuth(username, password) (client.go). *)
-let basic_auth_encode username password = Base64.encode_string (username ^ ":" ^ password)
+let basic_auth_encode username password =
+  Base64.encode_string (username ^ ":" ^ password)
 
 (* Request.SetBasicAuth. *)
 let set_basic_auth (r : 'a t) username password =
-  Header.set r.header "Authorization" ("Basic " ^ basic_auth_encode username password)
+  Header.set r.header "Authorization"
+    ("Basic " ^ basic_auth_encode username password)
 
 (* Request.Context: the request's context, never nil (Go returns
    context.Background for a nil ctx; here the field defaults to that). *)

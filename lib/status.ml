@@ -7,7 +7,6 @@ let status_continue = 100 (* RFC 9110, 15.2.1 *)
 let status_switching_protocols = 101 (* RFC 9110, 15.2.2 *)
 let status_processing = 102 (* RFC 2518, 10.1 *)
 let status_early_hints = 103 (* RFC 8297 *)
-
 let status_ok = 200 (* RFC 9110, 15.3.1 *)
 let status_created = 201 (* RFC 9110, 15.3.2 *)
 let status_accepted = 202 (* RFC 9110, 15.3.3 *)
@@ -18,17 +17,16 @@ let status_partial_content = 206 (* RFC 9110, 15.3.7 *)
 let status_multi_status = 207 (* RFC 4918, 11.1 *)
 let status_already_reported = 208 (* RFC 5842, 7.1 *)
 let status_im_used = 226 (* RFC 3229, 10.4.1 *)
-
 let status_multiple_choices = 300 (* RFC 9110, 15.4.1 *)
 let status_moved_permanently = 301 (* RFC 9110, 15.4.2 *)
 let status_found = 302 (* RFC 9110, 15.4.3 *)
 let status_see_other = 303 (* RFC 9110, 15.4.4 *)
 let status_not_modified = 304 (* RFC 9110, 15.4.5 *)
 let status_use_proxy = 305 (* RFC 9110, 15.4.6 *)
+
 (* 306 (* RFC 9110, 15.4.7 *) is unused *)
 let status_temporary_redirect = 307 (* RFC 9110, 15.4.8 *)
 let status_permanent_redirect = 308 (* RFC 9110, 15.4.9 *)
-
 let status_bad_request = 400 (* RFC 9110, 15.5.1 *)
 let status_unauthorized = 401 (* RFC 9110, 15.5.2 *)
 let status_payment_required = 402 (* RFC 9110, 15.5.3 *)
@@ -58,7 +56,6 @@ let status_precondition_required = 428 (* RFC 6585, 3 *)
 let status_too_many_requests = 429 (* RFC 6585, 4 *)
 let status_request_header_fields_too_large = 431 (* RFC 6585, 5 *)
 let status_unavailable_for_legal_reasons = 451 (* RFC 7725, 3 *)
-
 let status_internal_server_error = 500 (* RFC 9110, 15.6.1 *)
 let status_not_implemented = 501 (* RFC 9110, 15.6.2 *)
 let status_bad_gateway = 502 (* RFC 9110, 15.6.3 *)
@@ -81,7 +78,8 @@ let status_text (code : int) : string =
   else if code = status_ok then "OK"
   else if code = status_created then "Created"
   else if code = status_accepted then "Accepted"
-  else if code = status_non_authoritative_info then "Non-Authoritative Information"
+  else if code = status_non_authoritative_info then
+    "Non-Authoritative Information"
   else if code = status_no_content then "No Content"
   else if code = status_reset_content then "Reset Content"
   else if code = status_partial_content then "Partial Content"
@@ -133,7 +131,8 @@ let status_text (code : int) : string =
   else if code = status_bad_gateway then "Bad Gateway"
   else if code = status_service_unavailable then "Service Unavailable"
   else if code = status_gateway_timeout then "Gateway Timeout"
-  else if code = status_http_version_not_supported then "HTTP Version Not Supported"
+  else if code = status_http_version_not_supported then
+    "HTTP Version Not Supported"
   else if code = status_variant_also_negotiates then "Variant Also Negotiates"
   else if code = status_insufficient_storage then "Insufficient Storage"
   else if code = status_loop_detected then "Loop Detected"

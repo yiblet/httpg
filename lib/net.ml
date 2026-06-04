@@ -16,7 +16,9 @@ let resolve host port =
   in
   match infos with
   | { Unix.ai_addr; _ } :: _ -> Lwt.return ai_addr
-  | [] -> Lwt.fail_with (Printf.sprintf "Net.resolve: cannot resolve %s:%d" host port)
+  | [] ->
+      Lwt.fail_with
+        (Printf.sprintf "Net.resolve: cannot resolve %s:%d" host port)
 
 let listen ?(backlog = default_backlog) host port =
   let open Lwt.Syntax in
@@ -46,7 +48,7 @@ let ensure_rng () = Mirage_crypto_rng_unix.use_default ()
    a production client must supply a real authenticator (e.g. X509 system
    trust). This mirrors Go's [tls.Config.InsecureSkipVerify = true]. *)
 let null_authenticator : X509.Authenticator.t =
-  fun ?ip:_ ~host:_ _certs -> Ok None
+ fun ?ip:_ ~host:_ _certs -> Ok None
 
 (* Build an authenticator from the operating-system trust store via [ca-certs]
    (which also checks expiry and, when [~host] is supplied at handshake time,
@@ -64,7 +66,8 @@ let default_authenticator () : X509.Authenticator.t =
 
 let host_to_domain_name host =
   match Domain_name.of_string host with
-  | Ok dn -> ( match Domain_name.host dn with Ok h -> Some h | Error _ -> None)
+  | Ok dn -> (
+      match Domain_name.host dn with Ok h -> Some h | Error _ -> None)
   | Error _ -> None
 
 (* Dial a client TCP socket to a resolved [host]/[port]. *)

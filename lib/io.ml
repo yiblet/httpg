@@ -19,7 +19,8 @@ exception Missing_host
 
 let missing_host_sentinel = Missing_host
 
-let bad_string_error what value = Protocol_error (Printf.sprintf "%s %S" what value)
+let bad_string_error what value =
+  Protocol_error (Printf.sprintf "%s %S" what value)
 
 (* Handleable boundary error (see io.mli). *)
 type error =
@@ -70,15 +71,18 @@ let read_line (ic : Lwt_io.input_channel) : string Lwt.t =
       (fun () -> Lwt_io.read_char ic >|= fun c -> Some c)
       (function End_of_file -> Lwt.return None | e -> Lwt.fail e)
     >>= function
-    | None -> if got_any then Lwt.return (Buffer.contents buf) else Lwt.fail End_of_file
+    | None ->
+        if got_any then Lwt.return (Buffer.contents buf)
+        else Lwt.fail End_of_file
     | Some '\n' ->
-      let s = Buffer.contents buf in
-      (* Strip a single trailing CR. *)
-      let n = String.length s in
-      if n > 0 && s.[n - 1] = '\r' then Lwt.return (String.sub s 0 (n - 1)) else Lwt.return s
+        let s = Buffer.contents buf in
+        (* Strip a single trailing CR. *)
+        let n = String.length s in
+        if n > 0 && s.[n - 1] = '\r' then Lwt.return (String.sub s 0 (n - 1))
+        else Lwt.return s
     | Some c ->
-      Buffer.add_char buf c;
-      loop true
+        Buffer.add_char buf c;
+        loop true
   in
   loop false
 
@@ -110,46 +114,58 @@ let read_mime_header_raising (ic : Lwt_io.input_channel) : Header.t Lwt.t =
   let rec gather acc =
     read_line ic >>= fun line ->
     if line = "" then Lwt.return (List.rev acc)
-    else if (String.length line > 0) && (line.[0] = ' ' || line.[0] = '\t') then
+    else if String.length line > 0 && (line.[0] = ' ' || line.[0] = '\t') then
       (* Continuation of the previous logical line. *)
       match acc with
       | prev :: rest -> gather ((prev ^ " " ^ trim_ws line) :: rest)
-      | [] -> Lwt.fail (Protocol_error (Printf.sprintf "malformed MIME header initial line: %S" line))
+      | [] ->
+          Lwt.fail
+            (Protocol_error
+               (Printf.sprintf "malformed MIME header initial line: %S" line))
     else gather (line :: acc)
   in
   gather [] >>= fun lines ->
   List.iter
     (fun kv ->
       match String.index_opt kv ':' with
-      | None -> raise (Protocol_error (Printf.sprintf "malformed MIME header line: %S" kv))
+      | None ->
+          raise
+            (Protocol_error (Printf.sprintf "malformed MIME header line: %S" kv))
       | Some i ->
-        let k = String.sub kv 0 i in
-        let v = String.sub kv (i + 1) (String.length kv - i - 1) in
-        let key = Header.canonical_header_key k in
-        (* canonical_header_key returns the input unchanged on an invalid key. *)
-        if key = "" then raise (Protocol_error (Printf.sprintf "malformed MIME header line: %S" kv));
-        String.iter
-          (fun c ->
-            if not (valid_header_value_byte c) then
-              raise (Protocol_error (Printf.sprintf "malformed MIME header line: %S" kv)))
-          v;
-        (* Skip initial spaces/tabs in the value. *)
-        let value =
-          let n = String.length v in
-          let j = ref 0 in
-          while !j < n && (v.[!j] = ' ' || v.[!j] = '\t') do
-            incr j
-          done;
-          String.sub v !j (n - !j)
-        in
-        Header.add h key value)
+          let k = String.sub kv 0 i in
+          let v = String.sub kv (i + 1) (String.length kv - i - 1) in
+          let key = Header.canonical_header_key k in
+          (* canonical_header_key returns the input unchanged on an invalid key. *)
+          if key = "" then
+            raise
+              (Protocol_error
+                 (Printf.sprintf "malformed MIME header line: %S" kv));
+          String.iter
+            (fun c ->
+              if not (valid_header_value_byte c) then
+                raise
+                  (Protocol_error
+                     (Printf.sprintf "malformed MIME header line: %S" kv)))
+            v;
+          (* Skip initial spaces/tabs in the value. *)
+          let value =
+            let n = String.length v in
+            let j = ref 0 in
+            while !j < n && (v.[!j] = ' ' || v.[!j] = '\t') do
+              incr j
+            done;
+            String.sub v !j (n - !j)
+          in
+          Header.add h key value)
     lines;
   Lwt.return h
 
 (* fixPragmaCacheControl (response.go). *)
 let fix_pragma_cache_control (h : Header.t) =
   match Header.values h "Pragma" with
-  | hp :: _ when hp = "no-cache" -> if not (Header.has h "Cache-Control") then Header.set h "Cache-Control" "no-cache"
+  | hp :: _ when hp = "no-cache" ->
+      if not (Header.has h "Cache-Control") then
+        Header.set h "Cache-Control" "no-cache"
   | _ -> ()
 
 (* ------------------------------------------------------------------ *)
@@ -160,12 +176,13 @@ let fix_pragma_cache_control (h : Header.t) =
    declared trailer (parsed from the Trailer header, keys with empty values) is
    the starting point; the actual trailer values read after the chunked body
    overwrite it. *)
-let merge_trailer (declared : Header.t option) (hdr : Header.t) : Header.t option =
+let merge_trailer (declared : Header.t option) (hdr : Header.t) :
+    Header.t option =
   match declared with
   | None -> if Hashtbl.length hdr = 0 then None else Some hdr
   | Some t ->
-    Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
-    Some t
+      Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
+      Some t
 
 (* The non-buffering replacement for materialize_body: wrap [read_transfer]'s
    incremental reader as a [Body.Stream] without collapsing it to a String.
@@ -189,18 +206,18 @@ let stream_body ~(is_chunked : bool) ~(declared_trailer : Header.t option)
       reader () >>= function
       | Some _ as chunk -> Lwt.return chunk
       | None ->
-        eof := true;
-        (* On EOF, read & merge the chunked trailer (Go's body.readTrailer).
+          eof := true;
+          (* On EOF, read & merge the chunked trailer (Go's body.readTrailer).
            Our chunked reader stops at the 0-chunk without consuming the
            trailing CRLF, so the trailer block (possibly a bare CRLF) is read
            here. *)
-        if is_chunked then
-          read_mime_header_raising ic >|= fun hdr ->
-          set_trailer (merge_trailer declared_trailer hdr);
-          None
-        else (
-          set_trailer declared_trailer;
-          Lwt.return_none)
+          if is_chunked then (
+            read_mime_header_raising ic >|= fun hdr ->
+            set_trailer (merge_trailer declared_trailer hdr);
+            None)
+          else (
+            set_trailer declared_trailer;
+            Lwt.return_none)
   in
   Body.Stream next
 
@@ -213,14 +230,14 @@ let parse_request_line (line : string) : (string * string * string) option =
   match String.index_opt line ' ' with
   | None -> None
   | Some i1 -> (
-    let meth = String.sub line 0 i1 in
-    let rest = String.sub line (i1 + 1) (String.length line - i1 - 1) in
-    match String.index_opt rest ' ' with
-    | None -> None
-    | Some i2 ->
-      let request_uri = String.sub rest 0 i2 in
-      let proto = String.sub rest (i2 + 1) (String.length rest - i2 - 1) in
-      Some (meth, request_uri, proto))
+      let meth = String.sub line 0 i1 in
+      let rest = String.sub line (i1 + 1) (String.length line - i1 - 1) in
+      match String.index_opt rest ' ' with
+      | None -> None
+      | Some i2 ->
+          let request_uri = String.sub rest 0 i2 in
+          let proto = String.sub rest (i2 + 1) (String.length rest - i2 - 1) in
+          Some (meth, request_uri, proto))
 
 (* validMethod: isToken. We accept a non-empty token (no CTLs/separators).
    Reuse Header.canonical_header_key's notion of a valid field name via a simple
@@ -233,9 +250,9 @@ let is_token (s : string) : bool =
          b > 0x20 && b < 0x7f
          &&
          match c with
-         | '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '[' | ']' | '?' | '='
-         | '{' | '}' ->
-           false
+         | '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/'
+         | '[' | ']' | '?' | '=' | '{' | '}' ->
+             false
          | _ -> true)
        s
 
@@ -244,78 +261,95 @@ let read_request_raising (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
     (fun () ->
       read_line ic >>= fun s ->
       (match parse_request_line s with
-      | None -> Lwt.fail (bad_string_error "malformed HTTP request" s)
-      | Some (meth, request_uri, proto) -> Lwt.return (meth, request_uri, proto))
+        | None -> Lwt.fail (bad_string_error "malformed HTTP request" s)
+        | Some (meth, request_uri, proto) ->
+            Lwt.return (meth, request_uri, proto))
       >>= fun (meth, request_uri, proto) ->
-      if not (is_token meth) then Lwt.fail (bad_string_error "invalid method" meth)
-      else begin
-        match Request.parse_http_version proto with
+      if not (is_token meth) then
+        Lwt.fail (bad_string_error "invalid method" meth)
+      else
+        begin match Request.parse_http_version proto with
         | None -> Lwt.fail (bad_string_error "malformed HTTP version" proto)
         | Some (proto_major, proto_minor) ->
-          let rawurl = request_uri in
-          let just_authority = meth = "CONNECT" && not (String.length rawurl > 0 && rawurl.[0] = '/') in
-          let rawurl = if just_authority then "http://" ^ rawurl else rawurl in
-          let url = Uri.of_string rawurl in
-          let url = if just_authority then Uri.with_scheme url None else url in
-          read_mime_header_raising ic >>= fun header ->
-          if List.length (Header.values header "Host") > 1 then Lwt.fail (Protocol_error "too many Host headers")
-          else begin
-            let host =
-              match Uri.host url with Some h when h <> "" -> h | _ -> Header.get header "Host"
+            let rawurl = request_uri in
+            let just_authority =
+              meth = "CONNECT"
+              && not (String.length rawurl > 0 && rawurl.[0] = '/')
             in
-            fix_pragma_cache_control header;
-            let close = Transfer.should_close ~major:proto_major ~minor:proto_minor ~header ~remove_close_header:false in
-            let msg =
-              {
-                Transfer.is_response = false;
-                header;
-                status_code = 0;
-                request_method = meth;
-                proto_major;
-                proto_minor;
-                close;
-              }
+            let rawurl =
+              if just_authority then "http://" ^ rawurl else rawurl
             in
-            read_transfer_or_raise msg ic >>= fun res ->
-            (* ReadRequest deletes the Host header. *)
-            Header.del header "Host";
-            (* Build the record first with the declared trailer; the streaming
+            let url = Uri.of_string rawurl in
+            let url =
+              if just_authority then Uri.with_scheme url None else url
+            in
+            read_mime_header_raising ic >>= fun header ->
+            if List.length (Header.values header "Host") > 1 then
+              Lwt.fail (Protocol_error "too many Host headers")
+            else begin
+              let host =
+                match Uri.host url with
+                | Some h when h <> "" -> h
+                | _ -> Header.get header "Host"
+              in
+              fix_pragma_cache_control header;
+              let close =
+                Transfer.should_close ~major:proto_major ~minor:proto_minor
+                  ~header ~remove_close_header:false
+              in
+              let msg =
+                {
+                  Transfer.is_response = false;
+                  header;
+                  status_code = 0;
+                  request_method = meth;
+                  proto_major;
+                  proto_minor;
+                  close;
+                }
+              in
+              read_transfer_or_raise msg ic >>= fun res ->
+              (* ReadRequest deletes the Host header. *)
+              Header.del header "Host";
+              (* Build the record first with the declared trailer; the streaming
                body's EOF action mutates [r.trailer] (Go's mergeSetHeader onto
                rr.Trailer) on the chunked trailer read. *)
-            let r =
-              {
-                Request.meth;
-                url;
-                proto;
-                proto_major;
-                proto_minor;
-                header;
-                body = Body.Empty;
-                content_length = res.Transfer.content_length;
-                transfer_encoding = (if res.Transfer.is_chunked then [ "chunked" ] else []);
-                close = res.Transfer.result_close;
-                host;
-                trailer = res.Transfer.trailer;
-                request_uri;
-                remote_addr = "";
-                form = None;
-                post_form = None;
-                multipart_form = None;
-                ctx = Context.background;
-              }
-            in
-            r.Request.body <-
-              (match res.Transfer.body with
-              | Body.Stream reader ->
-                stream_body ~is_chunked:res.Transfer.is_chunked
-                  ~declared_trailer:res.Transfer.trailer
-                  ~set_trailer:(fun t -> r.Request.trailer <- t)
-                  ic reader
-              | (Body.Empty | Body.String _) as b -> b);
-            Lwt.return r
-          end
-      end)
-    (function End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
+              let r =
+                {
+                  Request.meth;
+                  url;
+                  proto;
+                  proto_major;
+                  proto_minor;
+                  header;
+                  body = Body.Empty;
+                  content_length = res.Transfer.content_length;
+                  transfer_encoding =
+                    (if res.Transfer.is_chunked then [ "chunked" ] else []);
+                  close = res.Transfer.result_close;
+                  host;
+                  trailer = res.Transfer.trailer;
+                  request_uri;
+                  remote_addr = "";
+                  form = None;
+                  post_form = None;
+                  multipart_form = None;
+                  ctx = Context.background;
+                }
+              in
+              r.Request.body <-
+                (match res.Transfer.body with
+                | Body.Stream reader ->
+                    stream_body ~is_chunked:res.Transfer.is_chunked
+                      ~declared_trailer:res.Transfer.trailer
+                      ~set_trailer:(fun t -> r.Request.trailer <- t)
+                      ic reader
+                | (Body.Empty | Body.String _) as b -> b);
+              Lwt.return r
+            end
+        end)
+    (function
+      | End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
 
 (* ------------------------------------------------------------------ *)
 (* read_response (ReadResponse).                                       *)
@@ -330,75 +364,87 @@ let trim_left_spaces s =
   done;
   String.sub s !i (n - !i)
 
-let read_response_raising ?(request : Body.t Request.t option) (ic : Lwt_io.input_channel) :
-    Body.t Response.t Lwt.t =
+let read_response_raising ?(request : Body.t Request.t option)
+    (ic : Lwt_io.input_channel) : Body.t Response.t Lwt.t =
   Lwt.catch
     (fun () -> read_line ic >|= fun l -> l)
-    (function End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
+    (function
+      | End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
   >>= fun line ->
   (match String.index_opt line ' ' with
-  | None -> Lwt.fail (bad_string_error "malformed HTTP response" line)
-  | Some i ->
-    let proto = String.sub line 0 i in
-    let status = trim_left_spaces (String.sub line (i + 1) (String.length line - i - 1)) in
-    Lwt.return (proto, status))
+    | None -> Lwt.fail (bad_string_error "malformed HTTP response" line)
+    | Some i ->
+        let proto = String.sub line 0 i in
+        let status =
+          trim_left_spaces
+            (String.sub line (i + 1) (String.length line - i - 1))
+        in
+        Lwt.return (proto, status))
   >>= fun (proto, status) ->
   let status_code_str =
-    match String.index_opt status ' ' with None -> status | Some j -> String.sub status 0 j
+    match String.index_opt status ' ' with
+    | None -> status
+    | Some j -> String.sub status 0 j
   in
-  if String.length status_code_str <> 3 then Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
+  if String.length status_code_str <> 3 then
+    Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
   else
     match int_of_string_opt status_code_str with
-    | None -> Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
-    | Some sc when sc < 0 -> Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
+    | None ->
+        Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
+    | Some sc when sc < 0 ->
+        Lwt.fail (bad_string_error "malformed HTTP status code" status_code_str)
     | Some status_code -> (
-      match Request.parse_http_version proto with
-      | None -> Lwt.fail (bad_string_error "malformed HTTP version" proto)
-      | Some (proto_major, proto_minor) ->
-        read_mime_header_raising ic >>= fun header ->
-        fix_pragma_cache_control header;
-        let request_method = match request with Some r -> r.Request.meth | None -> "GET" in
-        let msg =
-          {
-            Transfer.is_response = true;
-            header;
-            status_code;
-            request_method;
-            proto_major;
-            proto_minor;
-            close = false;
-          }
-        in
-        read_transfer_or_raise msg ic >>= fun res ->
-        (* Build the record first with the declared trailer; the streaming
+        match Request.parse_http_version proto with
+        | None -> Lwt.fail (bad_string_error "malformed HTTP version" proto)
+        | Some (proto_major, proto_minor) ->
+            read_mime_header_raising ic >>= fun header ->
+            fix_pragma_cache_control header;
+            let request_method =
+              match request with Some r -> r.Request.meth | None -> "GET"
+            in
+            let msg =
+              {
+                Transfer.is_response = true;
+                header;
+                status_code;
+                request_method;
+                proto_major;
+                proto_minor;
+                close = false;
+              }
+            in
+            read_transfer_or_raise msg ic >>= fun res ->
+            (* Build the record first with the declared trailer; the streaming
            body's EOF action mutates [resp.trailer] on the chunked trailer read
            (Go's mergeSetHeader onto rr.Trailer). *)
-        let resp =
-          {
-            Response.status;
-            status_code;
-            proto;
-            proto_major;
-            proto_minor;
-            header;
-            body = Body.Empty;
-            content_length = res.Transfer.content_length;
-            transfer_encoding = (if res.Transfer.is_chunked then [ "chunked" ] else []);
-            close = res.Transfer.result_close;
-            uncompressed = false;
-            trailer = res.Transfer.trailer;
-            request;
-          }
-        in
-        resp.Response.body <-
-          (match res.Transfer.body with
-          | Body.Stream reader ->
-            stream_body ~is_chunked:res.Transfer.is_chunked
-              ~declared_trailer:res.Transfer.trailer
-              ~set_trailer:(fun t -> resp.Response.trailer <- t)
-              ic reader
-          | (Body.Empty | Body.String _) as b -> b);
-        Lwt.return resp)
+            let resp =
+              {
+                Response.status;
+                status_code;
+                proto;
+                proto_major;
+                proto_minor;
+                header;
+                body = Body.Empty;
+                content_length = res.Transfer.content_length;
+                transfer_encoding =
+                  (if res.Transfer.is_chunked then [ "chunked" ] else []);
+                close = res.Transfer.result_close;
+                uncompressed = false;
+                trailer = res.Transfer.trailer;
+                request;
+              }
+            in
+            resp.Response.body <-
+              (match res.Transfer.body with
+              | Body.Stream reader ->
+                  stream_body ~is_chunked:res.Transfer.is_chunked
+                    ~declared_trailer:res.Transfer.trailer
+                    ~set_trailer:(fun t -> resp.Response.trailer <- t)
+                    ic reader
+              | (Body.Empty | Body.String _) as b -> b);
+            Lwt.return resp)
 
 (* ------------------------------------------------------------------ *)
 (* write_request (Request.Write / write).                              *)
@@ -412,44 +458,70 @@ let request_uri_of (u : Uri.t) : string =
   match Uri.verbatim_query u with Some q -> path ^ "?" ^ q | None -> path
 
 let string_contains_ctl_byte s =
-  String.exists (fun c -> let b = Char.code c in b < 0x20 || b = 0x7f) s
+  String.exists
+    (fun c ->
+      let b = Char.code c in
+      b < 0x20 || b = 0x7f)
+    s
 
-let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) : unit Lwt.t =
+let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) :
+    unit Lwt.t =
   let host =
     if r.Request.host <> "" then r.Request.host
     else match Uri.host r.Request.url with Some h -> h | None -> ""
   in
-  (if host = "" && (match Uri.host r.Request.url with Some _ -> false | None -> r.Request.host = "") then
-     Lwt.fail missing_host_sentinel
+  (if
+     host = ""
+     &&
+     match Uri.host r.Request.url with
+     | Some _ -> false
+     | None -> r.Request.host = ""
+   then Lwt.fail missing_host_sentinel
    else Lwt.return_unit)
   >>= fun () ->
   let ruri =
-    if r.Request.meth = "CONNECT" && Uri.path r.Request.url = "" then host else request_uri_of r.Request.url
+    if r.Request.meth = "CONNECT" && Uri.path r.Request.url = "" then host
+    else request_uri_of r.Request.url
   in
   if string_contains_ctl_byte ruri then
-    Lwt.fail (Protocol_error "net/http: can't write control character in Request.URL")
+    Lwt.fail
+      (Protocol_error "net/http: can't write control character in Request.URL")
   else begin
     let meth = if r.Request.meth = "" then "GET" else r.Request.meth in
-    Lwt_io.write oc (Printf.sprintf "%s %s HTTP/1.1\r\n" meth ruri) >>= fun () ->
+    Lwt_io.write oc (Printf.sprintf "%s %s HTTP/1.1\r\n" meth ruri)
+    >>= fun () ->
     Lwt_io.write oc (Printf.sprintf "Host: %s\r\n" host) >>= fun () ->
     (* User-Agent: default unless present (a present blank value suppresses it). *)
-    let user_agent = if Header.has r.Request.header "User-Agent" then Header.get r.Request.header "User-Agent" else Request.default_user_agent in
+    let user_agent =
+      if Header.has r.Request.header "User-Agent" then
+        Header.get r.Request.header "User-Agent"
+      else Request.default_user_agent
+    in
     (if user_agent <> "" then
        (* headerNewlineToSpace + TrimString. *)
-       let ua = String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) user_agent in
+       let ua =
+         String.map
+           (fun c -> if c = '\n' || c = '\r' then ' ' else c)
+           user_agent
+       in
        let ua = trim_ws ua in
        Lwt_io.write oc (Printf.sprintf "User-Agent: %s\r\n" ua)
      else Lwt.return_unit)
     >>= fun () ->
     let tw =
-      Transfer.make_transfer_writer ~is_response:false ~method_:meth ~at_least_http11:true
-        ~close:r.Request.close ~header:r.Request.header ~trailer:r.Request.trailer ~body:r.Request.body
-        ~content_length:r.Request.content_length ~transfer_encoding:r.Request.transfer_encoding ()
+      Transfer.make_transfer_writer ~is_response:false ~method_:meth
+        ~at_least_http11:true ~close:r.Request.close ~header:r.Request.header
+        ~trailer:r.Request.trailer ~body:r.Request.body
+        ~content_length:r.Request.content_length
+        ~transfer_encoding:r.Request.transfer_encoding ()
     in
     Transfer.write_transfer_header oc tw >>= fun () ->
     let buf = Buffer.create 256 in
     Header.write_subset r.Request.header buf
-      ~exclude:[ "Host"; "User-Agent"; "Content-Length"; "Transfer-Encoding"; "Trailer" ];
+      ~exclude:
+        [
+          "Host"; "User-Agent"; "Content-Length"; "Transfer-Encoding"; "Trailer";
+        ];
     Lwt_io.write oc (Buffer.contents buf) >>= fun () ->
     Lwt_io.write oc "\r\n" >>= fun () -> Transfer.write_body oc tw
   end
@@ -481,22 +553,29 @@ let write_request oc r : (unit, error) result Lwt.t =
 (* write_response (Response.Write).                                    *)
 (* ------------------------------------------------------------------ *)
 
-let write_response (oc : Lwt_io.output_channel) (r : Body.t Response.t) : unit Lwt.t =
+let write_response (oc : Lwt_io.output_channel) (r : Body.t Response.t) :
+    unit Lwt.t =
   (* Status line text. *)
   let itoa = string_of_int r.Response.status_code in
   let text =
     if r.Response.status <> "" then begin
       (* Strip a leading "<code> " prefix to reduce stutter. *)
       let prefix = itoa ^ " " in
-      if String.length r.Response.status >= String.length prefix && String.sub r.Response.status 0 (String.length prefix) = prefix
-      then String.sub r.Response.status (String.length prefix) (String.length r.Response.status - String.length prefix)
+      if
+        String.length r.Response.status >= String.length prefix
+        && String.sub r.Response.status 0 (String.length prefix) = prefix
+      then
+        String.sub r.Response.status (String.length prefix)
+          (String.length r.Response.status - String.length prefix)
       else r.Response.status
     end
     else
       let st = Status.status_text r.Response.status_code in
       if st <> "" then st else "status code " ^ itoa
   in
-  Lwt_io.write oc (Printf.sprintf "HTTP/%d.%d %03d %s\r\n" r.Response.proto_major r.Response.proto_minor r.Response.status_code text)
+  Lwt_io.write oc
+    (Printf.sprintf "HTTP/%d.%d %03d %s\r\n" r.Response.proto_major
+       r.Response.proto_minor r.Response.status_code text)
   >>= fun () ->
   (* Clone fields we may modify (r1). *)
   let content_length = ref r.Response.content_length in
@@ -514,28 +593,33 @@ let write_response (oc : Lwt_io.output_channel) (r : Body.t Response.t) : unit L
   >>= fun () ->
   (* HTTP/1.1 non-chunked unknown length must signal EOF via Connection: close. *)
   if
-    Int64.compare !content_length (-1L) = 0 && not !close
+    Int64.compare !content_length (-1L) = 0
+    && (not !close)
     && Response.proto_at_least r 1 1
-    && not (Transfer.chunked r.Response.transfer_encoding)
+    && (not (Transfer.chunked r.Response.transfer_encoding))
     && not r.Response.uncompressed
   then close := true;
-  let method_ = match r.Response.request with Some req -> req.Request.meth | None -> "" in
+  let method_ =
+    match r.Response.request with Some req -> req.Request.meth | None -> ""
+  in
   let response_to_head = Transfer.no_response_body_expected method_ in
   let tw =
     Transfer.make_transfer_writer ~is_response:true ~method_ ~response_to_head
-      ~at_least_http11:(Response.proto_at_least r 1 1) ~close:!close ~header:r.Response.header
-      ~trailer:r.Response.trailer ~body:!body ~content_length:!content_length
+      ~at_least_http11:(Response.proto_at_least r 1 1)
+      ~close:!close ~header:r.Response.header ~trailer:r.Response.trailer
+      ~body:!body ~content_length:!content_length
       ~transfer_encoding:r.Response.transfer_encoding ()
   in
   Transfer.write_transfer_header oc tw >>= fun () ->
   let buf = Buffer.create 256 in
-  Header.write_subset r.Response.header buf ~exclude:[ "Content-Length"; "Transfer-Encoding"; "Trailer" ];
+  Header.write_subset r.Response.header buf
+    ~exclude:[ "Content-Length"; "Transfer-Encoding"; "Trailer" ];
   Lwt_io.write oc (Buffer.contents buf) >>= fun () ->
   let content_length_already_sent = Transfer.should_send_content_length tw in
   (if
      Int64.compare !content_length 0L = 0
-     && not (Transfer.chunked r.Response.transfer_encoding)
-     && not content_length_already_sent
+     && (not (Transfer.chunked r.Response.transfer_encoding))
+     && (not content_length_already_sent)
      && Transfer.body_allowed_for_status r.Response.status_code
    then Lwt_io.write oc "Content-Length: 0\r\n"
    else Lwt.return_unit)

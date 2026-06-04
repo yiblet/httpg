@@ -10,7 +10,9 @@ let create () : t = Hashtbl.create 8
 
 (* Values.Get: the first value for [key], or "". *)
 let get (v : t) key =
-  match Hashtbl.find_opt v key with Some (v0 :: _) -> v0 | Some [] | None -> ""
+  match Hashtbl.find_opt v key with
+  | Some (v0 :: _) -> v0
+  | Some [] | None -> ""
 
 (* Values.Set: replace any existing values for [key]. *)
 let set (v : t) key value = Hashtbl.replace v key [ value ]
@@ -27,7 +29,8 @@ let del (v : t) key = Hashtbl.remove v key
 let has (v : t) key = Hashtbl.mem v key
 
 (* All values for [key] (Go's [v[key]]); [] when absent. *)
-let find (v : t) key = match Hashtbl.find_opt v key with Some l -> l | None -> []
+let find (v : t) key =
+  match Hashtbl.find_opt v key with Some l -> l | None -> []
 
 let length (v : t) = Hashtbl.length v
 
@@ -37,7 +40,8 @@ let copy_values ~dst ~src =
 
 (* QueryUnescape: percent-decode a query component. [uri] decodes '+' as a
    space inside query components, matching Go's QueryUnescape. *)
-let query_unescape s = Uri.pct_decode (String.map (function '+' -> ' ' | c -> c) s)
+let query_unescape s =
+  Uri.pct_decode (String.map (function '+' -> ' ' | c -> c) s)
 
 (* QueryEscape: percent-encode a query component (Go encodes space as '+'). We
    percent-encode spaces first (so uri does not), then rewrite "%20" -> "+". *)
@@ -48,7 +52,8 @@ let query_escape s =
   let n = String.length enc in
   let i = ref 0 in
   while !i < n do
-    if !i + 2 < n && enc.[!i] = '%' && enc.[!i + 1] = '2' && enc.[!i + 2] = '0' then begin
+    if !i + 2 < n && enc.[!i] = '%' && enc.[!i + 1] = '2' && enc.[!i + 2] = '0'
+    then begin
       Buffer.add_char buf '+';
       i := !i + 3
     end
@@ -63,13 +68,12 @@ let query_escape s =
 let cut s sep =
   match String.index_opt s sep with
   | None -> (s, "", false)
-  | Some i -> (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1), true)
+  | Some i ->
+      (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1), true)
 
 (* parseQuery(m, query): mutate [m], returning the first error (if any).
    Semicolon separators are invalid (Go rejects a key containing ';'). *)
-type error =
-  | Invalid_semicolon_separator
-  | Invalid_escape of string
+type error = Invalid_semicolon_separator | Invalid_escape of string
 
 let error_to_string = function
   | Invalid_semicolon_separator -> "invalid semicolon separator in query"

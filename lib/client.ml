@@ -109,19 +109,20 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
       | None ->
           (* 3xx without Location: hand the response back, as Go does. *)
           Lwt.return resp
-      | Some loc_url ->
+      | Some loc_url -> (
           (* Drain the previous response body so its connection returns to the
              idle pool before the next hop (Go reads up to [maxBodySlurpSize]
              then closes — closing releases the connection). The body now
              streams, so this drain is what actually advances the connection to
              EOF and fires its pool-return action; without it the next hop would
              dial a fresh connection. *)
-          Body.drain resp.Response.body >>= fun () ->
+          Body.drain resp.Response.body
+          >>= fun () ->
           let include_body = include_body && include_body_on_hop in
           let strip_sensitive = url_host loc_url <> initial_host in
           let new_header = Header.create () in
-          copy_headers ~from:initial_header ~into:new_header
-            ~strip_sensitive ~strip_body:(not include_body);
+          copy_headers ~from:initial_header ~into:new_header ~strip_sensitive
+            ~strip_body:(not include_body);
           let new_req =
             {
               Request.meth = redirect_method;
@@ -148,7 +149,7 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
               ctx = req.Request.ctx;
             }
           in
-          (match c.check_redirect via with
+          match c.check_redirect via with
           | Ok () -> loop new_req via include_body
           | Error msg -> Lwt.fail (Aborted (Redirect msg)))
   in
@@ -164,15 +165,19 @@ let wrap_timer_body ~cancel (resp : Body.t Response.t) : Body.t Response.t =
   (match resp.Response.body with
   | Body.Empty | Body.String _ -> cancel Context.Canceled
   | Body.Stream inner ->
-    let next () =
-      Lwt.try_bind
-        (fun () -> inner ())
-        (function
-          | Some _ as chunk -> Lwt.return chunk
-          | None -> cancel Context.Canceled; Lwt.return_none)
-        (fun exn -> cancel Context.Canceled; Lwt.fail exn)
-    in
-    resp.Response.body <- Body.Stream next);
+      let next () =
+        Lwt.try_bind
+          (fun () -> inner ())
+          (function
+            | Some _ as chunk -> Lwt.return chunk
+            | None ->
+                cancel Context.Canceled;
+                Lwt.return_none)
+          (fun exn ->
+            cancel Context.Canceled;
+            Lwt.fail exn)
+      in
+      resp.Response.body <- Body.Stream next);
   resp
 
 let do_ ?context c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
@@ -199,9 +204,10 @@ let do_ ?context c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
       let req = Request.with_context req ctx in
       Lwt.try_bind
         (fun () -> do_one c req)
-        (fun resp ->
-          Lwt.return (wrap_timer_body ~cancel resp))
-        (fun exn -> cancel Context.Canceled; Lwt.fail exn)
+        (fun resp -> Lwt.return (wrap_timer_body ~cancel resp))
+        (fun exn ->
+          cancel Context.Canceled;
+          Lwt.fail exn)
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
@@ -231,7 +237,6 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
   }
 
 let get ?context c url = do_ ?context c (make_request Method.get url)
-
 let head ?context c url = do_ ?context c (make_request Method.head url)
 
 let post ?context c url ~content_type body =

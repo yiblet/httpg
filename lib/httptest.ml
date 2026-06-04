@@ -150,8 +150,14 @@ module Server = struct
     Lwt.async (fun () -> serve_loop);
     let url = Printf.sprintf "http://127.0.0.1:%d" port in
     Lwt.return
-      { url; port; tls = false; srv; serve = serve_loop;
-        close = (fun () -> Server.close srv) }
+      {
+        url;
+        port;
+        tls = false;
+        srv;
+        serve = serve_loop;
+        close = (fun () -> Server.close srv);
+      }
 
   (* NewTLSServer: like [new_server] but over TLS with the self-signed
      [Net.test_server_certificate] (Go's [testcert.LocalhostCert]); URL is
@@ -165,8 +171,14 @@ module Server = struct
     Lwt.async (fun () -> serve_loop);
     let url = Printf.sprintf "https://127.0.0.1:%d" port in
     Lwt.return
-      { url; port; tls = true; srv; serve = serve_loop;
-        close = (fun () -> Server.close srv) }
+      {
+        url;
+        port;
+        tls = true;
+        srv;
+        serve = serve_loop;
+        close = (fun () -> Server.close srv);
+      }
 
   (* Server.Client: a client configured to talk to this server. Go pre-loads
      the server's self-signed cert into the client's RootCAs; the faithful

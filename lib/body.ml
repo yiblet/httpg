@@ -5,14 +5,10 @@
    returns [None] (the analogue of [io.EOF]). [Empty] is the analogue of
    [http.NoBody]. *)
 
-type t =
-  | Empty
-  | String of string
-  | Stream of (unit -> string option Lwt.t)
+type t = Empty | String of string | Stream of (unit -> string option Lwt.t)
 
 let empty = Empty
 let of_string s = String s
-
 let of_stream f = Stream f
 
 (* Read the whole body into a single string. *)
@@ -21,16 +17,16 @@ let read_all (b : t) : string Lwt.t =
   | Empty -> Lwt.return ""
   | String s -> Lwt.return s
   | Stream next ->
-    let buf = Buffer.create 256 in
-    let rec loop () =
-      Lwt.bind (next ()) (fun chunk ->
-          match chunk with
-          | None -> Lwt.return (Buffer.contents buf)
-          | Some s ->
-            Buffer.add_string buf s;
-            loop ())
-    in
-    loop ()
+      let buf = Buffer.create 256 in
+      let rec loop () =
+        Lwt.bind (next ()) (fun chunk ->
+            match chunk with
+            | None -> Lwt.return (Buffer.contents buf)
+            | Some s ->
+                Buffer.add_string buf s;
+                loop ())
+      in
+      loop ()
 
 (* Read and discard the whole body until EOF. [Empty]/[String] are no-ops
    (nothing is held on the wire). For a [Stream] this pulls every chunk until
@@ -40,11 +36,11 @@ let drain (b : t) : unit Lwt.t =
   match b with
   | Empty | String _ -> Lwt.return_unit
   | Stream next ->
-    let rec loop () =
-      Lwt.bind (next ()) (fun chunk ->
-          match chunk with None -> Lwt.return_unit | Some _ -> loop ())
-    in
-    loop ()
+      let rec loop () =
+        Lwt.bind (next ()) (fun chunk ->
+            match chunk with None -> Lwt.return_unit | Some _ -> loop ())
+      in
+      loop ()
 
 (* Apply [f] to each successive chunk of the body, in order, until EOF.
    [Empty] yields no calls; [String s] yields exactly one call [f s]; a
@@ -56,13 +52,13 @@ let iter (f : string -> unit Lwt.t) (b : t) : unit Lwt.t =
   | Empty -> Lwt.return_unit
   | String s -> f s
   | Stream next ->
-    let rec loop () =
-      Lwt.bind (next ()) (fun chunk ->
-          match chunk with
-          | None -> Lwt.return_unit
-          | Some s -> Lwt.bind (f s) loop)
-    in
-    loop ()
+      let rec loop () =
+        Lwt.bind (next ()) (fun chunk ->
+            match chunk with
+            | None -> Lwt.return_unit
+            | Some s -> Lwt.bind (f s) loop)
+      in
+      loop ()
 
 (* Write the raw body bytes to [oc] (no framing). *)
 let write (oc : Lwt_io.output_channel) (b : t) : unit Lwt.t =
@@ -70,10 +66,10 @@ let write (oc : Lwt_io.output_channel) (b : t) : unit Lwt.t =
   | Empty -> Lwt.return_unit
   | String s -> Lwt_io.write oc s
   | Stream next ->
-    let rec loop () =
-      Lwt.bind (next ()) (fun chunk ->
-          match chunk with
-          | None -> Lwt.return_unit
-          | Some s -> Lwt.bind (Lwt_io.write oc s) loop)
-    in
-    loop ()
+      let rec loop () =
+        Lwt.bind (next ()) (fun chunk ->
+            match chunk with
+            | None -> Lwt.return_unit
+            | Some s -> Lwt.bind (Lwt_io.write oc s) loop)
+      in
+      loop ()

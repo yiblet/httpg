@@ -4,7 +4,12 @@
 
 type segment = { s : string; wild : bool; multi : bool }
 
-type t = { str : string; method_ : string; host : string; segments : segment list }
+type t = {
+  str : string;
+  method_ : string;
+  host : string;
+  segments : segment list;
+}
 
 let to_string p = p.str
 let last_segment p = List.nth p.segments (List.length p.segments - 1)
@@ -20,9 +25,9 @@ let valid_method method_ =
          b > 0x20 && b < 0x7f
          &&
          match c with
-         | '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '[' | ']' | '?'
-         | '=' | '{' | '}' ->
-           false
+         | '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/'
+         | '[' | ']' | '?' | '=' | '{' | '}' ->
+             false
          | _ -> true)
        method_
 
@@ -54,21 +59,21 @@ let path_unescape path =
     if i >= n then Some (Buffer.contents buf)
     else
       match path.[i] with
-      | '%' ->
-        if i + 2 >= n then None
-        else (
-          match (hex_val path.[i + 1], hex_val path.[i + 2]) with
-          | Some hi, Some lo ->
-            Buffer.add_char buf (Char.chr ((hi * 16) + lo));
-            loop (i + 3)
-          | _ -> None)
+      | '%' -> (
+          if i + 2 >= n then None
+          else
+            match (hex_val path.[i + 1], hex_val path.[i + 2]) with
+            | Some hi, Some lo ->
+                Buffer.add_char buf (Char.chr ((hi * 16) + lo));
+                loop (i + 3)
+            | _ -> None)
       | '+' ->
-        (* PathUnescape (unlike QueryUnescape) keeps '+' literal. *)
-        Buffer.add_char buf '+';
-        loop (i + 1)
+          (* PathUnescape (unlike QueryUnescape) keeps '+' literal. *)
+          Buffer.add_char buf '+';
+          loop (i + 1)
       | c ->
-        Buffer.add_char buf c;
-        loop (i + 1)
+          Buffer.add_char buf c;
+          loop (i + 1)
   in
   match loop 0 with Some s -> s | None -> path
 
@@ -91,8 +96,7 @@ let path_clean p =
       if p.[!r] = '/' then incr r
       else if p.[!r] = '.' && (!r + 1 = n || p.[!r + 1] = '/') then incr r
       else if
-        p.[!r] = '.' && p.[!r + 1] = '.'
-        && (!r + 2 = n || p.[!r + 2] = '/')
+        p.[!r] = '.' && p.[!r + 1] = '.' && (!r + 2 = n || p.[!r + 2] = '/')
       then begin
         r := !r + 2;
         if Buffer.length out > !dotdot then begin
@@ -113,7 +117,9 @@ let path_clean p =
         end
       end
       else begin
-        if (rooted && Buffer.length out <> 1) || ((not rooted) && Buffer.length out <> 0)
+        if
+          (rooted && Buffer.length out <> 1)
+          || ((not rooted) && Buffer.length out <> 0)
         then Buffer.add_char out '/';
         while !r < n && p.[!r] <> '/' do
           Buffer.add_char out p.[!r];
@@ -166,10 +172,12 @@ let error_to_string = function
   | Invalid_method m -> Printf.sprintf "at offset 0: invalid method %S" m
   | Missing_path off -> Printf.sprintf "at offset %d: host/path missing /" off
   | Host_has_brace off ->
-      Printf.sprintf "at offset %d: host contains '{' (missing initial '/'?)" off
+      Printf.sprintf "at offset %d: host contains '{' (missing initial '/'?)"
+        off
   | Unclean_path off ->
       Printf.sprintf
-        "at offset %d: non-CONNECT pattern with unclean path can never match" off
+        "at offset %d: non-CONNECT pattern with unclean path can never match"
+        off
   | Bad_wildcard (off, why) -> Printf.sprintf "at offset %d: %s" off why
   | Duplicate_wildcard (off, name) ->
       Printf.sprintf "at offset %d: duplicate wildcard name %S" off name
@@ -190,10 +198,12 @@ let parse s : (t, error) result =
             true )
         else (s, "", false)
       in
-      let method_, rest = if not found then ("", method_) else (method_, rest) in
+      let method_, rest =
+        if not found then ("", method_) else (method_, rest)
+      in
       if method_ <> "" && not (valid_method method_) then
         fail (Invalid_method method_);
-      (if found then off := String.length method_ + 1);
+      if found then off := String.length method_ + 1;
       let i = index_byte rest '/' in
       if i < 0 then fail (Missing_path !off);
       let host = String.sub rest 0 i in
@@ -225,13 +235,17 @@ let parse s : (t, error) result =
           let seg = String.sub !rest 0 i in
           rest := String.sub !rest i (String.length !rest - i);
           let bi = index_byte seg '{' in
-          if bi < 0 then push { s = path_unescape seg; wild = false; multi = false }
+          if bi < 0 then
+            push { s = path_unescape seg; wild = false; multi = false }
           else begin
             (* Wildcard. *)
             if bi <> 0 then
-              fail (Bad_wildcard (!off, "bad wildcard segment (must start with '{')"));
+              fail
+                (Bad_wildcard
+                   (!off, "bad wildcard segment (must start with '{')"));
             if seg.[String.length seg - 1] <> '}' then
-              fail (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"));
+              fail
+                (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"));
             let name = String.sub seg 1 (String.length seg - 2) in
             if name = "$" then begin
               if String.length !rest <> 0 then
@@ -245,7 +259,9 @@ let parse s : (t, error) result =
                 fail (Bad_wildcard (!off, "{...} wildcard not at end"));
               if name = "" then fail (Bad_wildcard (!off, "empty wildcard"));
               if not (is_valid_wildcard_name name) then
-                fail (Bad_wildcard (!off, Printf.sprintf "bad wildcard name %S" name));
+                fail
+                  (Bad_wildcard
+                     (!off, Printf.sprintf "bad wildcard name %S" name));
               if Hashtbl.mem seen_names name then
                 fail (Duplicate_wildcard (!off, name));
               Hashtbl.replace seen_names name ();
@@ -260,7 +276,12 @@ let parse s : (t, error) result =
 
 (* --- relationships --- *)
 
-type relationship = Equivalent | More_general | More_specific | Disjoint | Overlaps
+type relationship =
+  | Equivalent
+  | More_general
+  | More_specific
+  | Disjoint
+  | Overlaps
 
 let relationship_to_string = function
   | Equivalent -> "equivalent"
@@ -279,11 +300,11 @@ let combine_relationships r1 r2 =
   | Equivalent -> r2
   | Disjoint -> Disjoint
   | Overlaps -> if r2 = Disjoint then Disjoint else Overlaps
-  | (More_general | More_specific) -> (
-    match r2 with
-    | Equivalent -> r1
-    | _ when r2 = inverse_relationship r1 -> Overlaps
-    | _ -> r2)
+  | More_general | More_specific -> (
+      match r2 with
+      | Equivalent -> r1
+      | _ when r2 = inverse_relationship r1 -> Overlaps
+      | _ -> r2)
 
 let compare_methods p1 p2 =
   if p1.method_ = p2.method_ then Equivalent
@@ -305,25 +326,25 @@ let compare_segments s1 s2 =
 
 let compare_paths p1 p2 =
   let len1 = List.length p1.segments and len2 = List.length p2.segments in
-  if len1 <> len2 && (not (last_segment p1).multi) && not (last_segment p2).multi then
-    Disjoint
+  if
+    len1 <> len2 && (not (last_segment p1).multi) && not (last_segment p2).multi
+  then Disjoint
   else begin
     (* Walk corresponding segments. *)
     let rec walk rel segs1 segs2 =
       match (segs1, segs2) with
       | s1 :: r1, s2 :: r2 ->
-        let rel = combine_relationships rel (compare_segments s1 s2) in
-        if rel = Disjoint then (Disjoint, [], [])
-        else walk rel r1 r2
+          let rel = combine_relationships rel (compare_segments s1 s2) in
+          if rel = Disjoint then (Disjoint, [], []) else walk rel r1 r2
       | _ -> (rel, segs1, segs2)
     in
     let rel, segs1, segs2 = walk Equivalent p1.segments p2.segments in
     if rel = Disjoint then Disjoint
     else if segs1 = [] && segs2 = [] then rel
-    else if List.length segs1 < List.length segs2 && (last_segment p1).multi then
-      combine_relationships rel More_general
-    else if List.length segs2 < List.length segs1 && (last_segment p2).multi then
-      combine_relationships rel More_specific
+    else if List.length segs1 < List.length segs2 && (last_segment p1).multi
+    then combine_relationships rel More_general
+    else if List.length segs2 < List.length segs1 && (last_segment p2).multi
+    then combine_relationships rel More_specific
     else Disjoint
   end
 
@@ -351,8 +372,8 @@ let common_path p1 p2 =
   let rec walk segs1 segs2 =
     match (segs1, segs2) with
     | s1 :: r1, s2 :: r2 ->
-      (if s1.wild then write_segment b s2 else write_segment b s1);
-      walk r1 r2
+        if s1.wild then write_segment b s2 else write_segment b s1;
+        walk r1 r2
     | _ -> (segs1, segs2)
   in
   let segs1, segs2 = walk p1.segments p2.segments in
@@ -367,33 +388,34 @@ let difference_path p1 p2 =
      let rec walk segs1 segs2 =
        match (segs1, segs2) with
        | s1 :: r1, s2 :: r2 ->
-         if s1.multi && s2.multi then begin
-           Buffer.add_char b '/';
-           raise Done
-         end;
-         if s1.multi && not s2.multi then begin
-           Buffer.add_char b '/';
-           (if s2.s = "/" then if s1.s <> "" then Buffer.add_string b s1.s
-            else Buffer.add_string b "x");
-           raise Done
-         end;
-         if (not s1.multi) && s2.multi then write_segment b s1
-         else if s1.wild && s2.wild then write_segment b s1
-         else if s1.wild && not s2.wild then begin
-           if s1.s <> s2.s then write_segment b s1
-           else begin
+           if s1.multi && s2.multi then begin
              Buffer.add_char b '/';
-             Buffer.add_string b (s2.s ^ "x")
-           end
-         end
-         else if (not s1.wild) && s2.wild then write_segment b s1
-         else begin
-           (* both literals; precondition: same literal *)
-           if s1.s <> s2.s then
-             failwith (Printf.sprintf "literals differ: %S and %S" s1.s s2.s);
-           write_segment b s1
-         end;
-         walk r1 r2
+             raise Done
+           end;
+           if s1.multi && not s2.multi then begin
+             Buffer.add_char b '/';
+             if s2.s = "/" then
+               if s1.s <> "" then Buffer.add_string b s1.s
+               else Buffer.add_string b "x";
+             raise Done
+           end;
+           if (not s1.multi) && s2.multi then write_segment b s1
+           else if s1.wild && s2.wild then write_segment b s1
+           else if s1.wild && not s2.wild then
+             begin if s1.s <> s2.s then write_segment b s1
+             else begin
+               Buffer.add_char b '/';
+               Buffer.add_string b (s2.s ^ "x")
+             end
+             end
+           else if (not s1.wild) && s2.wild then write_segment b s1
+           else begin
+             (* both literals; precondition: same literal *)
+             if s1.s <> s2.s then
+               failwith (Printf.sprintf "literals differ: %S and %S" s1.s s2.s);
+             write_segment b s1
+           end;
+           walk r1 r2
        | _ -> (segs1, segs2)
      in
      let segs1, segs2 = walk p1.segments p2.segments in
@@ -407,8 +429,10 @@ let describe_conflict p1 p2 =
   let prel = compare_paths p1 p2 in
   let rel = combine_relationships mrel prel in
   if rel = Equivalent then
-    Printf.sprintf "%s matches the same requests as %s" (to_string p1) (to_string p2)
-  else if rel <> Overlaps then failwith "describeConflict called with non-conflicting patterns"
+    Printf.sprintf "%s matches the same requests as %s" (to_string p1)
+      (to_string p2)
+  else if rel <> Overlaps then
+    failwith "describeConflict called with non-conflicting patterns"
   else if prel = Overlaps then
     Printf.sprintf
       "%s and %s both match some paths, like %S.\n\
@@ -419,13 +443,17 @@ let describe_conflict p1 p2 =
       (difference_path p1 p2) (to_string p2) (to_string p2)
       (difference_path p2 p1) (to_string p1)
   else if mrel = More_general && prel = More_specific then
-    Printf.sprintf "%s matches more methods than %s, but has a more specific path pattern"
+    Printf.sprintf
+      "%s matches more methods than %s, but has a more specific path pattern"
       (to_string p1) (to_string p2)
   else if mrel = More_specific && prel = More_general then
-    Printf.sprintf "%s matches fewer methods than %s, but has a more general path pattern"
+    Printf.sprintf
+      "%s matches fewer methods than %s, but has a more general path pattern"
       (to_string p1) (to_string p2)
   else
     Printf.sprintf
-      "bug: unexpected way for two patterns %s and %s to conflict: methods %s, paths %s"
-      (to_string p1) (to_string p2) (relationship_to_string mrel)
+      "bug: unexpected way for two patterns %s and %s to conflict: methods %s, \
+       paths %s"
+      (to_string p1) (to_string p2)
+      (relationship_to_string mrel)
       (relationship_to_string prel)

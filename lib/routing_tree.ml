@@ -10,14 +10,19 @@ type 'h node = {
   mutable leaf : (Pattern.t * 'h) option;
   (* interior fields *)
   children : (string, 'h node) Mapping.t;
-  mutable multi_child : 'h node option;  (* child with multi wildcard *)
-  mutable empty_child : 'h node option;  (* optimization: child with key "" *)
+  mutable multi_child : 'h node option; (* child with multi wildcard *)
+  mutable empty_child : 'h node option; (* optimization: child with key "" *)
 }
 
 type 'h t = 'h node
 
 let make_node () =
-  { leaf = None; children = Mapping.create (); multi_child = None; empty_child = None }
+  {
+    leaf = None;
+    children = Mapping.create ();
+    multi_child = None;
+    empty_child = None;
+  }
 
 let create = make_node
 
@@ -32,34 +37,34 @@ let find_child n key =
 
 (* addChild adds a child node with the given key if absent, returns it. *)
 let add_child n key =
-  if key = "" then
+  if key = "" then (
     match n.empty_child with
     | Some c -> c
     | None ->
-      let c = make_node () in
-      n.empty_child <- Some c;
-      c
+        let c = make_node () in
+        n.empty_child <- Some c;
+        c)
   else
     match find_child n key with
     | Some c -> c
     | None ->
-      let c = make_node () in
-      Mapping.add n.children key c;
-      c
+        let c = make_node () in
+        Mapping.add n.children key c;
+        c
 
 (* addSegments adds the given segments to the tree rooted at n. *)
 let rec add_segments n (segs : Pattern.segment list) p h =
   match segs with
   | [] -> set n p h
   | seg :: rest ->
-    if seg.Pattern.multi then begin
-      if rest <> [] then failwith "multi wildcard not last";
-      let c = make_node () in
-      n.multi_child <- Some c;
-      set c p h
-    end
-    else if seg.Pattern.wild then add_segments (add_child n "") rest p h
-    else add_segments (add_child n seg.Pattern.s) rest p h
+      if seg.Pattern.multi then begin
+        if rest <> [] then failwith "multi wildcard not last";
+        let c = make_node () in
+        n.multi_child <- Some c;
+        set c p h
+      end
+      else if seg.Pattern.wild then add_segments (add_child n "") rest p h
+      else add_segments (add_child n seg.Pattern.s) rest p h
 
 (* addPattern: host -> method -> path. *)
 let add_pattern root (p : Pattern.t) h =
@@ -73,7 +78,8 @@ let first_segment path =
   else begin
     let path = String.sub path 1 (String.length path - 1) in
     let i = try String.index path '/' with Not_found -> String.length path in
-    (Pattern.path_unescape (String.sub path 0 i), String.sub path i (String.length path - i))
+    ( Pattern.path_unescape (String.sub path 0 i),
+      String.sub path i (String.length path - i) )
   end
 
 (* matchPath matches a path against node n. matches holds wildcard matches so
@@ -82,48 +88,58 @@ let rec match_path (n : 'h node option) path matches =
   match n with
   | None -> None
   | Some n ->
-    if path = "" then
-      match n.leaf with None -> None | Some (p, h) -> Some ((p, h), matches)
-    else begin
-      let seg, rest = first_segment path in
-      (* Try a literal child first (more specific). *)
-      match match_path (find_child n seg) rest matches with
-      | Some _ as r -> r
-      | None ->
-        (* Try a single wildcard (empty-string child), unless trailing slash. *)
-        let wild_result =
-          if seg <> "/" then match_path n.empty_child rest (matches @ [ seg ]) else None
-        in
-        (match wild_result with
+      if path = "" then
+        match n.leaf with None -> None | Some (p, h) -> Some ((p, h), matches)
+      else begin
+        let seg, rest = first_segment path in
+        (* Try a literal child first (more specific). *)
+        match match_path (find_child n seg) rest matches with
         | Some _ as r -> r
         | None -> (
-          (* Lastly, the multi wildcard. *)
-          match n.multi_child with
-          | None -> None
-          | Some c ->
-            let matches =
-              match c.leaf with
-              | Some (p, _) when (Pattern.last_segment p).Pattern.s <> "" ->
-                matches @ [ Pattern.path_unescape (String.sub path 1 (String.length path - 1)) ]
-              | _ -> matches
+            (* Try a single wildcard (empty-string child), unless trailing slash. *)
+            let wild_result =
+              if seg <> "/" then
+                match_path n.empty_child rest (matches @ [ seg ])
+              else None
             in
-            (match c.leaf with Some (p, h) -> Some ((p, h), matches) | None -> None)))
-    end
+            match wild_result with
+            | Some _ as r -> r
+            | None -> (
+                (* Lastly, the multi wildcard. *)
+                match n.multi_child with
+                | None -> None
+                | Some c -> (
+                    let matches =
+                      match c.leaf with
+                      | Some (p, _)
+                        when (Pattern.last_segment p).Pattern.s <> "" ->
+                          matches
+                          @ [
+                              Pattern.path_unescape
+                                (String.sub path 1 (String.length path - 1));
+                            ]
+                      | _ -> matches
+                    in
+                    match c.leaf with
+                    | Some (p, h) -> Some ((p, h), matches)
+                    | None -> None)))
+      end
 
 (* matchMethodAndPath matches the method and path. Receiver is a child of root. *)
 let match_method_and_path (n : 'h node option) method_ path =
   match n with
   | None -> None
   | Some n -> (
-    match match_path (find_child n method_) path [] with
-    | Some _ as r -> r
-    | None ->
-      let head_result =
-        if method_ = "HEAD" then match_path (find_child n "GET") path [] else None
-      in
-      (match head_result with
+      match match_path (find_child n method_) path [] with
       | Some _ as r -> r
-      | None -> match_path n.empty_child path []))
+      | None -> (
+          let head_result =
+            if method_ = "HEAD" then match_path (find_child n "GET") path []
+            else None
+          in
+          match head_result with
+          | Some _ as r -> r
+          | None -> match_path n.empty_child path []))
 
 let match_ root ~host ~method_ ~path =
   if host <> "" then
@@ -137,11 +153,11 @@ let matching_methods_path (n : 'h node option) path set =
   match n with
   | None -> ()
   | Some n ->
-    Mapping.each_pair n.children (fun method_ c ->
-        (match match_path (Some c) path [] with
-        | Some _ -> Hashtbl.replace set method_ true
-        | None -> ());
-        true)
+      Mapping.each_pair n.children (fun method_ c ->
+          (match match_path (Some c) path [] with
+          | Some _ -> Hashtbl.replace set method_ true
+          | None -> ());
+          true)
 
 let matching_methods root ~host ~path set =
   if host <> "" then matching_methods_path (find_child root host) path set;
@@ -169,12 +185,13 @@ let rec print_node n w level =
   let indent = String.concat "" (List.init level (fun _ -> "    ")) in
   (match n.leaf with
   | Some (p, _) ->
-    Buffer.add_string w (Printf.sprintf "%s%s\n" indent (go_quote (Pattern.to_string p)))
+      Buffer.add_string w
+        (Printf.sprintf "%s%s\n" indent (go_quote (Pattern.to_string p)))
   | None -> ());
   (match n.empty_child with
   | Some c ->
-    Buffer.add_string w (Printf.sprintf "%s%s:\n" indent (go_quote ""));
-    print_node c w (level + 1)
+      Buffer.add_string w (Printf.sprintf "%s%s:\n" indent (go_quote ""));
+      print_node c w (level + 1)
   | None -> ());
   let keys = ref [] in
   Mapping.each_pair n.children (fun k _ ->
@@ -184,12 +201,14 @@ let rec print_node n w level =
   List.iter
     (fun k ->
       Buffer.add_string w (Printf.sprintf "%s%s:\n" indent (go_quote k));
-      match Mapping.find n.children k with Some c -> print_node c w (level + 1) | None -> ())
+      match Mapping.find n.children k with
+      | Some c -> print_node c w (level + 1)
+      | None -> ())
     keys;
   match n.multi_child with
   | Some c ->
-    Buffer.add_string w (Printf.sprintf "%sMULTI:\n" indent);
-    print_node c w (level + 1)
+      Buffer.add_string w (Printf.sprintf "%sMULTI:\n" indent);
+      print_node c w (level + 1)
   | None -> ()
 
 let print root w = print_node root w 0
