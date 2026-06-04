@@ -11,24 +11,58 @@ exception Err_line_too_long
 exception Chunk_error of string
 (* malformed-chunk / framing errors carrying Go's message *)
 
+(* Handleable framing error variant (header / initial-parse boundary). The
+   legacy exceptions above stay for the mid-stream reader thunk (which keeps
+   raising, per Resolution #1) and for the [*_exn] shims. *)
+type error =
+  | Line_too_long
+  | Chunk of string
+
+let error_to_string = function
+  | Line_too_long -> "http: chunk line too long"
+  | Chunk msg -> msg
+
+(* Map a handleable [error] to its legacy exception (for shims / mid-stream
+   raises that thread the same identity). *)
+let exn_of_error = function
+  | Line_too_long -> Err_line_too_long
+  | Chunk msg -> Chunk_error msg
+
 let max_line_length = 4096
 
-(* parseHexUint. Returns the value; raises Chunk_error on bad input. *)
-let parse_hex_uint (v : string) : int64 =
-  if String.length v = 0 then raise (Chunk_error "empty hex number for chunk length");
-  let n = ref 0L in
-  String.iteri
-    (fun i c ->
-      let d =
-        if c >= '0' && c <= '9' then Char.code c - Char.code '0'
-        else if c >= 'a' && c <= 'f' then Char.code c - Char.code 'a' + 10
-        else if c >= 'A' && c <= 'F' then Char.code c - Char.code 'A' + 10
-        else raise (Chunk_error "invalid byte in chunk length")
-      in
-      if i = 16 then raise (Chunk_error "http chunk length too large");
-      n := Int64.logor (Int64.shift_left !n 4) (Int64.of_int d))
-    v;
-  !n
+(* parseHexUint. Returns the value as a result; [Error (Chunk _)] on bad input.
+   (The header/initial-parse boundary, so it returns [result] per the migration.) *)
+let parse_hex_uint (v : string) : (int64, error) result =
+  if String.length v = 0 then Error (Chunk "empty hex number for chunk length")
+  else begin
+    let n = ref 0L in
+    let err = ref None in
+    (try
+       String.iteri
+         (fun i c ->
+           let d =
+             if c >= '0' && c <= '9' then Char.code c - Char.code '0'
+             else if c >= 'a' && c <= 'f' then Char.code c - Char.code 'a' + 10
+             else if c >= 'A' && c <= 'F' then Char.code c - Char.code 'A' + 10
+             else begin
+               err := Some (Chunk "invalid byte in chunk length");
+               raise Exit
+             end
+           in
+           if i = 16 then begin
+             err := Some (Chunk "http chunk length too large");
+             raise Exit
+           end;
+           n := Int64.logor (Int64.shift_left !n 4) (Int64.of_int d))
+         v
+     with Exit -> ());
+    match !err with Some e -> Error e | None -> Ok !n
+  end
+
+(* Shim: [parse_hex_uint] raising the legacy [Chunk_error] (for mid-stream use
+   and not-yet-migrated callers). *)
+let parse_hex_uint_exn (v : string) : int64 =
+  match parse_hex_uint v with Ok n -> n | Error e -> raise (exn_of_error e)
 
 let is_ows_b b = b = ' ' || b = '\t'
 
@@ -98,7 +132,7 @@ let new_chunked_reader (ic : Lwt_io.input_channel) : unit -> string option Lwt.t
           excess := Int64.add !excess (Int64.of_int (String.length line + 2));
           let line = trim_trailing_whitespace line in
           let line = remove_chunk_extension line in
-          let n = parse_hex_uint line in
+          let n = parse_hex_uint_exn line in
           (* excess -= 16 + 2*n; clamp at 0; cap at 16KiB. *)
           excess := Int64.sub !excess (Int64.add 16L (Int64.mul 2L n));
           if Int64.compare !excess 0L < 0 then excess := 0L;

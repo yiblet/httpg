@@ -79,23 +79,24 @@ let test_chunk_ignores_extensions () =
     "extensions ignored" "hello, world! 0123456789abcdef"
     (read_chunked_all input)
 
-(* TestParseHexUint (the explicit error/value rows). *)
+(* TestParseHexUint (the explicit error/value rows). [parse_hex_uint] now
+   returns a [result] (header/initial-parse boundary). *)
 let test_parse_hex_uint () =
   let ok in_ want =
-    Alcotest.(check int64)
-      (Printf.sprintf "parseHexUint %S" in_)
-      want
-      (Transfer.parse_hex_uint in_)
+    match Transfer.parse_hex_uint in_ with
+    | Ok n -> Alcotest.(check int64) (Printf.sprintf "parseHexUint %S" in_) want n
+    | Error e -> Alcotest.failf "parseHexUint %S unexpected error %s" in_ (Transfer.error_to_string e)
   in
   let err in_ frag =
     match Transfer.parse_hex_uint in_ with
-    | exception Transfer.Chunk_error msg ->
+    | Error (Transfer.Chunk msg) ->
       Alcotest.(check bool)
         (Printf.sprintf "parseHexUint %S error contains %S (got %S)" in_ frag msg)
         true
         (let re = Str.regexp_string frag in
          try ignore (Str.search_forward re msg 0); true with Not_found -> false)
-    | n -> Alcotest.failf "parseHexUint %S = %Ld; want error %S" in_ n frag
+    | Error e -> Alcotest.failf "parseHexUint %S = Error %s; want %S" in_ (Transfer.error_to_string e) frag
+    | Ok n -> Alcotest.failf "parseHexUint %S = %Ld; want error %S" in_ n frag
   in
   err "x" "invalid byte in chunk length";
   ok "0000000000000000" 0L;
@@ -156,26 +157,49 @@ let test_incomplete_chunk () =
      at the 0-length chunk without consuming any trailing CRLF. *)
   Alcotest.(check string) "full valid stream" "abcdabc\r\n" (read_chunked_all valid)
 
-(* --- transfer.go: TestParseContentLength. *)
+(* --- transfer.go: TestParseContentLength. [parse_content_length] now returns
+   a [result] with a typed [Bad_content_length] arm. *)
 let test_parse_content_length () =
   let ok cl =
     match Transfer.parse_content_length [ cl ] with
-    | _ -> Alcotest.(check pass) (Printf.sprintf "CL %S ok" cl) () ()
-    | exception e -> Alcotest.failf "CL %S unexpected error %s" cl (Printexc.to_string e)
+    | Ok _ -> Alcotest.(check pass) (Printf.sprintf "CL %S ok" cl) () ()
+    | Error e -> Alcotest.failf "CL %S unexpected error %s" cl (Transfer.error_to_string e)
   in
-  let err cl what =
+  let err cl =
     match Transfer.parse_content_length [ cl ] with
-    | n -> Alcotest.failf "CL %S = %Ld; want error %S" cl n what
-    | exception Transfer.Bad_string_error (w, v) ->
-      Alcotest.(check string) (Printf.sprintf "CL %S error what" cl) what w;
+    | Ok n -> Alcotest.failf "CL %S = %Ld; want error" cl n
+    | Error (Transfer.Bad_content_length v) ->
       Alcotest.(check string) (Printf.sprintf "CL %S error value" cl) cl v
+    | Error e -> Alcotest.failf "CL %S = Error %s; want Bad_content_length" cl (Transfer.error_to_string e)
   in
-  err "" "invalid empty Content-Length";
+  err "";
   ok "3";
-  err "+3" "bad Content-Length";
-  err "-3" "bad Content-Length";
+  err "+3";
+  err "-3";
   ok "9223372036854775807";
-  err "9223372036854775808" "bad Content-Length"
+  err "9223372036854775808"
+
+(* Plan success criterion: parse_content_length returns a typed result. *)
+let test_parse_content_length_result () =
+  (match Transfer.parse_content_length [ "x" ] with
+  | Error (Transfer.Bad_content_length "x") -> Alcotest.(check pass) "\"x\" -> Bad_content_length" () ()
+  | other ->
+    Alcotest.failf "\"x\" -> %s; want Error (Bad_content_length \"x\")"
+      (match other with Ok n -> Printf.sprintf "Ok %Ld" n | Error e -> "Error " ^ Transfer.error_to_string e));
+  (match Transfer.parse_content_length [ "42" ] with
+  | Ok 42L -> Alcotest.(check pass) "\"42\" -> Ok 42" () ()
+  | other ->
+    Alcotest.failf "\"42\" -> %s; want Ok 42"
+      (match other with Ok n -> Printf.sprintf "Ok %Ld" n | Error e -> "Error " ^ Transfer.error_to_string e));
+  (* Conflicting lengths surface through fix_length (the dedup/conflict check). *)
+  let h = Header.create () in
+  Hashtbl.replace h "Content-Length" [ "5"; "6" ];
+  match
+    Transfer.fix_length ~is_response:false ~status:200 ~request_method:"POST" ~header:h ~chunked:false
+  with
+  | Error (Transfer.Chunk _) -> Alcotest.(check pass) "conflicting CL -> Error (Chunk _)" () ()
+  | Error e -> Alcotest.failf "conflicting CL -> Error %s; want Chunk" (Transfer.error_to_string e)
+  | Ok n -> Alcotest.failf "conflicting CL = Ok %Ld; want Error" n
 
 (* --- transfer.go: TestParseTransferEncoding (the error/ok rows). *)
 let test_parse_transfer_encoding () =
@@ -187,26 +211,28 @@ let test_parse_transfer_encoding () =
   in
   let err te frag =
     match run te with
-    | exception Transfer.Chunk_error msg ->
+    | Error e ->
+      let msg = Transfer.error_to_string e in
       Alcotest.(check bool)
         (Printf.sprintf "TE %s error contains %S (got %S)" (String.concat "," te) frag msg)
         true
         (let re = Str.regexp_string frag in
          try ignore (Str.search_forward re msg 0); true with Not_found -> false)
-    | b -> Alcotest.failf "TE %s = %b; want error" (String.concat "," te) b
+    | Ok b -> Alcotest.failf "TE %s = %b; want error" (String.concat "," te) b
   in
   err [ "fugazi" ] "unsupported transfer encoding";
   err [ "chunked, chunked"; "identity"; "chunked" ] "too many transfer encodings";
   err [ "" ] "unsupported transfer encoding";
   err [ "chunked, identity" ] "unsupported transfer encoding";
   err [ "chunked"; "identity" ] "too many transfer encodings";
-  (* "chunked" alone -> true, no error. *)
-  Alcotest.(check bool) "chunked alone -> true" true (run [ "chunked" ]);
+  (* "chunked" alone -> Ok true, no error. *)
+  Alcotest.(check bool) "chunked alone -> true" true
+    (match run [ "chunked" ] with Ok b -> b | Error _ -> false);
   (* HTTP/1.0 ignores Transfer-Encoding entirely (Issue 12785). *)
   let h = Header.create () in
   Hashtbl.replace h "Transfer-Encoding" [ "chunked" ];
   Alcotest.(check bool) "HTTP/1.0 ignores TE" false
-    (Transfer.parse_transfer_encoding ~major:1 ~minor:0 ~header:h)
+    (match Transfer.parse_transfer_encoding ~major:1 ~minor:0 ~header:h with Ok b -> b | Error _ -> true)
 
 (* --- fix_length: status/method/version-driven length rules. *)
 let test_fix_length () =
@@ -216,8 +242,9 @@ let test_fix_length () =
     h
   in
   let check name ~is_response ~status ~request_method ~header ~chunked expected =
-    let got = Transfer.fix_length ~is_response ~status ~request_method ~header ~chunked in
-    Alcotest.(check int64) name expected got
+    match Transfer.fix_length ~is_response ~status ~request_method ~header ~chunked with
+    | Ok got -> Alcotest.(check int64) name expected got
+    | Error e -> Alcotest.failf "%s: unexpected error %s" name (Transfer.error_to_string e)
   in
   (* HEAD response: always 0. *)
   check "HEAD response -> 0" ~is_response:true ~status:200 ~request_method:"HEAD"
@@ -256,8 +283,9 @@ let test_fix_length () =
      Transfer.fix_length ~is_response:false ~status:200 ~request_method:"POST" ~header:hc
        ~chunked:false
    with
-  | n -> Alcotest.failf "conflicting CL = %Ld; want error" n
-  | exception Transfer.Chunk_error _ -> Alcotest.(check pass) "conflicting CL errors" () ())
+  | Ok n -> Alcotest.failf "conflicting CL = %Ld; want error" n
+  | Error (Transfer.Chunk _) -> Alcotest.(check pass) "conflicting CL errors" () ()
+  | Error e -> Alcotest.failf "conflicting CL = Error %s; want Chunk" (Transfer.error_to_string e))
 
 (* --- should_close: version-sensitive connection management. *)
 let test_should_close () =
@@ -289,20 +317,22 @@ let test_fix_trailer () =
   in
   (* not chunked -> None (and Trailer kept in header). *)
   Alcotest.(check bool) "trailer ignored when not chunked" true
-    (Transfer.fix_trailer ~header:(mk_tr "Md5") ~chunked:false = None);
+    (Transfer.fix_trailer ~header:(mk_tr "Md5") ~chunked:false = Ok None);
   (* chunked: parses canonical keys. *)
   let h = mk_tr "md5, Some-Other" in
   (match Transfer.fix_trailer ~header:h ~chunked:true with
-  | Some tr ->
+  | Ok (Some tr) ->
     Alcotest.(check bool) "Trailer header deleted" false (Header.has h "Trailer");
     Alcotest.(check bool) "trailer has Md5" true (Hashtbl.mem tr "Md5");
     Alcotest.(check bool) "trailer has Some-Other" true (Hashtbl.mem tr "Some-Other")
-  | None -> Alcotest.fail "expected a trailer");
+  | Ok None -> Alcotest.fail "expected a trailer"
+  | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e));
   (* forbidden trailer key -> error. *)
   (match Transfer.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true with
-  | _ -> Alcotest.fail "expected bad trailer key error"
-  | exception Transfer.Bad_string_error (w, _) ->
-    Alcotest.(check string) "bad trailer key" "bad trailer key" w)
+  | Ok _ -> Alcotest.fail "expected bad trailer key error"
+  | Error (Transfer.Bad_header (w, _)) ->
+    Alcotest.(check string) "bad trailer key" "bad trailer key" w
+  | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e))
 
 (* --- write_body: representative transferWriter rows
    (TestTransferWriterWriteBodyReaderTypes analogue). We assert the wire bytes
@@ -406,9 +436,11 @@ let test_read_transfer_chunked () =
   let got =
     Lwt_main.run
       (let ic = ic_of_string body_bytes in
-       Lwt.bind (Transfer.read_transfer msg ic) (fun r ->
+       Lwt.bind (Transfer.read_transfer msg ic) (function
+         | Ok r ->
            Alcotest.(check bool) "is_chunked" true r.Transfer.is_chunked;
-           Body.read_all r.Transfer.body))
+           Body.read_all r.Transfer.body
+         | Error e -> Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)))
   in
   Alcotest.(check string) "chunked body decoded" "Body here\ncontinued" got
 
@@ -430,11 +462,63 @@ let test_read_transfer_content_length () =
   let got =
     Lwt_main.run
       (let ic = ic_of_string "hello world" in
-       Lwt.bind (Transfer.read_transfer msg ic) (fun r ->
+       Lwt.bind (Transfer.read_transfer msg ic) (function
+         | Ok r ->
            Alcotest.(check int64) "content_length" 5L r.Transfer.content_length;
-           Body.read_all r.Transfer.body))
+           Body.read_all r.Transfer.body
+         | Error e -> Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)))
   in
   Alcotest.(check string) "content-length body" "hello" got
+
+(* read_transfer over an Lwt_io pipe: a boundary framing error (unsupported
+   transfer encoding) short-circuits to [Error]; a bad chunk-size discovered
+   mid-stream (after read_transfer returned [Ok], inside the Body.Stream thunk)
+   keeps raising [Chunk_error] — the documented mid-stream policy (Resolution
+   #1). Bounded by Net.with_timeout so a hang fails instead of blocking. *)
+let test_read_transfer_bad_chunk () =
+  let mk_msg header =
+    {
+      Transfer.is_response = false;
+      header;
+      status_code = 200;
+      request_method = "POST";
+      proto_major = 1;
+      proto_minor = 1;
+      close = false;
+    }
+  in
+  Lwt_main.run
+    (Net.with_timeout 5.0
+       (let open Lwt.Infix in
+        (* (a) Boundary error: unsupported transfer encoding -> Error. *)
+        let h_bad_te = Header.create () in
+        Hashtbl.replace h_bad_te "Transfer-Encoding" [ "fugazi" ];
+        let ic_a = ic_of_string "" in
+        Transfer.read_transfer (mk_msg h_bad_te) ic_a >>= fun res_a ->
+        (match res_a with
+        | Error (Transfer.Unsupported_transfer_encoding "fugazi") ->
+          Alcotest.(check pass) "unsupported TE -> Error" () ()
+        | Error e ->
+          Alcotest.failf "unsupported TE -> Error %s; want Unsupported_transfer_encoding"
+            (Transfer.error_to_string e)
+        | Ok _ -> Alcotest.fail "unsupported TE -> Ok; want Error");
+        (* (b) Mid-stream bad chunk size: read_transfer returns Ok, the body
+           Stream thunk raises Chunk_error when it parses the bad hex size. *)
+        let h_chunked = Header.create () in
+        Hashtbl.replace h_chunked "Transfer-Encoding" [ "chunked" ];
+        let ic_b = ic_of_string "zz\r\nnope\r\n0\r\n\r\n" in
+        Transfer.read_transfer (mk_msg h_chunked) ic_b >>= function
+        | Error e ->
+          Alcotest.failf "chunked read_transfer boundary -> Error %s; want Ok"
+            (Transfer.error_to_string e)
+        | Ok r ->
+          Lwt.catch
+            (fun () ->
+              Body.read_all r.Transfer.body >|= fun got ->
+              Alcotest.failf "bad chunk size mid-stream parsed %S; want raise" got)
+            (function
+              | Transfer.Chunk_error _ -> Alcotest.(check pass) "bad chunk -> mid-stream raise" () (); Lwt.return_unit
+              | e -> Lwt.fail e)))
 
 let tests =
   [
@@ -446,6 +530,7 @@ let tests =
     ("chunk_read_partial", `Quick, test_chunk_read_partial);
     ("incomplete_chunk", `Quick, test_incomplete_chunk);
     ("parse_content_length", `Quick, test_parse_content_length);
+    ("parse_content_length_result", `Quick, test_parse_content_length_result);
     ("parse_transfer_encoding", `Quick, test_parse_transfer_encoding);
     ("fix_length", `Quick, test_fix_length);
     ("should_close", `Quick, test_should_close);
@@ -458,4 +543,5 @@ let tests =
     ("write_body_fixed_stream_mismatch", `Quick, test_write_body_fixed_stream_mismatch);
     ("read_transfer_chunked", `Quick, test_read_transfer_chunked);
     ("read_transfer_content_length", `Quick, test_read_transfer_content_length);
+    ("read_transfer_bad_chunk", `Quick, test_read_transfer_bad_chunk);
   ]

@@ -1,22 +1,48 @@
 (* Port of go/src/net/http/transfer.go and
    go/src/net/http/internal/chunked.go: HTTP/1.x wire framing. *)
 
-(** internal.ErrLineTooLong: a chunk header / line exceeded [max_line_length]. *)
+(** internal.ErrLineTooLong: a chunk header / line exceeded [max_line_length].
+    Retained for the {b mid-stream} body thunk (which keeps raising) and for the
+    [*_exn] shims; the handleable boundary error is {!error} below. *)
 exception Err_line_too_long
 
-(** A malformed-chunk or framing error, carrying Go's message text. *)
+(** A malformed-chunk or framing error, carrying Go's message text. Retained for
+    the {b mid-stream} body thunk and the [*_exn] shims (see {!error}). *)
 exception Chunk_error of string
 
-(** [badStringError(what, value)]: rendered as ["what: value"]. *)
+(** [badStringError(what, value)]: rendered as ["what: value"]. Retained for the
+    [*_exn] shims (see {!error}). *)
 exception Bad_string_error of string * string
+
+(** Handleable framing error at the {b header / initial-parse} boundary
+    (Result-migration Ticket 4). The exceptions above are the {b mid-stream}
+    analogue: errors discovered inside a {!Body.t} [Stream] thunk {b after}
+    {!read_transfer} returned [Ok] keep {b raising} (the faithful analogue of
+    Go's "a later [Read] returns an error" — see {!read_transfer}). Only the
+    initial-parse boundary returns [result]. *)
+type error =
+  | Line_too_long
+  | Chunk of string  (** from {!Chunk_error} (malformed chunk / framing) *)
+  | Bad_content_length of string  (** invalid / conflicting Content-Length value *)
+  | Unsupported_transfer_encoding of string
+  | Bad_header of string * string  (** was [Bad_string_error (what, value)] *)
+  | Unexpected_eof
+
+(** Render an {!error} as its Go message text. *)
+val error_to_string : error -> string
 
 (** [internal.maxLineLength] (4096). *)
 val max_line_length : int
 
 (* --- Chunked codec (internal/chunked.go). --- *)
 
-(** [parseHexUint]: parse a hex chunk length. Raises {!Chunk_error}. *)
-val parse_hex_uint : string -> int64
+(** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] /
+    [Error Line_too_long] on bad input (header/initial-parse boundary). *)
+val parse_hex_uint : string -> (int64, error) result
+
+(** Shim: {!parse_hex_uint} raising {!Chunk_error} (mid-stream / not-yet-migrated
+    callers). *)
+val parse_hex_uint_exn : string -> int64
 
 (** [new_chunked_reader ic] is [internal.NewChunkedReader]: a pull function
     returning successive decoded chunk payloads and finally [None] at the
@@ -48,13 +74,28 @@ val no_response_body_expected : string -> bool
 (** [bodyAllowedForStatus] (RFC 7230 3.3): 1xx, 204 and 304 forbid a body. *)
 val body_allowed_for_status : int -> bool
 
-(** [parseContentLength]: [-1] if unset, else the parsed value. Raises
-    {!Bad_string_error} on an invalid value. *)
-val parse_content_length : string list -> int64
+(** [parseContentLength]: [Ok (-1L)] if unset, else the parsed value;
+    [Error (Bad_content_length _)] on an invalid value. *)
+val parse_content_length : string list -> (int64, error) result
+
+(** Shim: {!parse_content_length} raising {!Bad_string_error} (preserving Go's
+    two [what] strings: ["invalid empty Content-Length"] vs
+    ["bad Content-Length"]). *)
+val parse_content_length_exn : string list -> int64
 
 (** [fixLength]: the expected body length per RFC 7230 3.3. Version-sensitive
-    via [chunked]. Mutates [header] (dedup / delete Content-Length) as Go does. *)
+    via [chunked]. Mutates [header] (dedup / delete Content-Length) as Go does.
+    [Error] on conflicting / invalid Content-Length (header-parse boundary). *)
 val fix_length :
+  is_response:bool ->
+  status:int ->
+  request_method:string ->
+  header:Header.t ->
+  chunked:bool ->
+  (int64, error) result
+
+(** Shim: {!fix_length} raising the legacy exceptions. *)
+val fix_length_exn :
   is_response:bool ->
   status:int ->
   request_method:string ->
@@ -69,15 +110,22 @@ val should_close :
   major:int -> minor:int -> header:Header.t -> remove_close_header:bool -> bool
 
 (** [fixTrailer]: parse the [Trailer] header into a trailer header (keys with
-    empty value lists). Returns [None] when not chunked or no usable trailer.
-    Mutates [header] (deletes [Trailer]). Raises {!Bad_string_error} on a bad
+    empty value lists). Returns [Ok None] when not chunked or no usable trailer.
+    Mutates [header] (deletes [Trailer]). [Error (Bad_header _)] on a forbidden
     trailer key. *)
-val fix_trailer : header:Header.t -> chunked:bool -> Header.t option
+val fix_trailer : header:Header.t -> chunked:bool -> (Header.t option, error) result
+
+(** Shim: {!fix_trailer} raising {!Bad_string_error}. *)
+val fix_trailer_exn : header:Header.t -> chunked:bool -> Header.t option
 
 (** [parse_transfer_encoding]: returns whether the message is chunked.
     HTTP/1.0 ignores Transfer-Encoding (Issue 12785). Mutates [header] (deletes
-    Transfer-Encoding). Raises {!Chunk_error} for unsupported encodings. *)
-val parse_transfer_encoding : major:int -> minor:int -> header:Header.t -> bool
+    Transfer-Encoding). [Error (Unsupported_transfer_encoding _)] /
+    [Error (Chunk _)] for unsupported / too-many encodings. *)
+val parse_transfer_encoding : major:int -> minor:int -> header:Header.t -> (bool, error) result
+
+(** Shim: {!parse_transfer_encoding} raising {!Chunk_error}. *)
+val parse_transfer_encoding_exn : major:int -> minor:int -> header:Header.t -> bool
 
 (* --- read_transfer. --- *)
 
@@ -103,8 +151,20 @@ type result = {
 }
 
 (** [read_transfer msg ic] is [readTransfer]: parse framing from [ic] and
-    produce the body reader and derived fields. *)
-val read_transfer : message -> Lwt_io.input_channel -> result Lwt.t
+    produce the body reader and derived fields.
+
+    Header / initial-parse framing errors short-circuit as
+    [Error error]. {b Mid-stream policy (Resolution #1):} the returned
+    {!result.body}, a {!Body.t} [Stream], {b raises} {!Chunk_error} /
+    {!Err_line_too_long} on a malformed body discovered {b after} this returned
+    [Ok] — the faithful analogue of Go's later-[Read]-error model. Only this
+    boundary returns [result]; the stream thunk is {b not} result-ified. *)
+val read_transfer :
+  message -> Lwt_io.input_channel -> (result, error) Stdlib.result Lwt.t
+
+(** Shim: {!read_transfer} raising the legacy exceptions (consumed by {!Io}
+    until Ticket 5 migrates it off the shim). *)
+val read_transfer_exn : message -> Lwt_io.input_channel -> result Lwt.t
 
 (* --- write_body. --- *)
 

@@ -393,7 +393,7 @@ TEST_EXIT=0
 (`refactor(errors): hpack/hpack_huffman decode return result (Result migration T3)`).
 
 ### Ticket 4 — Transfer framing → `Lwt_result` (transfer, internal/chunked)
-Status: Planned
+Status: Done
 
 **A) Scope**
 First Lwt/IO conversion: `Transfer` + `Gohttp_internal.Chunked` parse/frame functions return `result`/`result Lwt.t` with `Transfer.error`. Resolve the **mid-stream body error** decision (Areas of Uncertainty #1) and the **`Transfer.result` name** (#2).
@@ -432,7 +432,103 @@ Internally compose with `open Lwt_result.Syntax` (`let*`) so the first framing e
 `dune build` clean; `dune test` (incl. `Transfer` suite) passes; mid-stream policy noted in plan + `.mli` comments.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done. First Lwt/IO conversion. Decisions **#1 (mid-stream)** and
+**#2 (name clash)** were both honored — see below.
+
+**Error types introduced:**
+- **`Gohttp_internal.Chunked.error`** (`chunked.mli`): `Line_too_long | Chunk of string`
+  + `error_to_string`. `parse_hex_uint : string -> (int64, error) result` (was
+  raising). Internal `exn_of_error` maps back to the legacy exceptions for shims
+  / mid-stream raises.
+- **`Transfer.error`** (`transfer.mli`):
+  ```
+  type error =
+    | Line_too_long
+    | Chunk of string
+    | Bad_content_length of string
+    | Unsupported_transfer_encoding of string
+    | Bad_header of string * string   (* was Bad_string_error (what, value) *)
+    | Unexpected_eof
+  ```
+  + `error_to_string` + internal `exn_of_error`.
+
+**Functions converted to `result` (header / initial-parse boundary):**
+- `Chunked.parse_hex_uint` → `(int64, error) result`.
+- `Transfer.parse_hex_uint` (re-export) → `(int64, error) result` (maps
+  `Chunked.error` → `Transfer.error`).
+- `Transfer.parse_content_length` → `(int64, error) result`
+  (`Error (Bad_content_length _)`).
+- `Transfer.fix_length` → `(int64, error) result` (conflicting/invalid CL →
+  `Error`); composes internally with `Result.bind`.
+- `Transfer.fix_trailer` → `(Header.t option, error) result`
+  (`Error (Bad_header _)`).
+- `Transfer.parse_transfer_encoding` → `(bool, error) result`
+  (`Unsupported_transfer_encoding` / `Chunk` for too-many).
+- `Transfer.read_transfer` → `(result, error) Stdlib.result Lwt.t` (the success
+  payload is the **existing `result` record** — name clash avoided per #2; the
+  body composes the boundary steps with `open Lwt_result.Syntax` `let*` so the
+  first framing error short-circuits, using `Lwt_result.lift`).
+
+**Decision #2 (name clash) honored:** the pre-existing `Transfer.result` record
+(`{ body; content_length; is_chunked; result_close; trailer }`) is **untouched**;
+the variant is named `error`; result-returning sigs are written
+`(_, error) result` / `(result, error) Stdlib.result Lwt.t` so neither
+`Transfer.result` nor `Stdlib.result` is shadowed.
+
+**Decision #1 (mid-stream) honored:** the `Body.Stream` thunks built by
+`read_transfer` (chunked reader, fixed-length, close-delimited) **keep raising**
+`Chunk_error` / `Err_line_too_long` on a malformed body discovered *after*
+`read_transfer` returned `Ok` — the faithful analogue of Go's "a later `Read`
+returns an error". Only the initial-parse boundary returns `result`. The
+`new_chunked_reader` thunk internally calls `Chunked.parse_hex_uint_exn` (the
+raising shim) for exactly this reason. Policy documented in `transfer.mli`
+(`read_transfer`, `parse_hex_uint`, the `error` type) and `chunked.mli`.
+
+**Shims added (legacy exceptions, for not-yet-migrated callers — deleted in
+Tickets 5/7):** `Chunked.parse_hex_uint_exn`; `Transfer.parse_hex_uint_exn`,
+`parse_content_length_exn` (preserves Go's two `badStringError` `what` strings),
+`fix_length_exn`, `fix_trailer_exn`, `parse_transfer_encoding_exn`,
+`read_transfer_exn`. The legacy `exception`s (`Err_line_too_long`, `Chunk_error`,
+`Bad_string_error`) are kept for the shims + mid-stream raises.
+
+**Callers updated:** `lib/io.ml` (the only non-test consumer of `read_transfer`)
+switched its two call sites to `Transfer.read_transfer_exn` (Ticket 5 migrates it
+to the `result` API and drops the shim). No other `lib/` caller uses the
+converted functions (`server.ml`/`httptest.ml` use unrelated helpers).
+
+**Tests (`test/test_transfer.ml`, `Transfer` suite):**
+- Ported existing assertions to the `result`/typed-arm API: `parse_hex_uint`,
+  `parse_content_length`, `parse_transfer_encoding`, `fix_length`, `fix_trailer`,
+  `read_transfer_chunked`, `read_transfer_content_length` now match on `Ok`/`Error`
+  and the typed arms (fixing the tests to the new impl, not the reverse).
+- **Named tests added + registered** (`Transfer` suite is aggregated in
+  `test/test_gohttp.ml`):
+  - `Transfer.parse_content_length_result` (**plan success criterion**) —
+    `["x"]` → `Error (Bad_content_length "x")`; `["42"]` → `Ok 42L`; conflicting
+    `["5";"6"]` via `fix_length` → `Error (Chunk _)`.
+  - `Transfer.read_transfer_bad_chunk` — over an `Lwt_io` pipe (bounded by
+    `Net.with_timeout 5.0`): a boundary error (unsupported TE) →
+    `Error (Unsupported_transfer_encoding "fugazi")`; a bad chunk size discovered
+    **mid-stream** (after `read_transfer` returned `Ok`, inside the `Body.Stream`
+    thunk) **raises** `Chunk_error` — exercising both the boundary `result` and
+    the documented mid-stream raise (decision #1).
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+=== BUILD EXIT: 0 ===
+$ dune test --root <worktree> --force
+Test Successful in 1.850s. 496 tests run.
+=== TEST EXIT: 0 ===
+```
+(Baseline before the change: build exit 0, 494 tests. Net +2 named tests.)
+Spot-check (`Transfer` suite): `parse_content_length_result [OK]`,
+`read_transfer_bad_chunk [OK]`, `parse_hex_uint [OK]`, `parse_transfer_encoding
+[OK]`, `fix_length [OK]`, `fix_trailer [OK]`.
+
+**Commit id:** jj change **`snwuuysp`** (canonical, stable id)
+(`refactor(errors): transfer/chunked framing return result (Result migration T4)`).
 
 ### Ticket 5 — Message read/write → `Lwt_result` (io)
 Status: Planned

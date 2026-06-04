@@ -230,7 +230,7 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
                 close;
               }
             in
-            Transfer.read_transfer msg ic >>= fun res ->
+            Transfer.read_transfer_exn msg ic >>= fun res ->
             (* ReadRequest deletes the Host header. *)
             Header.del header "Host";
             (* Build the record first with the declared trailer; the streaming
@@ -323,7 +323,7 @@ let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channe
             close = false;
           }
         in
-        Transfer.read_transfer msg ic >>= fun res ->
+        Transfer.read_transfer_exn msg ic >>= fun res ->
         (* Build the record first with the declared trailer; the streaming
            body's EOF action mutates [resp.trailer] on the chunked trailer read
            (Go's mergeSetHeader onto rr.Trailer). *)
