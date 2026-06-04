@@ -46,7 +46,11 @@ let huffman_roundtrip () =
   List.iter
     (fun s ->
       let enc = H.encode s in
-      let dec = H.decode enc in
+      let dec =
+        match H.decode enc with
+        | Ok d -> d
+        | Error _ -> Alcotest.failf "roundtrip %S: unexpected decode error" s
+      in
       Alcotest.(check string)
         (Printf.sprintf "roundtrip %S" s)
         s dec;
@@ -63,13 +67,14 @@ let huffman_rfc_vector () =
     (Printf.sprintf "C.4.1 encode (got %s)" (to_hex enc))
     expected enc;
   Alcotest.(check string)
-    "C.4.1 decode" "www.example.com" (H.decode expected)
+    "C.4.1 decode" "www.example.com" (Result.get_ok (H.decode expected))
 
 (* RFC 7541 C.4.2: "no-cache" -> a8eb1064 9cbf *)
 let huffman_rfc_vector2 () =
   let expected = of_hex "a8eb10649cbf" in
   Alcotest.(check string) "C.4.2 encode" expected (H.encode "no-cache");
-  Alcotest.(check string) "C.4.2 decode" "no-cache" (H.decode expected)
+  Alcotest.(check string) "C.4.2 decode" "no-cache"
+    (Result.get_ok (H.decode expected))
 
 let huffman_decode_invalid () =
   (* Overlong padding: a full 0xff byte cannot be valid EOS padding because the
@@ -83,11 +88,24 @@ let huffman_decode_invalid () =
   in
   List.iter
     (fun s ->
-      Alcotest.check_raises
-        (Printf.sprintf "invalid huffman %s" (to_hex s))
-        H.Invalid_huffman
-        (fun () -> ignore (H.decode s)))
+      match H.decode s with
+      | Error H.Invalid_huffman -> ()
+      | Ok _ ->
+          Alcotest.failf "invalid huffman %s: expected Error, got Ok"
+            (to_hex s))
     bad_cases
+
+(* Named test (Result migration T3): invalid Huffman input -> Error; a valid
+   round-trip -> Ok. *)
+let decode_invalid () =
+  (match H.decode "\xff\xff\xff\xff" with
+   | Error H.Invalid_huffman -> ()
+   | Ok _ -> Alcotest.fail "expected Error Invalid_huffman");
+  let enc = H.encode "www.example.com" in
+  match H.decode enc with
+  | Ok "www.example.com" -> ()
+  | Ok other -> Alcotest.failf "round-trip mismatch: %S" other
+  | Error _ -> Alcotest.fail "valid round-trip unexpectedly Error"
 
 (* ---- Static table ---- *)
 
@@ -259,6 +277,7 @@ let tests =
     ("huffman_rfc_vector_C41", `Quick, huffman_rfc_vector);
     ("huffman_rfc_vector_C42", `Quick, huffman_rfc_vector2);
     ("huffman_decode_invalid", `Quick, huffman_decode_invalid);
+    ("huffman_decode_invalid_result", `Quick, decode_invalid);
     ("static_lookup_by_index", `Quick, static_lookup_by_index);
     ("static_search", `Quick, static_search_cases);
     ("dynamic_table_search", `Quick, dynamic_table_search);

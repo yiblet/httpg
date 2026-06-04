@@ -1,7 +1,13 @@
 (* Port of golang.org/x/net/http2/hpack/huffman.go (plus the [huffmanCodes]
    and [huffmanCodeLen] arrays from tables.go). Pure, no IO. *)
 
-exception Invalid_huffman
+type error = Invalid_huffman
+
+let error_to_string = function Invalid_huffman -> "invalid Huffman-coded data"
+
+(* Internal sentinel used by the decoder loop to bail out to the [result]
+   boundary. Not exposed; mapped to [Error Invalid_huffman] by {!decode}. *)
+exception Invalid_huffman_exn
 
 (* Go: var huffmanCodes = [256]uint32{...} (tables.go) *)
 let huffman_codes =
@@ -106,8 +112,10 @@ let build_root_huffman_node () =
 
 let root_huffman_node = lazy (build_root_huffman_node ())
 
-(* Go: huffmanDecode (maxLen = 0, i.e. unlimited). *)
-let decode (v : string) : string =
+(* Go: huffmanDecode (maxLen = 0, i.e. unlimited). Raises the internal
+   [Invalid_huffman_exn] sentinel on invalid data; {!decode} maps it to a
+   [result]. *)
+let huffman_decode (v : string) : string =
   let root = Lazy.force root_huffman_node in
   let buf = Buffer.create (String.length v) in
   let n = ref root in
@@ -122,7 +130,7 @@ let decode (v : string) : string =
       while !cbits >= 8 do
         let idx = (!cur lsr (!cbits - 8)) land 0xff in
         (match !n.children.(idx) with
-         | None -> raise Invalid_huffman
+         | None -> raise Invalid_huffman_exn
          | Some child -> n := child);
         if is_leaf !n then begin
           Buffer.add_char buf (Char.chr !n.sym);
@@ -137,7 +145,7 @@ let decode (v : string) : string =
      while !cbits > 0 do
        let idx = (!cur lsl (8 - !cbits)) land 0xff in
        (match !n.children.(idx) with
-        | None -> raise Invalid_huffman
+        | None -> raise Invalid_huffman_exn
         | Some child -> n := child);
        if (not (is_leaf !n)) || !n.code_len > !cbits then raise Exit;
        Buffer.add_char buf (Char.chr !n.sym);
@@ -148,12 +156,19 @@ let decode (v : string) : string =
    with Exit -> ());
   if !sbits > 7 then
     (* Either an incomplete symbol, or overlong padding. *)
-    raise Invalid_huffman;
+    raise Invalid_huffman_exn;
   let mask = (1 lsl !cbits) - 1 in
   if !cur land mask <> mask then
     (* Trailing bits must be a prefix of EOS. *)
-    raise Invalid_huffman;
+    raise Invalid_huffman_exn;
   Buffer.contents buf
+
+let decode (v : string) : (string, error) result =
+  try Ok (huffman_decode v) with Invalid_huffman_exn -> Error Invalid_huffman
+
+(* Shim: raises on invalid data. Removed once HTTP/2 callers migrate (T7). *)
+let decode_exn (v : string) : string =
+  match decode v with Ok s -> s | Error Invalid_huffman -> raise Invalid_huffman_exn
 
 (* Go: AppendHuffmanString (starting from an empty dst). Uses 64-bit
    arithmetic faithfully via Int64; max code length is 30 so an Int64 buffer

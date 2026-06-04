@@ -15,29 +15,34 @@ type header_field = Hpack_tables.header_field = {
     the first byte are left zero (the caller ORs in any flag). *)
 val append_var_int : Buffer.t -> int -> int -> unit
 
-(** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos]
-    of [s]. Returns [Ok (value, next_pos)]. Mirrors Go's [readVarInt].
-    [n] must be 1..8. *)
-val read_var_int : int -> string -> int -> (int * int, exn) result
-
 (* ---- decoder errors ---- *)
 
-(** An error the spec defines as a decoding error. Mirrors Go's
-    [DecodingError]. *)
-exception Decoding_error of string
+(** A handleable HPACK decode error. The arms mirror Go's [DecodingError]
+    ([Decoding]), [InvalidIndexError] ([Invalid_indexed]), [ErrStringLength]
+    ([String_too_long]), [ErrInvalidHuffman] (propagated from
+    {!Hpack_huffman} as [Invalid_huffman]) and the varint-overflow
+    [DecodingError] ([Var_int_overflow]). *)
+type error =
+  | Decoding of string
+  | Invalid_indexed of int
+  | String_too_long
+  | Invalid_huffman
+  | Var_int_overflow
 
-(** Raised when an encoder references a table entry before the static table
-    or after the end of the dynamic table. Mirrors Go's [InvalidIndexError]
-    (wrapped in a [DecodingError] in Go). *)
-exception Invalid_indexed of int
+(** Renders {!error} as a human-readable string. *)
+val error_to_string : error -> string
 
-(** Raised by {!write} when the configured max string length would be
-    violated. Mirrors Go's [ErrStringLength]. *)
-exception String_too_long
+(** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos]
+    of [s]. Returns [Ok (value, next_pos)] or [Error Var_int_overflow].
+    Mirrors Go's [readVarInt]. [n] must be 1..8 (raises [Invalid_argument]
+    otherwise — a programmer error). Raises the internal {!Need_more}
+    sentinel when [s] is truncated (see below). *)
+val read_var_int : int -> string -> int -> (int * int, error) result
 
-(** Internal sentinel: the buffer is truncated and more data is needed.
-    Surfaced via {!read_var_int}'s [Error] result. Mirrors Go's
-    [errNeedMore]. *)
+(** Internal control-flow sentinel: the buffer is truncated and more data is
+    needed. Mirrors Go's [errNeedMore]. {b Unhandleable / internal only} —
+    used by the decoder's incremental {!write} loop to save partial input;
+    it is never a caller-visible error and is not part of {!error}. *)
 exception Need_more
 
 (* ===================== Encoder ===================== *)
@@ -115,14 +120,23 @@ val set_allowed_max_dynamic_table_size : decoder -> int -> unit
 (** [write d p] parses as much of [p] as possible, emitting fields. Returns
     the number of bytes of [p] consumed into the decoder (= [length p], as
     in Go: any unparsed tail is saved internally). Raises on a fatal
-    decoding error. Mirrors Go's [Decoder.Write]. *)
+    decoding error (the legacy decode exceptions); the incremental,
+    raise-based contract is retained for HTTP/2 callers until T7. The
+    [result] boundary is {!decode_full}. Mirrors Go's [Decoder.Write]. *)
 val write : decoder -> string -> int
 
 (** [close d] declares the current header block complete and resets for
-    reuse. Raises {!Decoding_error} if data remains buffered (truncated
-    headers). Mirrors Go's [Decoder.Close]. *)
+    reuse. Raises on truncated headers (legacy decode exception); the
+    [result] boundary is {!decode_full}. Mirrors Go's [Decoder.Close]. *)
 val close : decoder -> unit
 
 (** [decode_full d p] decodes the whole block [p] into a header-field list.
-    Mirrors Go's [DecodeFull]. *)
-val decode_full : decoder -> string -> header_field list
+    Returns [Error] on a handleable decode error (invalid index, truncated
+    headers, oversized string, invalid Huffman, varint overflow). Mirrors
+    Go's [DecodeFull]. *)
+val decode_full : decoder -> string -> (header_field list, error) result
+
+(** [decode_full_exn d p] is {!decode_full} but raises on a decode error
+    instead of returning [Error]. Temporary shim for HTTP/2 callers not yet
+    migrated to the [result] API; to be removed in the HTTP/2 ticket (T7). *)
+val decode_full_exn : decoder -> string -> header_field list

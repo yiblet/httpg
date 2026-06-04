@@ -3,9 +3,11 @@
 
    Pure HPACK Huffman codec. No IO. *)
 
-(** Raised for errors found decoding Huffman-encoded data.
-    Mirrors Go's [ErrInvalidHuffman]. *)
-exception Invalid_huffman
+(** A handleable Huffman-decode error. Mirrors Go's [ErrInvalidHuffman]. *)
+type error = Invalid_huffman
+
+(** Renders {!error} as a human-readable string. *)
+val error_to_string : error -> string
 
 (** [encode s] returns the Huffman-encoded form of the bytes in [s],
     padded with the EOS prefix to a byte boundary (RFC 7541 section 5.2).
@@ -18,7 +20,12 @@ val encode : string -> string
 val encoded_len : string -> int
 
 (** [decode s] decodes the Huffman-encoded bytes in [s], validating the EOS
-    padding, and returns the expanded bytes. Raises {!Invalid_huffman} on
-    invalid data (incomplete symbol, overlong padding, or non-EOS-prefix
+    padding, and returns the expanded bytes. Returns [Error Invalid_huffman]
+    on invalid data (incomplete symbol, overlong padding, or non-EOS-prefix
     trailing bits). Mirrors Go's [HuffmanDecodeToString] / [huffmanDecode]. *)
-val decode : string -> string
+val decode : string -> (string, error) result
+
+(** [decode_exn s] is {!decode} but raises on invalid data instead of
+    returning [Error]. Temporary shim for HTTP/2 callers not yet migrated to
+    the [result] API; to be removed in the HTTP/2 ticket (T7). *)
+val decode_exn : string -> string

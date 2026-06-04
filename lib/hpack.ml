@@ -14,15 +14,31 @@ type header_field = T.header_field = {
 let uint32_max = 0xFFFFFFFF
 let initial_header_table_size = 4096
 
+(* Public handleable error type (surfaced at the {!decode_full} boundary). *)
+type error =
+  | Decoding of string
+  | Invalid_indexed of int
+  | String_too_long
+  | Invalid_huffman
+  | Var_int_overflow
+
+let error_to_string = function
+  | Decoding s -> s
+  | Invalid_indexed i -> Printf.sprintf "invalid indexed representation index %d" i
+  | String_too_long -> "header string too long"
+  | Invalid_huffman -> "invalid Huffman-coded data"
+  | Var_int_overflow -> "varint integer overflow"
+
+(* Internal raise-based machinery: the decoder's incremental [write]/[close]
+   path still raises these (consumed by the HTTP/2 layer until T7); the
+   [decode_full] boundary maps them to {!error}. *)
 exception Decoding_error of string
-exception Invalid_indexed of int
-exception String_too_long
+exception Invalid_indexed_exn of int
+exception String_too_long_exn
+exception Invalid_huffman_exn
 
-(* errNeedMore is an internal sentinel: not enough data yet. *)
+(* errNeedMore is an internal control-flow sentinel: not enough data yet. *)
 exception Need_more
-
-(* errVarintOverflow *)
-let varint_overflow = Decoding_error "varint integer overflow"
 
 (* ===================== primitives ===================== *)
 
@@ -42,11 +58,12 @@ let append_var_int buf n i =
   end
 
 (* Go: readVarInt. n must be 1..8. Returns Ok (value, next_pos) or
-   Error exn (Need_more / varint_overflow). *)
+   Error Var_int_overflow. Raises the internal {!Need_more} sentinel when the
+   input is truncated (mirrors Go's errNeedMore, kept as control flow). *)
 let read_var_int n s pos =
   if n < 1 || n > 8 then invalid_arg "read_var_int: bad n";
   let len = String.length s in
-  if pos >= len then Error Need_more
+  if pos >= len then raise Need_more
   else begin
     let i0 = Char.code s.[pos] in
     let i0 = if n < 8 then i0 land ((1 lsl n) - 1) else i0 in
@@ -67,12 +84,12 @@ let read_var_int n s pos =
            end;
            m := !m + 7;
            if !m >= 63 then begin
-             result := Some (Error varint_overflow);
+             result := Some (Error Var_int_overflow);
              raise Exit
            end
          done
        with Exit -> ());
-      match !result with Some r -> r | None -> Error Need_more
+      match !result with Some r -> r | None -> raise Need_more
     end
   end
 
@@ -274,7 +291,7 @@ let call_emit d hf =
   if d.max_str_len <> 0 then
     if String.length hf.name > d.max_str_len
        || String.length hf.value > d.max_str_len
-    then raise String_too_long;
+    then raise String_too_long_exn;
   if d.emit_enabled then d.emit hf
 
 (* Go: decodeString *)
@@ -283,12 +300,15 @@ let decode_string _d u =
   else
     (* Go passes maxStrLen to huffmanDecode; our Huffman decoder is the
        maxLen=0 path. Enforce length post-decode in readString/callEmit. *)
-    Huff.decode u.b
+    match Huff.decode u.b with
+    | Ok s -> s
+    | Error Hpack_huffman.Invalid_huffman -> raise Invalid_huffman_exn
 
-(* Go: readString. Returns (undecoded, next_pos). *)
+(* Go: readString. Returns Ok (undecoded, next_pos) or Error error; raises
+   {!Need_more} on truncation. *)
 let read_string d s pos =
   let len = String.length s in
-  if pos >= len then Error Need_more
+  if pos >= len then raise Need_more
   else begin
     let is_huff = Char.code s.[pos] land 128 <> 0 in
     match read_var_int 7 s pos with
@@ -296,7 +316,7 @@ let read_string d s pos =
     | Ok (str_len, p) ->
         if d.max_str_len <> 0 && str_len > d.max_str_len then
           Error String_too_long
-        else if len - p < str_len then Error Need_more
+        else if len - p < str_len then raise Need_more
         else Ok ({ is_huff; b = String.sub s p str_len }, p + str_len)
   end
 
@@ -306,7 +326,7 @@ let parse_field_indexed d s pos =
   | Error e -> Error e
   | Ok (idx, p) -> (
       match at d idx with
-      | None -> raise (Invalid_indexed idx)
+      | None -> Error (Invalid_indexed idx)
       | Some hf ->
           call_emit d { name = hf.name; value = hf.value; sensitive = false };
           Ok p)
@@ -321,7 +341,7 @@ let parse_field_literal d s pos n it =
       let name_res =
         if name_idx > 0 then
           match at d name_idx with
-          | None -> raise (Invalid_indexed name_idx)
+          | None -> Error (Invalid_indexed name_idx)
           | Some ihf -> Ok (ihf.name, None, p)
         else
           match read_string d s p with
@@ -357,17 +377,20 @@ let parse_field_literal d s pos n it =
 (* Go: parseDynamicTableSizeUpdate *)
 let parse_dynamic_table_size_update d s pos =
   if (not d.first_field) && T.dynamic_size d.d_dyn_tab > 0 then
-    raise
-      (Decoding_error
+    Error
+      (Decoding
          "dynamic table size update MUST occur at the beginning of a header \
-          block");
-  match read_var_int 5 s pos with
-  | Error e -> Error e
-  | Ok (size, p) ->
-      if size > T.dynamic_allowed_max_size d.d_dyn_tab then
-        raise (Decoding_error "dynamic table size update too large");
-      T.set_max_size d.d_dyn_tab size;
-      Ok p
+          block")
+  else
+    match read_var_int 5 s pos with
+    | Error e -> Error e
+    | Ok (size, p) ->
+        if size > T.dynamic_allowed_max_size d.d_dyn_tab then
+          Error (Decoding "dynamic table size update too large")
+        else begin
+          T.set_max_size d.d_dyn_tab size;
+          Ok p
+        end
 
 (* Go: parseHeaderFieldRepr. Precondition: pos < length s. *)
 let parse_header_field_repr d s pos =
@@ -377,12 +400,32 @@ let parse_header_field_repr d s pos =
   else if b land 240 = 0 then parse_field_literal d s pos 4 Indexed_false
   else if b land 240 = 16 then parse_field_literal d s pos 4 Indexed_never
   else if b land 224 = 32 then parse_dynamic_table_size_update d s pos
-  else raise (Decoding_error "invalid encoding")
+  else Error (Decoding "invalid encoding")
 
-(* Go: Decoder.Write. Returns length p (bytes accepted). *)
-let write d p =
+(* Map the public {!error} to the legacy internal exception (so [write]/[close]
+   keep their raising contract for the HTTP/2 layer until T7). *)
+let exn_of_error = function
+  | Decoding s -> Decoding_error s
+  | Invalid_indexed i -> Invalid_indexed_exn i
+  | String_too_long -> String_too_long_exn
+  | Invalid_huffman -> Invalid_huffman_exn
+  | Var_int_overflow -> Decoding_error "varint integer overflow"
+
+(* Map the internal exceptions raised by [call_emit]/[decode_string] back to
+   the public {!error} (for the [result] boundary). Re-raises anything else. *)
+let error_of_exn = function
+  | Decoding_error s -> Decoding s
+  | Invalid_indexed_exn i -> Invalid_indexed i
+  | String_too_long_exn -> String_too_long
+  | Invalid_huffman_exn -> Invalid_huffman
+  | e -> raise e
+
+(* Go: Decoder.Write, as a [result]. Returns Ok (length p) on success (bytes
+   accepted) or Error on a fatal decode error. The [Need_more] sentinel and
+   the call_emit/decode_string internal exceptions are caught here. *)
+let write_result d p : (int, error) result =
   let plen = String.length p in
-  if plen = 0 then 0
+  if plen = 0 then Ok 0
   else begin
     (* assemble the working buffer *)
     let buf =
@@ -397,40 +440,74 @@ let write d p =
     let buf_len = String.length buf in
     let pos = ref 0 in
     let continue = ref true in
+    let err = ref None in
     while !continue && !pos < buf_len do
-      match parse_header_field_repr d buf !pos with
-      | Ok next ->
+      (* parse_header_field_repr returns Error for in-band decode errors and
+         may raise [Need_more] (truncation) or the call_emit/decode_string
+         internal exceptions; normalise both into a [step] result. *)
+      let step =
+        try `Field (parse_header_field_repr d buf !pos) with
+        | Need_more -> `Need_more
+        | e -> `Field (Error (error_of_exn e))
+      in
+      match step with
+      | `Field (Ok next) ->
           pos := next;
           d.first_field <- false
-      | Error Need_more ->
+      | `Field (Error e) ->
+          err := Some e;
+          continue := false
+      | `Need_more ->
           let var_int_overhead = 8 in
           let remaining = buf_len - !pos in
           if d.max_str_len <> 0
              && remaining > 2 * (d.max_str_len + var_int_overhead)
-          then raise String_too_long;
-          Buffer.add_substring d.save_buf buf !pos remaining;
-          continue := false
-      | Error e -> raise e
+          then begin
+            err := Some String_too_long;
+            continue := false
+          end
+          else begin
+            Buffer.add_substring d.save_buf buf !pos remaining;
+            continue := false
+          end
     done;
-    plen
+    match !err with Some e -> Error e | None -> Ok plen
   end
 
-(* Go: Decoder.Close *)
-let close d =
+(* Go: Decoder.Write. Raising shim retained for the HTTP/2 layer (T7). *)
+let write d p =
+  match write_result d p with Ok n -> n | Error e -> raise (exn_of_error e)
+
+(* Go: Decoder.Close, as a [result]. *)
+let close_result d : (unit, error) result =
   if Buffer.length d.save_buf > 0 then begin
     Buffer.clear d.save_buf;
-    raise (Decoding_error "truncated headers")
-  end;
-  d.first_field <- true
+    Error (Decoding "truncated headers")
+  end
+  else begin
+    d.first_field <- true;
+    Ok ()
+  end
 
-(* Go: DecodeFull *)
-let decode_full d p =
+(* Go: Decoder.Close. Raising shim retained for the HTTP/2 layer (T7). *)
+let close d =
+  match close_result d with Ok () -> () | Error e -> raise (exn_of_error e)
+
+(* Go: DecodeFull. *)
+let decode_full d p : (header_field list, error) result =
   let acc = ref [] in
   let saved = d.emit in
   d.emit <- (fun f -> acc := f :: !acc);
   Fun.protect
     ~finally:(fun () -> d.emit <- saved)
     (fun () ->
-      let _ = write d p in
-      close d;
-      List.rev !acc)
+      match write_result d p with
+      | Error e -> Error e
+      | Ok _ -> (
+          match close_result d with
+          | Error e -> Error e
+          | Ok () -> Ok (List.rev !acc)))
+
+(* Shim: raises on a decode error. Removed once HTTP/2 callers migrate (T7). *)
+let decode_full_exn d p =
+  match decode_full d p with Ok fs -> fs | Error e -> raise (exn_of_error e)

@@ -266,7 +266,7 @@ parse_query_typed [OK]`, `Cookie valid_typed * [OK]`. `grep` confirms no
 (`refactor(errors): typed error variants for pattern/values/cookie (Result migration T2)`).
 
 ### Ticket 3 — HPACK codec → `result` (hpack, hpack_huffman)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Convert the pure HPACK decode path to `result` with a typed `error`, keeping `Need_more` as an internal control-flow exception (unhandleable). High value: every HTTP/2 header block decode flows through here.
@@ -304,7 +304,93 @@ val decode_exn : string -> string   (* shim, deleted in T7 *)
 `dune build` clean; `dune test` (incl. `Hpack` suite) passes.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done.
+
+**What changed (pure HPACK decode path → `result` with typed `error`; `Need_more`
+kept as an internal control-flow exception):**
+
+- **`hpack_huffman`** (`lib/hpack_huffman.mli` + `.ml`):
+  - Added `type error = Invalid_huffman` + `error_to_string`.
+  - `decode : string -> (string, error) result` (was raising `Invalid_huffman`).
+  - The decode loop now raises a private `Invalid_huffman_exn` sentinel
+    (renamed from the old public `Invalid_huffman` exception) which `decode`
+    maps to `Error Invalid_huffman`. The internal `raise Exit` (loop control)
+    is unchanged.
+  - Added shim `decode_exn : string -> string` (raises) for HTTP/2 callers not
+    migrated until T7. The old public `exception Invalid_huffman` is gone from
+    the `.mli`.
+
+- **`hpack`** (`lib/hpack.mli` + `.ml`):
+  - Added
+    ```
+    type error =
+      | Decoding of string
+      | Invalid_indexed of int
+      | String_too_long
+      | Invalid_huffman
+      | Var_int_overflow
+    ```
+    + `error_to_string`.
+  - `decode_full : decoder -> string -> (header_field list, error) result`
+    (was raising). Added shim `decode_full_exn` (raises; deleted in T7).
+  - `read_var_int : int -> string -> int -> (int * int, error) result` (was
+    `(_, exn) result`): now returns `Error Var_int_overflow` on overflow and
+    **raises the internal `Need_more` sentinel** on truncation (previously
+    returned `Error Need_more`). `Need_more` stays an `exception`, documented
+    in the `.mli` as internal/unhandleable (not part of `error`). The
+    `invalid_arg` precondition on `n∉1..8` stays (programmer bug).
+  - Internal machinery refactor: the old public decode exceptions
+    (`Decoding_error`, `Invalid_indexed`, `String_too_long`) are now *private*
+    internal exceptions (`Decoding_error`, `Invalid_indexed_exn`,
+    `String_too_long_exn`, `Invalid_huffman_exn`). New `write_result` /
+    `close_result` thread `(_, error) result`; the public `write` / `close`
+    retain their **raising** contract (consumed by `h2_frame`'s `Hpack.write`
+    /`Hpack.close` until T7) via `exn_of_error`. `decode_full` composes
+    `write_result` + `close_result`. `error_of_exn` maps the call_emit /
+    decode_string internal raises (`String_too_long_exn`, `Invalid_huffman_exn`)
+    back to `error` at the boundary.
+
+- **No non-test callers needed changes:** `h2_frame` uses `Hpack.write`/
+  `Hpack.close` (still raising) and `Hpack_huffman` only via `Hpack`; no h2
+  module calls `decode_full`/`Hpack_huffman.decode` directly, so the `*_exn`
+  shims are present per the ticket but currently unused outside potential T7.
+
+**Tests (`test/test_hpack.ml`, `test/test_hpack_tables.ml`):**
+- Ported the success-path RFC C.2–C.6 / round-trip cases to unwrap `Ok` via a
+  local `decode_full` helper (and `Result.get_ok` / match for the Huffman
+  round-trips in `test_hpack_tables.ml`).
+- `var_int_need_more` now asserts the **raised** `Need_more` sentinel (was
+  `Error Need_more`) — consistent with keeping `Need_more` internal.
+- Decode-error cases rewritten to assert typed arms:
+  `decode_invalid_index` → `Error (Invalid_indexed 0)` and `Error
+  (Invalid_indexed 200)` (**plan success criterion**); `decode_index_too_large`
+  → `Error (Invalid_indexed 200)`; `decode_truncated` → `Error (Decoding
+  "truncated headers")`; `decode_size_update_*` → `Error (Decoding _)`.
+- **Named tests added/registered:**
+  - `Hpack.decode_invalid_index` — out-of-range index → `Error (Invalid_indexed _)`.
+  - `Hpack.decode_string_too_long` (replaces `decode_max_str_len`) → `Error String_too_long`.
+  - `HpackTables.huffman_decode_invalid_result` (`Hpack_huffman.decode_invalid`)
+    — invalid Huffman → `Error Invalid_huffman`; valid round-trip → `Ok`.
+  - Existing `HpackTables.huffman_decode_invalid` also converted to assert
+    `Error Invalid_huffman`.
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+BUILD_EXIT=0
+$ dune test --root <worktree> --force
+Test Successful in 1.811s. 494 tests run.
+TEST_EXIT=0
+```
+(Baseline before the change: 493 tests; net +1 — added
+`huffman_decode_invalid_result` and `decode_string_too_long`, renamed
+`decode_max_str_len`.) Spot-check: `HpackTables huffman_decode_invalid_result
+[OK]`, `Hpack var_int_need_more [OK]`, `Hpack decode_invalid_index [OK]`,
+`Hpack decode_string_too_long [OK]`.
+
+**Commit id:** jj change **`wpswwkzz`** (canonical, stable id; git `dc536fc2`)
+(`refactor(errors): hpack/hpack_huffman decode return result (Result migration T3)`).
 
 ### Ticket 4 — Transfer framing → `Lwt_result` (transfer, internal/chunked)
 Status: Planned
