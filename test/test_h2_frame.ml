@@ -38,7 +38,13 @@ let capture (writer : Lwt_io.output_channel -> unit Lwt.t) : string =
             Lwt.bind (Lwt_io.close oc) (fun () ->
                 Lwt.return (Buffer.contents buf)))))
 
-let read_one ?max_size () ic = F.read_frame ?max_size ic
+(* read_frame now returns [result]; unwrap [Ok], re-raising the boundary error
+   via [H2_error.to_exception] so the [check_raises] error tests below keep
+   asserting the exception identity (Frame_too_large / Connection_error / …). *)
+let read_one ?max_size () ic =
+  Lwt.map
+    (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
+    (F.read_frame ?max_size ic)
 
 (* ---- frame type string ---- *)
 
@@ -401,6 +407,37 @@ let test_bad_stream_id () =
     (H2_error.Connection_error H2_error.FrameSizeError) (fun () ->
       ignore (with_pipe writer (read_one ())))
 
+(* ---- result boundary: read_frame returns Error (Ticket 7) ---- *)
+
+(* Read the raw [(frame, H2_error.t) result] without unwrapping. *)
+let read_result ?max_size () ic = F.read_frame ?max_size ic
+
+(* A frame whose declared length exceeds max_size -> Error Frame_too_large. *)
+let test_read_oversize_frame_result () =
+  let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Data) 0 1 "hello" in
+  match with_pipe writer (read_result ~max_size:4 ()) with
+  | Error H2_error.Frame_too_large -> ()
+  | Error e ->
+      Alcotest.failf "expected Error Frame_too_large, got Error %s"
+        (match e with
+         | H2_error.Connection c -> "Connection " ^ H2_error.err_code_string c
+         | _ -> "<other>")
+  | Ok _ -> Alcotest.fail "expected Error Frame_too_large, got Ok"
+
+(* A frame with a bad stream id at the read boundary. NOTE (Go-fidelity): on the
+   *read* path Go's parsers return a connection-level PROTOCOL_ERROR for a bad
+   stream id (e.g. DATA on stream 0); [Invalid_stream_id] is a *write-side*
+   error (errStreamID), not produced by the parsers. So this asserts the
+   faithful read-boundary result [Error (Connection ProtocolError)] rather than
+   the plan's literal [Error Invalid_stream_id] (which the read path never
+   yields). *)
+let test_read_bad_stream_id_result () =
+  let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Data) 0 0 "abc" in
+  match with_pipe writer (read_result ()) with
+  | Error (H2_error.Connection H2_error.ProtocolError) -> ()
+  | Error _ -> Alcotest.fail "expected Error (Connection ProtocolError)"
+  | Ok _ -> Alcotest.fail "expected Error (Connection ProtocolError), got Ok"
+
 (* ---- CONTINUATION assembly via read_meta_headers (TestMetaFrameHeader) ---- *)
 
 (* Encode a header list into one raw HPACK block with a throwaway encoder. *)
@@ -422,15 +459,21 @@ let read_meta ?(max_header_list_size = 16 lsl 20) writer =
         let run () =
           Lwt.bind (writer oc) (fun () ->
               Lwt.bind (Lwt_io.close oc) (fun () ->
-                  Lwt.bind (F.read_frame ic) (fun f ->
-                      match f with
-                      | F.Headers (fh, h) ->
+                  Lwt.bind (F.read_frame ic) (fun fr ->
+                      match fr with
+                      | Ok (F.Headers (fh, h)) ->
                           let dec =
                             Hpack.new_decoder H2.initial_header_table_size
                               (fun _ -> ())
                           in
-                          F.read_meta_headers ~max_header_list_size dec (fh, h) ic
-                      | _ -> Alcotest.fail "expected HEADERS")))
+                          Lwt.map
+                            (function
+                              | Ok mf -> mf
+                              | Error e -> raise (H2_error.to_exception e))
+                            (F.read_meta_headers ~max_header_list_size dec (fh, h)
+                               ic)
+                      | Ok _ -> Alcotest.fail "expected HEADERS"
+                      | Error e -> raise (H2_error.to_exception e))))
         in
         run ()))
 
@@ -559,6 +602,8 @@ let tests =
     ("frame_header_codec", `Quick, test_frame_header_codec);
     ("oversize_frame", `Quick, test_oversize_frame);
     ("bad_stream_id", `Quick, test_bad_stream_id);
+    ("read_oversize_frame", `Quick, test_read_oversize_frame_result);
+    ("read_bad_stream_id", `Quick, test_read_bad_stream_id_result);
     ("meta_single", `Quick, test_meta_single);
     ("meta_with_continuation", `Quick, test_meta_with_continuation);
     ("meta_two_continuation", `Quick, test_meta_two_continuation);

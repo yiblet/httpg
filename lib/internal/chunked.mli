@@ -3,13 +3,13 @@
    ([Gohttp_internal.Chunked]); see net/http/internal. *)
 
 (** [internal.ErrLineTooLong]: a chunk header / line exceeded [max_line_length].
-    Retained for the {b mid-stream} reader thunk (which keeps raising, per the
-    Result-migration mid-stream policy) and for the [*_exn] shims. *)
+    Retained for the {b mid-stream} reader thunk, which keeps raising per the
+    Result-migration mid-stream policy. *)
 exception Err_line_too_long
 
 (** A malformed-chunk or framing error, carrying Go's message text (the various
     [errors.New(...)] values in chunked.go). Retained for the {b mid-stream}
-    reader thunk and the [*_exn] shims (see {!error}). *)
+    reader thunk (see {!error}). *)
 exception Chunk_error of string
 
 (** Handleable framing error at the {b header / initial-parse} boundary. The
@@ -27,12 +27,9 @@ val error_to_string : error -> string
 val max_line_length : int
 
 (** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] on bad
-    input (header/initial-parse boundary). *)
+    input (header/initial-parse boundary). The mid-stream reader thunk uses a
+    private raising helper internally, per the mid-stream policy below. *)
 val parse_hex_uint : string -> (int64, error) result
-
-(** Shim: {!parse_hex_uint} raising {!Chunk_error} (used by the mid-stream
-    reader thunk and not-yet-migrated callers). *)
-val parse_hex_uint_exn : string -> int64
 
 (** [new_chunked_reader ic] is [internal.NewChunkedReader]: a pull function
     returning successive decoded chunk payloads and finally [None] at the

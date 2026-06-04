@@ -24,8 +24,8 @@ exception Bad_string_error of string * string
 let bad_string_error what value = Bad_string_error (what, value)
 
 (* Handleable framing error variant for the header / initial-parse boundary.
-   The legacy exceptions above stay for the [*_exn] shims and for the
-   mid-stream Body.Stream thunks (which keep raising, per Resolution #1). *)
+   The legacy exceptions above stay for the mid-stream Body.Stream thunks,
+   which keep raising, per Resolution #1. *)
 type error =
   | Line_too_long
   | Chunk of string

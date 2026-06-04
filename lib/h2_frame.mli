@@ -91,17 +91,21 @@ val header_of_frame : frame -> frame_header
 (* ---- errors (mirrors frame.go) ---- *)
 
 (** Raised by {!write_data}/{!write_headers}/… for a frame larger than the
-    24-bit length field permits. Mirrors Go's [ErrFrameTooLarge]. *)
+    24-bit length field permits. Mirrors Go's [ErrFrameTooLarge]. On the
+    {b read} path this is surfaced as {!H2_error.Frame_too_large} via
+    {!read_frame}'s [result]; on the {b write} path (frame builders) it remains
+    a raise (a programmer/usage error — building an over-large frame). *)
 exception Frame_too_large
 
 (** Raised by the writers when given an invalid (zero / high-bit-set) stream
-    ID without illegal writes enabled. Mirrors Go's [errStreamID]. *)
+    ID without illegal writes enabled. Mirrors Go's [errStreamID]. A write-side
+    invariant (kept as a raise). *)
 exception Invalid_stream_id
 
-(** Mirrors Go's [errDepStreamID]. *)
+(** Mirrors Go's [errDepStreamID]. A write-side invariant (kept as a raise). *)
 exception Invalid_dep_stream_id
 
-(** Mirrors Go's [errPadLength]. *)
+(** Mirrors Go's [errPadLength]. A write-side invariant (kept as a raise). *)
 exception Pad_length_too_large
 
 (* ---- pure header codec ---- *)
@@ -119,13 +123,15 @@ val decode_frame_header : string -> frame_header
 
 (** [read_frame ?max_size ic] reads the next frame from [ic]: the 9-byte
     header, then the payload, validating the length against [max_size] (default
-    [H2.max_frame_size] = 2^24-1) and the per-type constraints, raising
-    {!H2_error.Connection_error} / {!H2_error.Stream_error} faithfully to Go's
-    parsers (e.g. FRAME_SIZE_ERROR, PROTOCOL_ERROR on stream-id rules). Strips
-    padding for DATA/HEADERS. Mirrors Go's [Framer.ReadFrame]. Raises
-    {!Frame_too_large} if the declared length exceeds [max_size], and
-    [End_of_file] on a clean EOF. *)
-val read_frame : ?max_size:int -> Lwt_io.input_channel -> frame Lwt.t
+    [H2.max_frame_size] = 2^24-1) and the per-type constraints. Returns
+    [Error] with the unified {!H2_error.t} faithfully to Go's parsers
+    (FRAME_SIZE_ERROR / PROTOCOL_ERROR on stream-id rules → [Connection _] /
+    [Stream _]; a declared length over [max_size] → [Frame_too_large]). Strips
+    padding for DATA/HEADERS. Mirrors Go's [Framer.ReadFrame]. A clean EOF
+    (connection closed before/between frames) propagates as [End_of_file],
+    mirroring Go's [io.EOF] return. *)
+val read_frame :
+  ?max_size:int -> Lwt_io.input_channel -> (frame, H2_error.t) result Lwt.t
 
 (** Maximum legal frame size (2^24 - 1). Mirrors Go's [maxFrameSize]. *)
 val max_frame_size : int
@@ -208,13 +214,16 @@ type meta_headers_frame = {
     ([Hpack.decoder]) into a header-field list. Enforces END_HEADERS continuity
     (a CONTINUATION must be on the same stream, no interleaving) per Go's
     [checkFrameOrder]/[readMetaFrame], validates pseudo-header ordering and
-    field names/values, and raises {!H2_error.Connection_error} /
-    {!H2_error.Stream_error} faithfully. Mirrors Go's [Framer.readMetaFrame].
-    [max_header_list_size] defaults to 16MB (Go's default). *)
+    field names/values, and returns [Error] with the unified {!H2_error.t}
+    faithfully ([Connection _] / [Stream _], and [Compression e] wrapping the
+    underlying {!Hpack.error} on a header-block decode failure). Mirrors Go's
+    [Framer.readMetaFrame]. [max_header_list_size] defaults to 16MB (Go's
+    default). A clean EOF (a CONTINUATION never arriving) propagates as
+    [End_of_file]. *)
 val read_meta_headers :
   ?max_size:int ->
   ?max_header_list_size:int ->
   Hpack.decoder ->
   frame_header * headers_frame ->
   Lwt_io.input_channel ->
-  meta_headers_frame Lwt.t
+  (meta_headers_frame, H2_error.t) result Lwt.t

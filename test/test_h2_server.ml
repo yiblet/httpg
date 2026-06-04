@@ -53,7 +53,11 @@ type collected = {
    [dec] decodes every HEADERS block (HPACK is stateful across the conn). *)
 let rec collect_frames ic (dec : Hpack.decoder) acc ~until =
   let open Lwt.Syntax in
-  let* f = F.read_frame ic in
+  let* f =
+    Lwt.map
+      (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
+      (F.read_frame ic)
+  in
   let headers =
     match f with
     | F.Headers (_, hf) ->

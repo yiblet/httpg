@@ -47,3 +47,39 @@ val stream_error : int -> err_code -> stream_error
 (** Mirrors Go's [ConnectionError(code)] construction; returns the exception
     value. *)
 val conn_error : err_code -> exn
+
+(** Unified, handleable HTTP/2 error value surfaced at the public boundaries
+    ({!H2_frame.read_frame} / {!H2_frame.read_meta_headers}). The internal
+    per-connection event loop continues to drive GOAWAY/RST by raising the
+    {!Connection_error}/{!Stream_error} exceptions (and the {!H2_frame}
+    frame-build exceptions); {!to_exception}/{!of_exception} bridge between the [result]
+    boundary and the raising loop so the loop's machinery is left untouched
+    (Result-migration Resolution #2 — boundary-only). *)
+type t =
+  | Connection of err_code
+  | Stream of stream_error
+  | Frame_too_large
+  | Invalid_stream_id
+  | Invalid_dep_stream_id
+  | Pad_length_too_large
+  | Compression of Hpack.error
+
+(** Carrier exception for an HPACK ({!Hpack.error}) decode failure threaded
+    through the raising parse path. *)
+exception Compression_error of Hpack.error
+
+(** Installs the {!H2_frame}-owned conversions for the [Frame_too_large] /
+    [Invalid_stream_id] / [Invalid_dep_stream_id] / [Pad_length_too_large] arms.
+    Called once at {!H2_frame} module init; keeps {!to_exception}/{!of_exception} cycle-free.
+    Not for general use. *)
+val set_frame_bridge :
+  to_exception:(t -> exn option) -> of_exception:(exn -> t option) -> unit
+
+(** [to_exception t] is the exception the internal event loop raises to drive
+    GOAWAY/RST/stream-abort for the error [t]. *)
+val to_exception : t -> exn
+
+(** [of_exception e] recognizes the exceptions the internal raising paths use and maps
+    them to a unified {!t}; [None] for an exception that is not an HTTP/2
+    boundary error. *)
+val of_exception : exn -> t option

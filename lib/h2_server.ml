@@ -984,14 +984,22 @@ let rec read_loop sc : unit Lwt.t =
   let open Lwt.Syntax in
   Lwt.catch
     (fun () ->
+      (* Boundary returns [result]; the reader fiber drives GOAWAY/RST by
+         raising (caught below and posted as [Read_error]), so convert an
+         [Error] back to the raising exception via {!H2_error.to_exception}
+         (Resolution #2 — boundary-only conversion; internal loop unchanged). *)
       let* f =
-        H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.ic
+        Lwt.map
+          (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
+          (H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.ic)
       in
       match f with
       | H2_frame.Headers (fh, hf) ->
           (* assemble meta headers; reader owns the decoder *)
           let* mf =
-            H2_frame.read_meta_headers sc.dec (fh, hf) sc.ic
+            Lwt.map
+              (function Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
+              (H2_frame.read_meta_headers sc.dec (fh, hf) sc.ic)
           in
           sc.push_event (Some (Read_meta mf));
           read_loop sc

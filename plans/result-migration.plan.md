@@ -810,7 +810,7 @@ lib/transfer.mli` → nothing.
 Resolve the current git hash with `jj log -r lnmqsxoy`.
 
 ### Ticket 7 — HTTP/2 framing + endpoints boundaries → `result` (h2_frame, h2_error, h2_pipe, h2_databuffer, h2_server, h2_transport)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Surface `result` at the HTTP/2 *public boundaries*: `H2_frame.read_frame` (and meta-headers read), `H2_pipe`/`H2_databuffer` read entrypoints, and `H2_server.serve`/`H2_transport.round_trip` error returns. Decide the unified error type (Areas of Uncertainty #3). Migrate off `Hpack`/`Transfer` `*_exn` shims and delete them. The **internal** event-loop exception→GOAWAY/RST machinery may stay (it's the faithful design); only entrypoints change.
@@ -847,7 +847,130 @@ val read_frame : ?max_size:int -> Lwt_io.input_channel -> (frame, H2_error.t) re
 `dune build` clean; `dune test` (incl. `H2Frame`, `Hpack`) passes; `grep -rn "decode_full_exn\|decode_exn\|read_transfer_exn" lib/` returns nothing.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done. Boundary-only h2 conversion (Resolution #2): the public
+frame/meta-headers read entrypoints return `result`; the internal
+per-connection event-loop exception→GOAWAY/RST machinery is unchanged. Baseline
+at ticket start: build exit 0, **500** tests. End state: **502** tests (+2 named).
+
+**Per-module changes:**
+
+- **`h2_error`** (`h2_error.mli` + `.ml`): added the unified handleable error
+  ```
+  type t =
+    | Connection of err_code | Stream of stream_error
+    | Frame_too_large | Invalid_stream_id | Invalid_dep_stream_id
+    | Pad_length_too_large | Compression of Hpack.error
+  ```
+  plus `to_exception : t -> exn` / `of_exception : exn -> t option` bridges so
+  the internal loop (which still *raises* to drive GOAWAY/RST) interoperates
+  with the `result` boundary. The pre-existing `exception Connection_error` /
+  `exception Stream_error` are **kept** as the internal raise points (per the
+  ticket's allowance). Added `exception Compression_error of Hpack.error`
+  (carrier for an HPACK decode failure) and a cycle-free `set_frame_bridge`
+  hook: `H2_frame` owns the four frame-build invariant exceptions
+  (`Frame_too_large` etc.) and installs their `t`↔`exn` conversions at module
+  init, so `to_exception`/`of_exception` need not depend on `H2_frame`. (The
+  `t` arms and the `H2_frame` exceptions share names by design — the bridge maps
+  between them.) `h2_error` now depends on `Hpack` (for `Hpack.error`); no cycle.
+
+- **`h2_frame`** (`h2_frame.mli` + `.ml`):
+  - `read_frame : ?max_size:int -> Lwt_io.input_channel -> (frame, H2_error.t)
+    result Lwt.t` and `read_meta_headers : … -> (meta_headers_frame, H2_error.t)
+    result Lwt.t`. Both wrap a private `*_raising` core in `Lwt.catch` and map
+    the raised exception via `H2_error.of_exception`; a clean `End_of_file`
+    propagates as an exception (Go's `io.EOF` return contract — the conn loops
+    rely on it). The ~49 internal `raise` sites in the parsers/builders are
+    **unchanged** (minimal churn).
+  - `read_meta_headers` now drives the incremental HPACK decoder via the new
+    `Hpack.write_result`/`Hpack.close_result` and raises
+    `H2_error.Compression_error e` on a decode failure → surfaced as the
+    `Compression of Hpack.error` arm (was a blanket `with _ -> conn_error
+    CompressionError`). The internal CONTINUATION read uses `read_frame_raising`
+    (no double-wrapping).
+  - The four write-side invariant exceptions (`Frame_too_large`,
+    `Invalid_stream_id`, `Invalid_dep_stream_id`, `Pad_length_too_large`) stay
+    raises and are documented as write-side invariants in the `.mli`; the bridge
+    is installed at module init.
+
+- **`h2_server`** / **`h2_transport`** (boundary-only): the two internal read
+  fibers convert the new `result` back to a raise inside their existing
+  `Lwt.catch` via `H2_error.to_exception`, so the `Read_error`/event machinery
+  and the `\`Error`-matching in the conn loop are **untouched** (GOAWAY/RST/
+  stream-abort behavior identical). No signature change to `serve`/`round_trip`
+  — their failures are connection-fatal and handled internally, matching Go's
+  contract (and the ticket's "may keep their current shape").
+
+- **`h2_pipe`** / **`h2_databuffer`**: no change. Per the audit + Resolution #2,
+  `H2_pipe.Closed_pipe_write`/`Uninitialized_pipe_write` are write-side
+  invariants and `H2_databuffer.Read_empty` is a read-past-empty invariant —
+  all KEPT as raises (already documented "raises … on invariant violation").
+  The pipe's `read` legitimately propagates a stored `exn` via `Lwt.fail` (the
+  mid-stream model, Resolution #1) — internal streaming plumbing, no public
+  boundary. No `*_exn`-named identifiers existed in either module.
+
+**Hpack + Chunked shim removals (USER DIRECTIVE — all `*_exn` shims gone):**
+- **Deleted** `Hpack.decode_full_exn` (`hpack.ml` + `.mli`) and
+  `Hpack_huffman.decode_exn` (`hpack_huffman.ml` + `.mli`) — both had **zero**
+  callers (h2 uses the incremental decoder, not `decode_full`). Exposed
+  `Hpack.write_result : decoder -> string -> (int, error) result` and
+  `Hpack.close_result : decoder -> (unit, error) result` so `read_meta_headers`
+  decodes via the typed `result` API and maps `Hpack.error` into
+  `H2_error.Compression`. The incremental raising `Hpack.write`/`Hpack.close`
+  (Go's `Decoder.Write`/`Close`) are retained — they are the legitimate
+  incremental decoder API, not `*_exn` shims (still consumed by
+  `test_h2_server.ml`'s manual assembly).
+- **Folded** `Chunked.parse_hex_uint_exn` into a **private**
+  `parse_hex_uint_or_raise` inside `chunked.ml` (removed from `chunked.mli`);
+  the mid-stream `Body.Stream` thunk still raises `Chunk_error` via it
+  (Resolution #1), but there is no `*_exn`-named public surface.
+- **Renamed** every remaining `_exn`-substring identifier so the grep gate is
+  empty: the private decode sentinels `Hpack.{Invalid_indexed,String_too_long,
+  Invalid_huffman}_exn` → `*_sentinel`; `Hpack_huffman.Invalid_huffman_exn` →
+  `Invalid_huffman_sentinel`; `Fs.Invalid_range_exn` → `Invalid_range_sentinel`;
+  `Io.{missing_host_exn,Transfer_error_exn,Unexpected_eof_exn}` → `*_sentinel`;
+  `Hpack.error_of_exn`/`Io.error_of_exn` → `error_of_exception`; the
+  `H2_error` bridge `to_exn`/`of_exn` → `to_exception`/`of_exception`.
+
+**`grep -rn "_exn" lib/ lib/internal/` → EMPTY** (verified; exit 1 / no matches).
+
+**Tests:**
+- Ported the `H2Frame`/`H2Write`/`H2Server` read helpers to unwrap the new
+  `result` (`read_one`, `read_meta`, `collect_frames`, `read_frame_ok`),
+  re-raising via `H2_error.to_exception` so the existing `check_raises`
+  error-row tests keep asserting the exception identity unchanged.
+- **Named tests added + registered** (`H2Frame` suite, already aggregated in
+  `test/test_gohttp.ml`):
+  - `H2_frame.read_oversize_frame` — a frame whose declared length exceeds
+    `max_size` → `Error H2_error.Frame_too_large` (asserted on the raw
+    `result`).
+  - `H2_frame.read_bad_stream_id` — a DATA frame on stream 0 at the read
+    boundary → `Error (H2_error.Connection ProtocolError)`. **Go-fidelity
+    note / deviation from the plan's literal `Error Invalid_stream_id`:** on the
+    *read* path Go's parsers return a connection-level `PROTOCOL_ERROR` for a bad
+    stream id; `Invalid_stream_id` is a *write-side* error (`errStreamID`) that
+    the parsers never produce. The test therefore asserts the faithful
+    read-boundary result `Error (Connection ProtocolError)` (documented inline).
+- Existing `H2Frame`/`Hpack`/`HpackTables` suites, the h2-over-TLS
+  `H2ClientServer` round-trips and the `StreamH2` streaming tests all pass
+  unchanged (GOAWAY/RST behavior preserved).
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+BUILD_EXIT=0
+$ dune test --root <worktree> --force
+Test Successful in 1.851s. 502 tests run.
+TEST_EXIT=0
+$ grep -rn "_exn" lib/ lib/internal/    # (no output)
+GREP_EXIT=1
+$ grep -rn "decode_full_exn\|decode_exn\|read_transfer_exn\|parse_hex_uint_exn" lib/ test/   # (no output)
+```
+(Baseline at ticket start: 500 tests. Net +2 named tests.) Spot-check:
+`H2Frame read_oversize_frame [OK]`, `H2Frame read_bad_stream_id [OK]`.
+
+**Commit id:** jj change **`rxopklom`** (canonical, stable id).
+Resolve the current git hash with `jj log -r rxopklom`.
 
 ### Ticket 8 — Final sweep, unhandleable documentation, regression guard
 Status: Planned

@@ -14,6 +14,12 @@ let with_pipe (writer : Lwt_io.output_channel -> unit Lwt.t)
         Lwt.bind (writer oc) (fun () ->
             Lwt.bind (Lwt_io.close oc) (fun () -> reader ic))))
 
+(* read_frame now returns [result]; unwrap [Ok] (raising on a boundary error). *)
+let read_frame_ok ic =
+  Lwt.map
+    (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
+    (F.read_frame ic)
+
 let write_one w oc =
   let enc = Hpack.new_encoder () in
   W.write_frame ~enc oc w
@@ -21,7 +27,7 @@ let write_one w oc =
 (* SETTINGS round-trip. *)
 let test_settings () =
   let settings = [ { H2.id = H2.Max_frame_size; value = 16384l } ] in
-  let f = with_pipe (write_one (W.Write_settings settings)) F.read_frame in
+  let f = with_pipe (write_one (W.Write_settings settings)) read_frame_ok in
   match f with
   | F.Settings (_, { settings = s; ack }) ->
       Alcotest.(check bool) "not ack" false ack;
@@ -29,7 +35,7 @@ let test_settings () =
   | _ -> Alcotest.fail "expected SETTINGS"
 
 let test_settings_ack () =
-  let f = with_pipe (write_one W.Write_settings_ack) F.read_frame in
+  let f = with_pipe (write_one W.Write_settings_ack) read_frame_ok in
   match f with
   | F.Settings (_, { ack = true; settings = [] }) -> ()
   | _ -> Alcotest.fail "expected SETTINGS ack"
@@ -37,7 +43,7 @@ let test_settings_ack () =
 let test_window_update () =
   let f =
     with_pipe (write_one (W.Write_window_update { stream_id = 1; n = 100 }))
-      F.read_frame
+      read_frame_ok
   in
   match f with
   | F.Window_update (fh, { increment }) ->
@@ -49,7 +55,7 @@ let test_data () =
   let f =
     with_pipe
       (write_one (W.Write_data { stream_id = 3; data = "hello"; end_stream = true }))
-      F.read_frame
+      read_frame_ok
   in
   match f with
   | F.Data (fh, { data; end_stream }) ->
@@ -62,7 +68,7 @@ let test_rst () =
   let f =
     with_pipe
       (write_one (W.Write_rst_stream { stream_id = 5; code = H2_error.Cancel }))
-      F.read_frame
+      read_frame_ok
   in
   match f with
   | F.RST_stream (fh, { error_code }) ->
@@ -74,7 +80,7 @@ let test_goaway () =
   let f =
     with_pipe
       (write_one (W.Write_goaway { max_stream_id = 7; code = H2_error.NoError }))
-      F.read_frame
+      read_frame_ok
   in
   match f with
   | F.GoAway (_, { last_stream_id; _ }) ->
@@ -82,7 +88,7 @@ let test_goaway () =
   | _ -> Alcotest.fail "expected GOAWAY"
 
 let test_ping_ack () =
-  let f = with_pipe (write_one (W.Write_ping_ack "abcdefgh")) F.read_frame in
+  let f = with_pipe (write_one (W.Write_ping_ack "abcdefgh")) read_frame_ok in
   match f with
   | F.Ping (_, { data; ack }) ->
       Alcotest.(check string) "data" "abcdefgh" data;
@@ -93,10 +99,13 @@ let test_ping_ack () =
 let read_meta ic =
   Lwt.bind (F.read_frame ic) (fun fr ->
       match fr with
-      | F.Headers (fh, h) ->
+      | Ok (F.Headers (fh, h)) ->
           let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
-          F.read_meta_headers dec (fh, h) ic
-      | _ -> Lwt.fail (Failure "expected HEADERS"))
+          Lwt.map
+            (function Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
+            (F.read_meta_headers dec (fh, h) ic)
+      | Ok _ -> Lwt.fail (Failure "expected HEADERS")
+      | Error e -> raise (H2_error.to_exception e))
 
 let field_value (m : F.meta_headers_frame) name =
   match

@@ -38,7 +38,7 @@ type file_system = { open_ : string -> (file, error) result Lwt.t }
 
 (* Internal sentinel: [parse_range] raises this on a malformed Range header and
    [parse_range] maps it back to [Error (Invalid_range _)] at the boundary. *)
-exception Invalid_range_exn of string
+exception Invalid_range_sentinel of string
 
 (* ---- containsDotDot / isSlashRune ---- *)
 
@@ -516,7 +516,7 @@ let parse_range s size =
               if ra = "" then acc
               else begin
                 match String.index_opt ra '-' with
-                | None -> raise (Invalid_range_exn "") (* Go strings.Cut: no '-' *)
+                | None -> raise (Invalid_range_sentinel "") (* Go strings.Cut: no '-' *)
                 | Some dash ->
                     let start = trim_string (String.sub ra 0 dash) in
                     let end_ =
@@ -525,9 +525,9 @@ let parse_range s size =
                     in
                     if start = "" then begin
                       (* suffix-length: last N bytes *)
-                      if end_ = "" || end_.[0] = '-' then raise (Invalid_range_exn "");
+                      if end_ = "" || end_.[0] = '-' then raise (Invalid_range_sentinel "");
                       match parse_int64 end_ with
-                      | None -> raise (Invalid_range_exn "")
+                      | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
                           let i = if i > size then size else i in
                           let st = Int64.sub size i in
@@ -535,7 +535,7 @@ let parse_range s size =
                     end
                     else begin
                       match parse_int64 start with
-                      | None -> raise (Invalid_range_exn "")
+                      | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
                           if i >= size then begin
                             (* starts after content: does not overlap *)
@@ -548,9 +548,9 @@ let parse_range s size =
                               { start = st; length = Int64.sub size st } :: acc
                             else
                               match parse_int64 end_ with
-                              | None -> raise (Invalid_range_exn "")
+                              | None -> raise (Invalid_range_sentinel "")
                               | Some j ->
-                                  if st > j then raise (Invalid_range_exn "");
+                                  if st > j then raise (Invalid_range_sentinel "");
                                   let j = if j >= size then Int64.sub size 1L else j in
                                   {
                                     start = st;
@@ -564,7 +564,7 @@ let parse_range s size =
         in
         let ranges = List.rev ranges in
         if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
-      with Invalid_range_exn m -> Error (Invalid_range m)
+      with Invalid_range_sentinel m -> Error (Invalid_range m)
     end
 
 let sum_ranges_size ranges =

@@ -12,12 +12,12 @@ open Lwt.Infix
 exception Protocol_error of string
 
 (* The write_request "no Host" case (Go's errMissingHost). Declared before
-   [type error] so its constructor name is the exception; [missing_host_exn]
+   [type error] so its constructor name is the exception; [missing_host_sentinel]
    aliases it for raising after the [error] variant (which also has a
    [Missing_host] arm) shadows the name. *)
 exception Missing_host
 
-let missing_host_exn = Missing_host
+let missing_host_sentinel = Missing_host
 
 let bad_string_error what value = Protocol_error (Printf.sprintf "%s %S" what value)
 
@@ -37,23 +37,23 @@ let error_to_string = function
 (* Internal sentinels carrying a typed boundary error through the raising parse
    path. Caught at the read/write boundary and mapped to {!error}; never escape
    the module. *)
-exception Transfer_error_exn of Transfer.error
-exception Unexpected_eof_exn
+exception Transfer_error_sentinel of Transfer.error
+exception Unexpected_eof_sentinel
 
 (* Run [Transfer.read_transfer], raising the internal sentinel on a boundary
    framing error so the surrounding raising parse code stays linear. *)
 let read_transfer_or_raise msg ic : Transfer.result Lwt.t =
   Transfer.read_transfer msg ic >>= function
   | Ok res -> Lwt.return res
-  | Error e -> Lwt.fail (Transfer_error_exn e)
+  | Error e -> Lwt.fail (Transfer_error_sentinel e)
 
 (* Map an exception raised by the raising parse path to a boundary {!error}. *)
-let error_of_exn = function
+let error_of_exception = function
   | Protocol_error s -> Protocol s
-  | Transfer_error_exn e -> Transfer e
-  | Unexpected_eof_exn -> Unexpected_eof
+  | Transfer_error_sentinel e -> Transfer e
+  | Unexpected_eof_sentinel -> Unexpected_eof
   | End_of_file -> Unexpected_eof
-  | e when e == missing_host_exn -> Missing_host
+  | e when e == missing_host_sentinel -> Missing_host
   | e -> raise e
 
 (* ------------------------------------------------------------------ *)
@@ -315,7 +315,7 @@ let read_request_raising (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
             Lwt.return r
           end
       end)
-    (function End_of_file -> Lwt.fail Unexpected_eof_exn | e -> Lwt.fail e)
+    (function End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
 
 (* ------------------------------------------------------------------ *)
 (* read_response (ReadResponse).                                       *)
@@ -334,7 +334,7 @@ let read_response_raising ?(request : Body.t Request.t option) (ic : Lwt_io.inpu
     Body.t Response.t Lwt.t =
   Lwt.catch
     (fun () -> read_line ic >|= fun l -> l)
-    (function End_of_file -> Lwt.fail Unexpected_eof_exn | e -> Lwt.fail e)
+    (function End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
   >>= fun line ->
   (match String.index_opt line ' ' with
   | None -> Lwt.fail (bad_string_error "malformed HTTP response" line)
@@ -420,7 +420,7 @@ let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) : 
     else match Uri.host r.Request.url with Some h -> h | None -> ""
   in
   (if host = "" && (match Uri.host r.Request.url with Some _ -> false | None -> r.Request.host = "") then
-     Lwt.fail missing_host_exn
+     Lwt.fail missing_host_sentinel
    else Lwt.return_unit)
   >>= fun () ->
   let ruri =
@@ -463,7 +463,7 @@ let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) : 
 let to_result (f : unit -> 'a Lwt.t) : ('a, error) result Lwt.t =
   Lwt.catch
     (fun () -> f () >|= fun v -> Ok v)
-    (fun e -> Lwt.return (Error (error_of_exn e)))
+    (fun e -> Lwt.return (Error (error_of_exception e)))
 
 let read_mime_header ic : (Header.t, error) result Lwt.t =
   to_result (fun () -> read_mime_header_raising ic)

@@ -117,17 +117,26 @@ val set_max_dynamic_table_size_dec : decoder -> int -> unit
 (** Mirrors [SetAllowedMaxDynamicTableSize]. *)
 val set_allowed_max_dynamic_table_size : decoder -> int -> unit
 
-(** [write d p] parses as much of [p] as possible, emitting fields. Returns
-    the number of bytes of [p] consumed into the decoder (= [length p], as
-    in Go: any unparsed tail is saved internally). Raises on a fatal
-    decoding error (the legacy decode exceptions); the incremental,
-    raise-based contract is retained for HTTP/2 callers until T7. The
-    [result] boundary is {!decode_full}. Mirrors Go's [Decoder.Write]. *)
+(** [write_result d p] parses as much of [p] as possible, emitting fields.
+    Returns [Ok n] where [n] is the number of bytes of [p] consumed (=
+    [length p], as in Go: any unparsed tail is saved internally), or [Error]
+    on a fatal decoding error. This is the incremental [result] entrypoint
+    used by the HTTP/2 meta-headers assembly. Mirrors Go's [Decoder.Write]. *)
+val write_result : decoder -> string -> (int, error) result
+
+(** [close_result d] declares the current header block complete and resets for
+    reuse, returning [Error (Decoding _)] on truncated headers. Mirrors Go's
+    [Decoder.Close]. *)
+val close_result : decoder -> (unit, error) result
+
+(** [write d p] is {!write_result} but {b raises} on a fatal decoding error
+    (the internal decode exceptions). The incremental, raise-based contract is
+    retained for the incremental decoder API (Go's [Decoder.Write]) where a
+    caller drives assembly directly. Mirrors Go's [Decoder.Write]. *)
 val write : decoder -> string -> int
 
-(** [close d] declares the current header block complete and resets for
-    reuse. Raises on truncated headers (legacy decode exception); the
-    [result] boundary is {!decode_full}. Mirrors Go's [Decoder.Close]. *)
+(** [close d] is {!close_result} but {b raises} on truncated headers. Mirrors
+    Go's [Decoder.Close]. *)
 val close : decoder -> unit
 
 (** [decode_full d p] decodes the whole block [p] into a header-field list.
@@ -135,8 +144,3 @@ val close : decoder -> unit
     headers, oversized string, invalid Huffman, varint overflow). Mirrors
     Go's [DecodeFull]. *)
 val decode_full : decoder -> string -> (header_field list, error) result
-
-(** [decode_full_exn d p] is {!decode_full} but raises on a decode error
-    instead of returning [Error]. Temporary shim for HTTP/2 callers not yet
-    migrated to the [result] API; to be removed in the HTTP/2 ticket (T7). *)
-val decode_full_exn : decoder -> string -> header_field list

@@ -89,13 +89,38 @@ let header_of_frame = function
 
 (* ---- errors ---- *)
 
+(* Frame-build / parse invariant exceptions. These remain the internal raise
+   mechanism (the write-side builders raise them, the read-side parsers raise
+   the connection/stream exceptions); [read_frame]/[read_meta_headers] map them
+   into the unified {!H2_error.t} at the public boundary. The bridge installed
+   below lets {!H2_error.to_exception}/{!H2_error.of_exception} round-trip them. *)
 exception Frame_too_large
 exception Invalid_stream_id
 exception Invalid_dep_stream_id
 exception Pad_length_too_large
 
+let () =
+  H2_error.set_frame_bridge
+    ~to_exception:(function
+      | H2_error.Frame_too_large -> Some Frame_too_large
+      | H2_error.Invalid_stream_id -> Some Invalid_stream_id
+      | H2_error.Invalid_dep_stream_id -> Some Invalid_dep_stream_id
+      | H2_error.Pad_length_too_large -> Some Pad_length_too_large
+      | _ -> None)
+    ~of_exception:(function
+      | Frame_too_large -> Some H2_error.Frame_too_large
+      | Invalid_stream_id -> Some H2_error.Invalid_stream_id
+      | Invalid_dep_stream_id -> Some H2_error.Invalid_dep_stream_id
+      | Pad_length_too_large -> Some H2_error.Pad_length_too_large
+      | _ -> None)
+
 (* Go's connError carries a public reason; we map it to Connection_error. *)
 let conn_error code = H2_error.Connection_error code
+
+(* Map an exception raised by the raising parse path to a unified boundary
+   {!H2_error.t}. A clean [End_of_file] is propagated (re-raised) by the read
+   boundary, not turned into an error value. *)
+let h2_error_of_exception (e : exn) : H2_error.t option = H2_error.of_exception e
 
 (* ---- stream id validity (mirror validStreamID / validStreamIDOrZero) ---- *)
 
@@ -315,13 +340,27 @@ let read_exactly ic n =
     Lwt.bind (Lwt_io.read_into_exactly ic b 0 n) (fun () ->
         Lwt.return (Bytes.unsafe_to_string b))
 
-let read_frame ?(max_size = max_frame_size) ic =
+(* Read a frame, raising the internal exceptions ([Frame_too_large],
+   [conn_error], [Stream_error], or a clean [End_of_file]). *)
+let read_frame_raising ?(max_size = max_frame_size) ic =
   Lwt.bind (read_exactly ic frame_header_len) (fun hdr_bytes ->
       let fh, raw_type = decode_frame_header_raw hdr_bytes in
       if fh.length > max_size then raise Frame_too_large
       else
         Lwt.bind (read_exactly ic fh.length) (fun payload ->
             Lwt.return (parse_payload fh raw_type payload)))
+
+(* Public boundary: surface a unified {!H2_error.t} on an HTTP/2 framing error.
+   A clean [End_of_file] (connection closed before/between frames) propagates as
+   an exception, matching Go's [io.EOF] return contract. *)
+let read_frame ?(max_size = max_frame_size) ic :
+    (frame, H2_error.t) result Lwt.t =
+  Lwt.catch
+    (fun () -> Lwt.map (fun f -> Ok f) (read_frame_raising ~max_size ic))
+    (fun e ->
+      match h2_error_of_exception e with
+      | Some err -> Lwt.return (Error err)
+      | None -> Lwt.fail e)
 
 (* ---- Lwt writers ---- *)
 
@@ -531,7 +570,7 @@ let check_pseudos stream_id fields =
       (H2_error.Stream_error
          (H2_error.stream_error stream_id H2_error.ProtocolError))
 
-let read_meta_headers ?(max_size = max_frame_size)
+let read_meta_headers_raising ?(max_size = max_frame_size)
     ?(max_header_list_size = 16 lsl 20) dec (hf_fh, (hf : headers_frame)) ic =
   let stream_id = hf_fh.stream_id in
   let remain_size = ref max_header_list_size in
@@ -573,12 +612,16 @@ let read_meta_headers ?(max_size = max_frame_size)
       raise (conn_error H2_error.ProtocolError)
     else if !invalid then raise (conn_error H2_error.ProtocolError)
     else begin
-      (try ignore (Hpack.write dec frag)
-       with _ -> raise (conn_error H2_error.CompressionError));
+      (* Feed the fragment to the HPACK decoder; a decode failure surfaces the
+         underlying {!Hpack.error} via the Compression arm (Go wraps it in a
+         CompressionError). *)
+      (match Hpack.write_result dec frag with
+       | Ok _ -> ()
+       | Error e -> raise (H2_error.Compression_error e));
       if ended then Lwt.return_unit
       else
         (* read next frame; it MUST be a CONTINUATION on the same stream. *)
-        Lwt.bind (read_frame ~max_size ic) (fun f ->
+        Lwt.bind (read_frame_raising ~max_size ic) (fun f ->
             match f with
             | Continuation (cfh, cf) ->
                 if cfh.stream_id <> stream_id then
@@ -591,8 +634,9 @@ let read_meta_headers ?(max_size = max_frame_size)
     end
   in
   Lwt.bind (loop hf.header_frag hf.end_headers) (fun () ->
-      (try Hpack.close dec
-       with _ -> raise (conn_error H2_error.CompressionError));
+      (match Hpack.close_result dec with
+       | Ok () -> ()
+       | Error e -> raise (H2_error.Compression_error e));
       let result_fields = List.rev !fields in
       if !invalid then
         raise
@@ -601,3 +645,19 @@ let read_meta_headers ?(max_size = max_frame_size)
       check_pseudos stream_id result_fields;
       Lwt.return
         { fh = hf_fh; fields = result_fields; truncated = !truncated })
+
+(* Public boundary: surface a unified {!H2_error.t} on a meta-headers framing /
+   HPACK / pseudo-header error. A clean [End_of_file] (a CONTINUATION never
+   arriving) propagates as an exception, as with {!read_frame}. *)
+let read_meta_headers ?(max_size = max_frame_size)
+    ?(max_header_list_size = 16 lsl 20) dec hf ic :
+    (meta_headers_frame, H2_error.t) result Lwt.t =
+  Lwt.catch
+    (fun () ->
+      Lwt.map
+        (fun mf -> Ok mf)
+        (read_meta_headers_raising ~max_size ~max_header_list_size dec hf ic))
+    (fun e ->
+      match h2_error_of_exception e with
+      | Some err -> Lwt.return (Error err)
+      | None -> Lwt.fail e)

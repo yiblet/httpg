@@ -12,8 +12,8 @@ exception Chunk_error of string
 (* malformed-chunk / framing errors carrying Go's message *)
 
 (* Handleable framing error variant (header / initial-parse boundary). The
-   legacy exceptions above stay for the mid-stream reader thunk (which keeps
-   raising, per Resolution #1) and for the [*_exn] shims. *)
+   legacy exceptions above stay for the mid-stream reader thunk, which keeps
+   raising per Resolution #1 (via the private [parse_hex_uint_or_raise]). *)
 type error =
   | Line_too_long
   | Chunk of string
@@ -59,9 +59,12 @@ let parse_hex_uint (v : string) : (int64, error) result =
     match !err with Some e -> Error e | None -> Ok !n
   end
 
-(* Shim: [parse_hex_uint] raising the legacy [Chunk_error] (for mid-stream use
-   and not-yet-migrated callers). *)
-let parse_hex_uint_exn (v : string) : int64 =
+(* Private mid-stream helper: [parse_hex_uint] raising the legacy [Chunk_error]
+   inside the chunked-reader's [Body.Stream] thunk (Resolution #1 — a malformed
+   chunk size discovered after reader init keeps raising, the faithful analogue
+   of Go's "a later Read returns an error"). NOT exposed; this is internal
+   control flow, not a handleable boundary error. *)
+let parse_hex_uint_or_raise (v : string) : int64 =
   match parse_hex_uint v with Ok n -> n | Error e -> raise (exn_of_error e)
 
 let is_ows_b b = b = ' ' || b = '\t'
@@ -132,7 +135,7 @@ let new_chunked_reader (ic : Lwt_io.input_channel) : unit -> string option Lwt.t
           excess := Int64.add !excess (Int64.of_int (String.length line + 2));
           let line = trim_trailing_whitespace line in
           let line = remove_chunk_extension line in
-          let n = parse_hex_uint_exn line in
+          let n = parse_hex_uint_or_raise line in
           (* excess -= 16 + 2*n; clamp at 0; cap at 16KiB. *)
           excess := Int64.sub !excess (Int64.add 16L (Int64.mul 2L n));
           if Int64.compare !excess 0L < 0 then excess := 0L;

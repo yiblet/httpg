@@ -565,8 +565,15 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
     Lwt.catch
       (fun () ->
         (* HEADERS need read_meta_headers assembly; peek the frame header by
-           reading a full frame, then for HEADERS assemble continuations. *)
-        let* f = F.read_frame cc.ic in
+           reading a full frame, then for HEADERS assemble continuations.
+           The boundary returns [result]; the conn loop drives stream-abort /
+           GOAWAY by raising, so convert [Error] back via [to_exception]
+           (Resolution #2 — boundary-only). *)
+        let* f =
+          Lwt.map
+            (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
+            (F.read_frame cc.ic)
+        in
         Lwt.return (`Frame f))
       (fun e -> Lwt.return (`Error e))
   in
@@ -599,7 +606,13 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
                 match f with
                 | F.Headers (fh, hf) ->
                     (* assemble HEADERS (+CONTINUATION) via read_meta_headers. *)
-                    let* mf = F.read_meta_headers cc.hdec (fh, hf) cc.ic in
+                    let* mf =
+                      Lwt.map
+                        (function
+                          | Ok mf -> mf
+                          | Error e -> raise (H2_error.to_exception e))
+                        (F.read_meta_headers cc.hdec (fh, hf) cc.ic)
+                    in
                     (* preserve END_STREAM flag from the HEADERS frame. *)
                     let mf = { mf with F.fh = { mf.F.fh with flags = fh.flags } } in
                     process_headers cc mf

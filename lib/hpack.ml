@@ -33,9 +33,9 @@ let error_to_string = function
    path still raises these (consumed by the HTTP/2 layer until T7); the
    [decode_full] boundary maps them to {!error}. *)
 exception Decoding_error of string
-exception Invalid_indexed_exn of int
-exception String_too_long_exn
-exception Invalid_huffman_exn
+exception Invalid_indexed_sentinel of int
+exception String_too_long_sentinel
+exception Invalid_huffman_sentinel
 
 (* errNeedMore is an internal control-flow sentinel: not enough data yet. *)
 exception Need_more
@@ -291,7 +291,7 @@ let call_emit d hf =
   if d.max_str_len <> 0 then
     if String.length hf.name > d.max_str_len
        || String.length hf.value > d.max_str_len
-    then raise String_too_long_exn;
+    then raise String_too_long_sentinel;
   if d.emit_enabled then d.emit hf
 
 (* Go: decodeString *)
@@ -302,7 +302,7 @@ let decode_string _d u =
        maxLen=0 path. Enforce length post-decode in readString/callEmit. *)
     match Huff.decode u.b with
     | Ok s -> s
-    | Error Hpack_huffman.Invalid_huffman -> raise Invalid_huffman_exn
+    | Error Hpack_huffman.Invalid_huffman -> raise Invalid_huffman_sentinel
 
 (* Go: readString. Returns Ok (undecoded, next_pos) or Error error; raises
    {!Need_more} on truncation. *)
@@ -406,18 +406,18 @@ let parse_header_field_repr d s pos =
    keep their raising contract for the HTTP/2 layer until T7). *)
 let exn_of_error = function
   | Decoding s -> Decoding_error s
-  | Invalid_indexed i -> Invalid_indexed_exn i
-  | String_too_long -> String_too_long_exn
-  | Invalid_huffman -> Invalid_huffman_exn
+  | Invalid_indexed i -> Invalid_indexed_sentinel i
+  | String_too_long -> String_too_long_sentinel
+  | Invalid_huffman -> Invalid_huffman_sentinel
   | Var_int_overflow -> Decoding_error "varint integer overflow"
 
 (* Map the internal exceptions raised by [call_emit]/[decode_string] back to
    the public {!error} (for the [result] boundary). Re-raises anything else. *)
-let error_of_exn = function
+let error_of_exception = function
   | Decoding_error s -> Decoding s
-  | Invalid_indexed_exn i -> Invalid_indexed i
-  | String_too_long_exn -> String_too_long
-  | Invalid_huffman_exn -> Invalid_huffman
+  | Invalid_indexed_sentinel i -> Invalid_indexed i
+  | String_too_long_sentinel -> String_too_long
+  | Invalid_huffman_sentinel -> Invalid_huffman
   | e -> raise e
 
 (* Go: Decoder.Write, as a [result]. Returns Ok (length p) on success (bytes
@@ -448,7 +448,7 @@ let write_result d p : (int, error) result =
       let step =
         try `Field (parse_header_field_repr d buf !pos) with
         | Need_more -> `Need_more
-        | e -> `Field (Error (error_of_exn e))
+        | e -> `Field (Error (error_of_exception e))
       in
       match step with
       | `Field (Ok next) ->
@@ -507,7 +507,3 @@ let decode_full d p : (header_field list, error) result =
           match close_result d with
           | Error e -> Error e
           | Ok () -> Ok (List.rev !acc)))
-
-(* Shim: raises on a decode error. Removed once HTTP/2 callers migrate (T7). *)
-let decode_full_exn d p =
-  match decode_full d p with Ok fs -> fs | Error e -> raise (exn_of_error e)

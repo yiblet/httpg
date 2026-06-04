@@ -24,8 +24,3 @@ val encoded_len : string -> int
     on invalid data (incomplete symbol, overlong padding, or non-EOS-prefix
     trailing bits). Mirrors Go's [HuffmanDecodeToString] / [huffmanDecode]. *)
 val decode : string -> (string, error) result
-
-(** [decode_exn s] is {!decode} but raises on invalid data instead of
-    returning [Error]. Temporary shim for HTTP/2 callers not yet migrated to
-    the [result] API; to be removed in the HTTP/2 ticket (T7). *)
-val decode_exn : string -> string
