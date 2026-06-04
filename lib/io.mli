@@ -12,36 +12,77 @@
    discard it. *)
 
 (** A parse / protocol error, carrying Go's message text (Go's
-    [ProtocolError] / [badStringError]). *)
+    [ProtocolError] / [badStringError]).
+
+    {b Retained} for the [*_exn] shims and the {b mid-stream} body thunk; the
+    handleable boundary error is {!error} below. *)
 exception Protocol_error of string
 
-(** Raised by {!write_request} when the request has no Host or URL host
-    (Go's [errMissingHost]). *)
+(** Raised by {!write_request_exn} when the request has no Host or URL host
+    (Go's [errMissingHost]). Retained for the [*_exn] shim; the handleable
+    boundary error is {!error}'s {!Missing_host} arm. *)
 exception Missing_host
+
+(** Handleable error at the request/response read/write boundary. Lower-level
+    framing failures are embedded via the {!Transfer} arm.
+
+    {b Mid-stream policy (Resolution #1):} errors discovered inside a {!Body.t}
+    [Stream] thunk {b after} {!read_request}/{!read_response} returned [Ok] keep
+    {b raising} (the faithful analogue of Go's "a later [Read] returns an
+    error"). Only the header / initial-parse boundary surfaces [Error]. *)
+type error =
+  | Protocol of string  (** malformed MIME header / request line; was {!Protocol_error} *)
+  | Missing_host  (** {!write_request}: no Host / URL host (Go's [errMissingHost]) *)
+  | Transfer of Transfer.error  (** embedded framing error from {!Transfer.read_transfer} *)
+  | Unexpected_eof  (** clean EOF before a full message (Go's [io.ErrUnexpectedEOF]) *)
+
+(** Render an {!error} as its Go message text. *)
+val error_to_string : error -> string
 
 (** [read_mime_header ic] reads a CRLF-terminated header block (until the blank
     line), folding obs-fold continuation lines, into a {!Header.t}. Port of
-    [textproto.Reader.ReadMIMEHeader]. *)
-val read_mime_header : Lwt_io.input_channel -> Header.t Lwt.t
+    [textproto.Reader.ReadMIMEHeader]. A malformed line short-circuits as
+    [Error (Protocol _)]. *)
+val read_mime_header : Lwt_io.input_channel -> (Header.t, error) result Lwt.t
 
 (** [read_request ic] is [ReadRequest]: parse the request line, headers
     (Host promoted to [host] and deleted from the header map), and body framing
     from [ic]. The body is a streaming {!Body.Stream} reading lazily from [ic];
     it is not buffered. Consume it to EOF ({!Body.read_all}/{!Body.drain}) to
-    reach the next message boundary and populate any chunked trailer. *)
-val read_request : Lwt_io.input_channel -> Body.t Request.t Lwt.t
+    reach the next message boundary and populate any chunked trailer.
+
+    Header / initial-parse errors short-circuit as [Error]; see {!error} for the
+    mid-stream policy. *)
+val read_request : Lwt_io.input_channel -> (Body.t Request.t, error) result Lwt.t
 
 (** [read_response ?request ic] is [ReadResponse]: parse the status line,
     headers and body framing. [request] optionally supplies the corresponding
     request (for HEAD body suppression); a GET is assumed otherwise. The body is
     a streaming {!Body.Stream} reading lazily from [ic] (not buffered); consume
     it to EOF to reach the next message boundary and read any chunked trailer. *)
-val read_response : ?request:Body.t Request.t -> Lwt_io.input_channel -> Body.t Response.t Lwt.t
+val read_response :
+  ?request:Body.t Request.t -> Lwt_io.input_channel -> (Body.t Response.t, error) result Lwt.t
 
 (** [write_request oc r] is [Request.Write]: write the request line, Host /
     User-Agent / framing headers, the remaining headers and the body. Always
-    emits ["HTTP/1.1"]. Raises {!Missing_host} when no host is available. *)
-val write_request : Lwt_io.output_channel -> Body.t Request.t -> unit Lwt.t
+    emits ["HTTP/1.1"]. Returns [Error Missing_host] when no host is available. *)
+val write_request : Lwt_io.output_channel -> Body.t Request.t -> (unit, error) result Lwt.t
+
+(* --- Shims: legacy raising contracts for not-yet-migrated callers (Server /
+   Transport / Client), deleted in Ticket 6. --- *)
+
+(** Shim: {!read_mime_header} raising {!Protocol_error}. *)
+val read_mime_header_exn : Lwt_io.input_channel -> Header.t Lwt.t
+
+(** Shim: {!read_request} raising {!Protocol_error} (consumed by {!Server}). *)
+val read_request_exn : Lwt_io.input_channel -> Body.t Request.t Lwt.t
+
+(** Shim: {!read_response} raising {!Protocol_error} (consumed by {!Transport}). *)
+val read_response_exn : ?request:Body.t Request.t -> Lwt_io.input_channel -> Body.t Response.t Lwt.t
+
+(** Shim: {!write_request} raising {!Missing_host} / {!Protocol_error} (consumed
+    by {!Transport}). *)
+val write_request_exn : Lwt_io.output_channel -> Body.t Request.t -> unit Lwt.t
 
 (** [write_response oc r] is [Response.Write]: write the status line, framing
     headers, the remaining headers and the body, applying Go's zero-length-body

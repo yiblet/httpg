@@ -14,6 +14,7 @@ let () =
       ("Cookie", Test_cookie.tests);
       ("Values", Test_values.tests);
       ("Transfer", Test_transfer.tests);
+      ("Io", Test_io.tests);
       ("Request", Test_request.tests);
       ("ReadRequest", Test_readrequest.tests);
       ("RequestWrite", Test_requestwrite.tests);

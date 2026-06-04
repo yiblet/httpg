@@ -2,7 +2,7 @@
 
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
 
-let read s = Lwt_main.run (Gohttp.Io.read_request (ic_of_string s))
+let read s = Lwt_main.run (Gohttp.Io.read_request_exn (ic_of_string s))
 
 let body_of (r : Gohttp.Body.t Gohttp.Request.t) =
   Lwt_main.run (Gohttp.Body.read_all r.body)

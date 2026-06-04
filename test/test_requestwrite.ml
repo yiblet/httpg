@@ -44,7 +44,7 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1) ?(header = Gohttp.
     ctx = Gohttp.Context.background;
   }
 
-let write r = capture (fun oc -> Gohttp.Io.write_request oc r)
+let write r = capture (fun oc -> Gohttp.Io.write_request_exn oc r)
 
 (* Row 0: GET, no body, custom headers, no Content-Length. *)
 let row0 () =

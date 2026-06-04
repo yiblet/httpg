@@ -493,13 +493,6 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
 
   Lwt_result.return { body; content_length; is_chunked; result_close = close; trailer }
 
-(* Shim: {!read_transfer} raising the legacy exceptions (consumed by [Io] until
-   Ticket 5 migrates it off the shim). *)
-let read_transfer_exn (msg : message) (ic : Lwt_io.input_channel) : result Lwt.t =
-  Lwt.bind (read_transfer msg ic) (function
-    | Ok r -> Lwt.return r
-    | Error e -> raise (exn_of_error e))
-
 (* ------------------------------------------------------------------ *)
 (* write_body: the transferWriter body-writing logic.                  *)
 (* ------------------------------------------------------------------ *)

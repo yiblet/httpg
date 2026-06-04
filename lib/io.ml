@@ -5,10 +5,56 @@
 
 open Lwt.Infix
 
-(* A protocol/parse error, carrying Go's message text. *)
+(* A protocol/parse error, carrying Go's message text. Retained as the internal
+   raise mechanism for the parse helpers (caught at the read/write boundary and
+   mapped to {!error}), for the mid-stream body thunk, and for the [*_exn]
+   shims. *)
 exception Protocol_error of string
 
+(* Raised by [write_request_exn] when no Host is available (Go's
+   errMissingHost). Declared before [type error] so its constructor name is the
+   exception; [missing_host_exn] aliases it for raising after the [error]
+   variant (which also has a [Missing_host] arm) shadows the name. *)
+exception Missing_host
+
+let missing_host_exn = Missing_host
+
 let bad_string_error what value = Protocol_error (Printf.sprintf "%s %S" what value)
+
+(* Handleable boundary error (see io.mli). *)
+type error =
+  | Protocol of string
+  | Missing_host
+  | Transfer of Transfer.error
+  | Unexpected_eof
+
+let error_to_string = function
+  | Protocol s -> s
+  | Missing_host -> "http: Request.Write on Request with no Host or URL set"
+  | Transfer e -> Transfer.error_to_string e
+  | Unexpected_eof -> "unexpected EOF"
+
+(* Internal sentinels carrying a typed boundary error through the raising parse
+   path. Caught at the read/write boundary and mapped to {!error}; never escape
+   the module. *)
+exception Transfer_error_exn of Transfer.error
+exception Unexpected_eof_exn
+
+(* Run [Transfer.read_transfer], raising the internal sentinel on a boundary
+   framing error so the surrounding raising parse code stays linear. *)
+let read_transfer_or_raise msg ic : Transfer.result Lwt.t =
+  Transfer.read_transfer msg ic >>= function
+  | Ok res -> Lwt.return res
+  | Error e -> Lwt.fail (Transfer_error_exn e)
+
+(* Map an exception raised by the raising parse path to a boundary {!error}. *)
+let error_of_exn = function
+  | Protocol_error s -> Protocol s
+  | Transfer_error_exn e -> Transfer e
+  | Unexpected_eof_exn -> Unexpected_eof
+  | End_of_file -> Unexpected_eof
+  | e when e == missing_host_exn -> Missing_host
+  | e -> raise e
 
 (* ------------------------------------------------------------------ *)
 (* textproto-style line + MIME header reading.                         *)
@@ -58,7 +104,7 @@ let valid_header_value_byte c =
 (* ReadMIMEHeader: read a CRLF-terminated header block (until the blank line),
    honoring obs-fold continuation lines (lines starting with space/tab). Returns
    the populated Header. Raises Protocol_error on a malformed line. *)
-let read_mime_header (ic : Lwt_io.input_channel) : Header.t Lwt.t =
+let read_mime_header_raising (ic : Lwt_io.input_channel) : Header.t Lwt.t =
   let h = Header.create () in
   (* Read all raw lines of the header block, folding continuations. *)
   let rec gather acc =
@@ -149,7 +195,7 @@ let stream_body ~(is_chunked : bool) ~(declared_trailer : Header.t option)
            trailing CRLF, so the trailer block (possibly a bare CRLF) is read
            here. *)
         if is_chunked then
-          read_mime_header ic >|= fun hdr ->
+          read_mime_header_raising ic >|= fun hdr ->
           set_trailer (merge_trailer declared_trailer hdr);
           None
         else (
@@ -193,7 +239,7 @@ let is_token (s : string) : bool =
          | _ -> true)
        s
 
-let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
+let read_request_raising (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
   Lwt.catch
     (fun () ->
       read_line ic >>= fun s ->
@@ -211,7 +257,7 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
           let rawurl = if just_authority then "http://" ^ rawurl else rawurl in
           let url = Uri.of_string rawurl in
           let url = if just_authority then Uri.with_scheme url None else url in
-          read_mime_header ic >>= fun header ->
+          read_mime_header_raising ic >>= fun header ->
           if List.length (Header.values header "Host") > 1 then Lwt.fail (Protocol_error "too many Host headers")
           else begin
             let host =
@@ -230,7 +276,7 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
                 close;
               }
             in
-            Transfer.read_transfer_exn msg ic >>= fun res ->
+            read_transfer_or_raise msg ic >>= fun res ->
             (* ReadRequest deletes the Host header. *)
             Header.del header "Host";
             (* Build the record first with the declared trailer; the streaming
@@ -269,7 +315,7 @@ let read_request (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
             Lwt.return r
           end
       end)
-    (function End_of_file -> Lwt.fail (Protocol_error "unexpected EOF") | e -> Lwt.fail e)
+    (function End_of_file -> Lwt.fail Unexpected_eof_exn | e -> Lwt.fail e)
 
 (* ------------------------------------------------------------------ *)
 (* read_response (ReadResponse).                                       *)
@@ -284,11 +330,11 @@ let trim_left_spaces s =
   done;
   String.sub s !i (n - !i)
 
-let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channel) :
+let read_response_raising ?(request : Body.t Request.t option) (ic : Lwt_io.input_channel) :
     Body.t Response.t Lwt.t =
   Lwt.catch
     (fun () -> read_line ic >|= fun l -> l)
-    (function End_of_file -> Lwt.fail (Protocol_error "unexpected EOF") | e -> Lwt.fail e)
+    (function End_of_file -> Lwt.fail Unexpected_eof_exn | e -> Lwt.fail e)
   >>= fun line ->
   (match String.index_opt line ' ' with
   | None -> Lwt.fail (bad_string_error "malformed HTTP response" line)
@@ -309,7 +355,7 @@ let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channe
       match Request.parse_http_version proto with
       | None -> Lwt.fail (bad_string_error "malformed HTTP version" proto)
       | Some (proto_major, proto_minor) ->
-        read_mime_header ic >>= fun header ->
+        read_mime_header_raising ic >>= fun header ->
         fix_pragma_cache_control header;
         let request_method = match request with Some r -> r.Request.meth | None -> "GET" in
         let msg =
@@ -323,7 +369,7 @@ let read_response ?(request : Body.t Request.t option) (ic : Lwt_io.input_channe
             close = false;
           }
         in
-        Transfer.read_transfer_exn msg ic >>= fun res ->
+        read_transfer_or_raise msg ic >>= fun res ->
         (* Build the record first with the declared trailer; the streaming
            body's EOF action mutates [resp.trailer] on the chunked trailer read
            (Go's mergeSetHeader onto rr.Trailer). *)
@@ -368,15 +414,13 @@ let request_uri_of (u : Uri.t) : string =
 let string_contains_ctl_byte s =
   String.exists (fun c -> let b = Char.code c in b < 0x20 || b = 0x7f) s
 
-exception Missing_host
-
-let write_request (oc : Lwt_io.output_channel) (r : Body.t Request.t) : unit Lwt.t =
+let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) : unit Lwt.t =
   let host =
     if r.Request.host <> "" then r.Request.host
     else match Uri.host r.Request.url with Some h -> h | None -> ""
   in
   (if host = "" && (match Uri.host r.Request.url with Some _ -> false | None -> r.Request.host = "") then
-     Lwt.fail Missing_host
+     Lwt.fail missing_host_exn
    else Lwt.return_unit)
   >>= fun () ->
   let ruri =
@@ -409,6 +453,35 @@ let write_request (oc : Lwt_io.output_channel) (r : Body.t Request.t) : unit Lwt
     Lwt_io.write oc (Buffer.contents buf) >>= fun () ->
     Lwt_io.write oc "\r\n" >>= fun () -> Transfer.write_body oc tw
   end
+
+(* ------------------------------------------------------------------ *)
+(* Result boundary wrappers + legacy *_exn shims.                      *)
+(* ------------------------------------------------------------------ *)
+
+(* Catch the internal raising sentinels and map them to a boundary [error];
+   non-boundary exceptions (IO errors other than EOF, programmer bugs) escape. *)
+let to_result (f : unit -> 'a Lwt.t) : ('a, error) result Lwt.t =
+  Lwt.catch
+    (fun () -> f () >|= fun v -> Ok v)
+    (fun e -> Lwt.return (Error (error_of_exn e)))
+
+let read_mime_header ic : (Header.t, error) result Lwt.t =
+  to_result (fun () -> read_mime_header_raising ic)
+
+let read_request ic : (Body.t Request.t, error) result Lwt.t =
+  to_result (fun () -> read_request_raising ic)
+
+let read_response ?request ic : (Body.t Response.t, error) result Lwt.t =
+  to_result (fun () -> read_response_raising ?request ic)
+
+let write_request oc r : (unit, error) result Lwt.t =
+  to_result (fun () -> write_request_raising oc r)
+
+(* Shims: raising contracts for not-yet-migrated callers (deleted in Ticket 6). *)
+let read_mime_header_exn = read_mime_header_raising
+let read_request_exn = read_request_raising
+let read_response_exn = read_response_raising
+let write_request_exn = write_request_raising
 
 (* ------------------------------------------------------------------ *)
 (* write_response (Response.Write).                                    *)

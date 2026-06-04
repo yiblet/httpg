@@ -626,7 +626,7 @@ let serve_conn (handler : handler) (cfd, peer) =
   let conn_ctx, cancel_conn = Context.with_cancel Context.background in
   let rec loop () =
     Lwt.catch
-      (fun () -> Io.read_request ic >>= fun r -> Lwt.return (Some r))
+      (fun () -> Io.read_request_exn ic >>= fun r -> Lwt.return (Some r))
       (fun _ -> Lwt.return None)
     >>= function
     | None -> Lwt.return_unit (* EOF or parse error: close. *)
@@ -724,7 +724,7 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
       let conn_ctx, cancel_conn = Context.with_cancel Context.background in
       let rec loop () =
         Lwt.catch
-          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (Some r))
+          (fun () -> Io.read_request_exn ic >>= fun r -> Lwt.return (Some r))
           (fun _ -> Lwt.return None)
         >>= function
         | None -> Lwt.return_unit

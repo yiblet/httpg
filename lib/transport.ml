@@ -260,9 +260,9 @@ let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
       Body.Stream next
   in
   let exchange pc =
-    Io.write_request pc.oc req >>= fun () ->
+    Io.write_request_exn pc.oc req >>= fun () ->
     Lwt_io.flush pc.oc >>= fun () ->
-    Io.read_response ~request:req pc.ic >>= fun resp ->
+    Io.read_response_exn ~request:req pc.ic >>= fun resp ->
     resp.Response.body <- wrap_body_lifecycle pc resp;
     Lwt.return resp
   in

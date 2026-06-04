@@ -162,10 +162,6 @@ type result = {
 val read_transfer :
   message -> Lwt_io.input_channel -> (result, error) Stdlib.result Lwt.t
 
-(** Shim: {!read_transfer} raising the legacy exceptions (consumed by {!Io}
-    until Ticket 5 migrates it off the shim). *)
-val read_transfer_exn : message -> Lwt_io.input_channel -> result Lwt.t
-
 (* --- write_body. --- *)
 
 (** The sanitized writer triple, mirroring the body-writing subset of

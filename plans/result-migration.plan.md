@@ -531,7 +531,7 @@ Spot-check (`Transfer` suite): `parse_content_length_result [OK]`,
 (`refactor(errors): transfer/chunked framing return result (Result migration T4)`).
 
 ### Ticket 5 — Message read/write → `Lwt_result` (io)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Convert the request/response boundary: `Io.read_mime_header`, `read_request`, `read_response`, `write_request` return `result`/`result Lwt.t` with `Io.error` (embedding `Transfer.error`). Migrate `Io` off `Transfer`'s `*_exn` shims.
@@ -564,7 +564,98 @@ val read_request_exn : Lwt_io.input_channel -> Body.t Request.t Lwt.t   (* shim,
 `dune build` clean; `dune test` (incl. existing `Io`/request tests) passes.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done. Second Lwt/IO conversion — the request/response read/write
+boundary now returns typed `result`, and `Io` is fully off `Transfer`'s `*_exn`
+shims.
+
+**`Io.error` shape (`io.mli` + `io.ml`):**
+```
+type error =
+  | Protocol of string        (* malformed MIME header / request line; was Protocol_error *)
+  | Missing_host              (* write_request: no Host / URL host *)
+  | Transfer of Transfer.error (* embedded framing error from Transfer.read_transfer *)
+  | Unexpected_eof
+```
+plus `error_to_string : error -> string`.
+
+**Entrypoints converted to `result`:**
+- `read_mime_header : … -> (Header.t, error) result Lwt.t`
+- `read_request    : … -> (Body.t Request.t, error) result Lwt.t`
+- `read_response   : ?request:… -> … -> (Body.t Response.t, error) result Lwt.t`
+- `write_request   : … -> (unit, error) result Lwt.t`
+
+**Implementation notes:**
+- The existing raising parse helpers were kept as internal `*_raising`
+  functions; the public `result` entrypoints wrap them with a single `to_result`
+  combinator (`Lwt.catch` → `error_of_exn`). This keeps the linear textproto
+  parse code unchanged while surfacing a typed boundary error.
+- `Io` now calls `Transfer.read_transfer` (the **result** API) directly via a
+  small `read_transfer_or_raise` adapter that raises an internal
+  `Transfer_error_exn of Transfer.error` sentinel; `error_of_exn` maps it to the
+  `Transfer` arm. No `Transfer.*_exn` shim is called from `Io` anymore.
+- Internal sentinels (`Transfer_error_exn`, `Unexpected_eof_exn`) and the
+  retained `exception Protocol_error` / `exception Missing_host` never escape:
+  `error_of_exn` maps `Protocol_error`→`Protocol`, `Transfer_error_exn`→`Transfer`,
+  `Unexpected_eof_exn`/`End_of_file`→`Unexpected_eof`, and the `Missing_host`
+  exception value (via physical-equality alias `missing_host_exn`) →
+  `Missing_host`. Raw `End_of_file` at the read boundary maps to `Unexpected_eof`.
+- **Name-clash handling:** `type error` has a `Missing_host` arm *and* `io.mli`
+  retains `exception Missing_host` (constructor-namespace collision). Resolved by
+  declaring the exception before `type error` and aliasing it as
+  `missing_host_exn` for raising after the variant shadows the name; the
+  `error_of_exn` match uses `e when e == missing_host_exn`.
+- **Decision #1 (mid-stream) preserved:** the chunked-trailer read inside the
+  `Body.Stream` thunk (`stream_body`) uses `read_mime_header_raising`, so a
+  malformed trailer discovered after `Ok` keeps raising — only the
+  header/initial-parse boundary returns `result`.
+
+**Shims added (legacy raising contracts for not-yet-migrated callers; deleted in
+Ticket 6):** `Io.read_mime_header_exn`, `Io.read_request_exn`,
+`Io.read_response_exn`, `Io.write_request_exn`.
+
+**Transfer shims removed:** `Transfer.read_transfer_exn` (`.ml` + `.mli`) —
+deleted, zero callers now that `Io` uses the result API. **h2 (`h2_server`,
+`h2_transport`) was confirmed to make no `Transfer.*` calls at all** (grep:
+no `Transfer.` references in any `lib/h2_*.ml`), so nothing was kept for T7 on
+Transfer's behalf. `Chunked.parse_hex_uint_exn` is **retained** — it is still
+called by the chunked reader's mid-stream `Body.Stream` thunk
+(`chunked.ml:135`). The other speculative Transfer `*_exn` shims introduced in
+T4 (`parse_content_length_exn`, `fix_length_exn`, `fix_trailer_exn`,
+`parse_transfer_encoding_exn`, `parse_hex_uint_exn`) were never wired to `Io` and
+are left untouched (out of T5 scope; harmless, candidate for a later sweep).
+
+**Callers updated to the `*_exn` shims (full migration deferred to T6):**
+- `lib/server.ml` (×2 serve-loop sites) → `Io.read_request_exn`.
+- `lib/transport.ml` → `Io.write_request_exn` + `Io.read_response_exn`.
+- Existing Go-fidelity row tests: `test/test_readrequest.ml`
+  (`read_request_exn`), `test/test_response.ml` (`read_response_exn`),
+  `test/test_requestwrite.ml` (`write_request_exn`), `test/test_stream_read.ml`
+  (`read_response_exn`). These assert success-path behavior; they ride the shims
+  until T6.
+
+**Named test added + registered (PLAN SUCCESS CRITERION):**
+- `Io.read_request_malformed` (new `test/test_io.ml`, new `Io` suite registered
+  in `test/test_gohttp.ml`) — over an `Lwt_io` pipe/string channel, bounded by
+  `Net.with_timeout 5.0`: (a) `"GET\r\n\r\n"` → `Error (Protocol _)`; (b) a bad
+  header line (no colon) → `Error (Protocol _)`; (c) a well-formed request →
+  `Ok r` with `meth="GET"`, `host="foo.com"`; (d) `write_request` on a request
+  with no Host → `Error Missing_host`.
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+EXIT=0
+$ dune test --root <worktree> --force
+Test Successful in 1.865s. 497 tests run.
+EXIT=0
+```
+(Baseline before the change: build exit 0, 496 tests. Net +1 named test.)
+Spot-check (`Io` suite): `Io read_request_malformed [OK]`.
+
+**Commit id:** jj change **`vylozrsw`** (canonical, stable id)
+(`refactor(errors): io read/write request/response return result (Result migration T5)`).
+Resolve the current git hash with `jj log -r vylozrsw`.
 
 ### Ticket 6 — HTTP/1.x endpoints → `result` (server, client, transport, fs, form)
 Status: Planned
