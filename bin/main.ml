@@ -18,8 +18,9 @@ open Lwt.Infix
 
 let handler =
   Server.handler_func (fun w r ->
-      w.Server.write (Printf.sprintf "Hello from gohttp! You requested %s\n"
-        (Uri.path r.Request.url)))
+      w.Server.write
+        (Printf.sprintf "Hello from gohttp! You requested %s\n"
+           (Uri.path r.Request.url)))
 
 (* Streaming handler: emit a sequence of chunks, flushing between each so the
    client can observe them before the handler returns. *)
@@ -52,14 +53,14 @@ let demo_stream () =
          arrives. We never call [Body.read_all], so nothing is pre-buffered. *)
       match resp.Response.body with
       | Body.Stream next ->
-        let rec loop n =
-          next () >>= function
-          | None -> Lwt_io.printf "  [EOF after %d chunk(s)]\n" n
-          | Some chunk ->
-            Lwt_io.printf "  [chunk %d arrived] %s" (n + 1) chunk >>= fun () ->
-            loop (n + 1)
-        in
-        loop 0
+          let rec loop n =
+            next () >>= function
+            | None -> Lwt_io.printf "  [EOF after %d chunk(s)]\n" n
+            | Some chunk ->
+                Lwt_io.printf "  [chunk %d arrived] %s" (n + 1) chunk
+                >>= fun () -> loop (n + 1)
+          in
+          loop 0
       | Body.String s -> Lwt_io.printf "  [string body] %s" s
       | Body.Empty -> Lwt_io.printf "  [empty body]\n")
     (fun () -> Server.close srv)
@@ -75,7 +76,8 @@ let demo_http () =
       Client.get Client.default_client url >>= fun resp ->
       Body.read_all resp.Response.body >>= fun body ->
       Lwt_io.printf "GET %s\n-> %d %s\n%s" url resp.Response.status_code
-        (Status.status_text resp.Response.status_code) body)
+        (Status.status_text resp.Response.status_code)
+        body)
     (fun () -> Server.close srv)
 
 (* TLS + ALPN round trip: the server advertises ["h2"; "http/1.1"] and the
@@ -94,15 +96,16 @@ let demo_h2 () =
       Client.get client url >>= fun resp ->
       Body.read_all resp.Response.body >>= fun body ->
       Lwt_io.printf "GET %s (h2 round trips: %d)\n-> %d %s\n%s" url
-        (Transport.h2_round_trip_count transport) resp.Response.status_code
-        (Status.status_text resp.Response.status_code) body)
+        (Transport.h2_round_trip_count transport)
+        resp.Response.status_code
+        (Status.status_text resp.Response.status_code)
+        body)
     (fun () -> Server.close srv)
 
 let main () =
-  demo_stream () >>= fun () ->
-  Lwt_io.printf "\n" >>= fun () ->
-  demo_http () >>= fun () ->
-  Lwt_io.printf "\n" >>= fun () ->
-  demo_h2 ()
+  let append_line_before i demo =
+    if i <> 0 then Lwt_io.printf "\n" >>= demo else demo ()
+  in
+  Lwt_list.iteri_s append_line_before [ demo_stream; demo_http; demo_h2 ]
 
 let () = Lwt_main.run (Net.with_timeout 30. (main ()))
