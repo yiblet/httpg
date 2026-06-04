@@ -973,7 +973,7 @@ $ grep -rn "decode_full_exn\|decode_exn\|read_transfer_exn\|parse_hex_uint_exn" 
 Resolve the current git hash with `jj log -r rxopklom`.
 
 ### Ticket 8 — Final sweep, unhandleable documentation, regression guard
-Status: Planned
+Status: Done
 
 **A) Scope**
 Lock the philosophy in: document the surviving unhandleable exceptions, add the regression **guard test**, and update `CLAUDE.md`/`TODO.md`. Confirm `Lwt_result` syntax usage is consistent.
@@ -994,7 +994,115 @@ Documentation + test only; no signature changes. Audit that every remaining `rai
 `dune build` clean; `dune test` full suite + guard passes; docs updated.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done. Documentation + guard test only — no `lib/` signature or
+behavior changes. Baseline at ticket start: build exit 0, **502** tests. End
+state: **504** tests (+2 guard cases).
+
+**What changed:**
+
+- **Guard test suite `Error_policy`** (`test/test_error_policy.ml`, registered in
+  `test/test_gohttp.ml` as `("Error_policy", …)`). It is file-based over the
+  source `.mli`s (located via candidate relative paths from the `dune test` cwd —
+  `../lib`, with fallbacks — and the `.mli` files are declared as
+  `(glob_files ../lib/*.mli)` / `(glob_files ../lib/internal/*.mli)` deps of the
+  test in `test/dune`, so dune materializes them next to the runner). Substring
+  search is whitespace-tolerant (looks for the token, not an exact line).
+  - `Error_policy.no_handleable_raise_escapes`:
+    - asserts **no `_exn` identifier** appears in any swept `.mli`
+      (`transfer, io, hpack, hpack_huffman, pattern, values, cookie, fs, form,
+      server, h2_frame, h2_error, client, transport, internal/chunked`);
+    - asserts each migrated module (`transfer, io, hpack, hpack_huffman,
+      pattern, values, cookie, fs, form, server`) declares `type error`;
+    - asserts `h2_error.mli` declares `type t` (the unified handleable h2 error)
+      and `h2_frame.mli` surfaces `H2_error.t) result` at its read boundary.
+  - `Error_policy.unhandleable_allowlisted`: enumerates the static unhandleable
+    allowlist (mirrors the audit doc), asserts it is non-empty, has no
+    duplicates, and contains the canonical entries (`h2_flow, h2_writesched,
+    net, hpack_tables, hpack, pattern, mapping, context, h2_pipe, h2_databuffer,
+    routing_tree, h2_write, httptest`).
+  - **Negative check performed during execution:** temporarily appending a
+    `val foo_exn` to `io.mli` made `no_handleable_raise_escapes` FAIL
+    (`io.mli has no _exn identifier` assert), confirming the guard is not a
+    no-op; reverted, build clean again.
+
+- **Final raise audit** (`grep -rnE "raise|failwith|invalid_arg|Lwt.fail" lib/
+  lib/internal/`): every surviving site is either (a) an unhandleable
+  invariant/precondition (`h2_flow`, `h2_writesched`, `net`, `hpack_tables`,
+  `httptest`, `routing_tree`, `h2_write`, `hpack` `read_var_int` `invalid_arg`,
+  `h2_frame` write-side frame-builder invariants incl. "illegal window
+  increment", `h2_databuffer.Read_empty`, `h2_pipe` write invariants), (b) an
+  internal control-flow sentinel (`Hpack.Need_more`, `raise Exit` loops in
+  `hpack`/`hpack_huffman`/`cookie`, `let exception Done/Stop` in
+  `pattern`/`mapping`), (c) a boundary-only-converted internal exception in the
+  h2 event loop (`h2_transport`/`h2_server`/`h2_error` — Resolution #2;
+  `H2_error.to_exception`/`of_exception` bridge), (d) the documented mid-stream
+  `Body.Stream` raise (Resolution #1: `io`/`transfer`/`internal/chunked`), the
+  `fs` private `Invalid_range_sentinel` (caught by `parse_range` → `Error`), or
+  `client`'s typed `Aborted (Redirect _)` carrier. **No handleable error is
+  raised across a `.mli` boundary** that should have been converted — no missed
+  conversions found. `grep -rn "_exn" lib/ lib/internal/` → **EMPTY** (exit 1).
+
+- **Audit doc finalized** (`plans/error-handling-audit.md`): header status set to
+  **COMPLETE**; the unhandleable allowlist marked **FINAL** and extended with the
+  post-migration entries that emerged in Tickets 6–7 (`h2_pipe`, `h2_databuffer`,
+  `h2_transport`, `h2_server`, `h2_error` internal raises, `client.Aborted`, `fs`
+  sentinel, the mid-stream raise row, `h2_frame` write-side builders). The doc
+  notes the allowlist is mirrored by `Error_policy.unhandleable_allowlisted` and
+  the two must stay in sync.
+
+- **`AGENTS.md`** (CLAUDE.md is a symlink to it): the error-handling convention
+  bullet already present accurately reflects the final reality (Result for
+  handleable with **typed variants per module**; exceptions only unhandleable;
+  single `Lwt.catch` at the public boundary converting modeled failures, re-
+  raising bugs/cancellation). No wording change required.
+
+- **`TODO.md`:** item 2 ("figure out a clearer error handling pattern …") marked
+  **Done**, pointing at the plan, the audit allowlist, and the `Error_policy`
+  guard.
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+BUILD_EXIT=0
+$ dune test --root <worktree> --force
+Test Successful in 1.874s. 504 tests run.
+TEST_EXIT=0
+$ grep -rn "_exn" lib/ lib/internal/    # (no output)
+GREP_EXIT=1
+```
+Spot-check: `Error_policy no_handleable_raise_escapes [OK]`,
+`Error_policy unhandleable_allowlisted [OK]`.
+
+**Commit id:** jj change **`vkpxkrzt`** (set below from `jj log -r @-`).
+
+---
+
+## Migration complete (all 8 tickets)
+
+The Result migration is **complete**. Summary of the eight tickets:
+
+1. **T1** (`vwsywrln`) — Audit artifact (`plans/error-handling-audit.md`) +
+   `open Lwt_result.Syntax` convention (no new module). No `lib/` change.
+2. **T2** (`wqmtwlyq`) — Pure parsers `pattern`/`values`/`cookie` → typed `error`
+   variants (were `string`/`exn` payloads).
+3. **T3** (`wpswwkzz`) — `hpack`/`hpack_huffman` decode → `result` with typed
+   `error`; `Need_more` kept internal.
+4. **T4** (`snwuuysp`) — `transfer`/`internal/chunked` framing → `result`;
+   Resolution #1 (mid-stream raises) + #2 (no `result`-record name clash).
+5. **T5** (`vylozrsw`) — `io` read/write request/response → `result` embedding
+   `Transfer.error`.
+6. **T6** (`lnmqsxoy`) — h1 endpoints (`server`/`client`/`transport`/`fs`/`form`)
+   consume the `result` APIs; all `Io.*_exn` / dead `Transfer.*_exn` shims deleted.
+7. **T7** (`rxopklom`) — HTTP/2 boundaries (`h2_frame`/`h2_error` + the h2
+   read fibers) surface the unified `H2_error.t` `result`; all `*_exn` shims
+   gone (grep empty); internal GOAWAY/RST machinery unchanged (Resolution #2).
+8. **T8** (`vkpxkrzt`) — `Error_policy` guard test, audit doc finalized to
+   COMPLETE, `AGENTS.md`/`TODO.md` reflect the done state.
+
+End state: every handleable failure is a typed `Result.t` value; the surviving
+exceptions are the documented unhandleable allowlist; the `Error_policy` suite
+guards against regression. Full suite: **504 tests** green.
 
 ---
 

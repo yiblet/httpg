@@ -1,7 +1,12 @@
 # TODO
 
 1. Create a README
-2. figure out a clearer error handling pattern than using exceptional ocaml
+2. ~~figure out a clearer error handling pattern than using exceptional ocaml~~
+   **Done** (`plans/result-migration.plan.md`, 8 tickets): handleable errors are
+   typed `('a, error) result` / `(_, error) result Lwt.t` with per-module `error`
+   variants; only unhandleable invariants/control-flow stay as exceptions
+   (allowlist in `plans/error-handling-audit.md`). Guarded by the `Error_policy`
+   test suite.
 
 ---
 

@@ -1,5 +1,13 @@
 # gohttp — Error-Handling Audit & Decomposition
 
+**Status: COMPLETE.** All eight tickets of `plans/result-migration.plan.md` are done.
+Every handleable error in `lib/`/`lib/internal/` is now a typed `Result.t` value; the
+only surviving exceptions are the **unhandleable allowlist** below (programmer-bug /
+invariant / internal control-flow sentinels). The regression guard
+`test/test_error_policy.ml` (`Error_policy` suite) enforces this: no `*_exn` shim
+identifier in any swept `.mli`, each migrated module declares its typed error type, and
+the allowlist is enumerated. Verified by `grep -rn "_exn" lib/ lib/internal/` → empty.
+
 Companion to `plans/result-migration.plan.md`. This is the durable, source-of-truth
 classification of every error-handling site in `lib/` and `lib/internal/`, mapping
 each one to **handleable (→ `Result.t` / typed `error` variant)** vs.
@@ -215,32 +223,45 @@ No new conversion sites — only confirmation that every remaining `raise`/`fail
 
 ---
 
-## Unhandleable allowlist (KEEP as exceptions — never convert)
+## Unhandleable allowlist (KEEP as exceptions — never convert) — FINAL
 
-These are **programmer-bug / invariant** failures or **internal control-flow
-sentinels**. They are out of scope for the migration (a Non-Goal in the plan) and must
-be documented in their `.mli`s as "raises on programmer error / invariant violation".
+These are **programmer-bug / invariant** failures, **internal control-flow
+sentinels**, or **boundary-only-converted internal exceptions** (the h2 event loop:
+public boundaries surface `result`, the internal fiber keeps raising to drive
+GOAWAY/RST). They are out of scope for the migration (a Non-Goal in the plan) and are
+documented in their `.mli`s. This list is mirrored by the static enumeration in
+`test/test_error_policy.ml` (`Error_policy.unhandleable_allowlisted`); the two must be
+kept in sync. Line numbers are post-migration and approximate (re-grep as needed).
 
 | module | site(s) | exception/raise | why it stays |
 |---|---|---|---|
 | h2_flow | h2_flow.ml:31,34,92 (`invalid_arg`); .mli:26,58 | `Invalid_argument` on negative update / window-overflow / "took too much" | window-accounting invariant (programmer bug) |
-| h2_writesched | h2_writesched.ml:47,112,163,205 (`failwith`) | illegal stream-id / DATA-on-non-open / double-open / "invalid use of queue" | scheduler invariant (programmer bug) |
+| h2_writesched | h2_writesched.ml:47,112,163,205 (`failwith`); .mli:76,90 | illegal stream-id / DATA-on-non-open / double-open / "invalid use of queue" | scheduler invariant (programmer bug) |
 | net | net.ml:212 (`failwith "bound_port: not an INET socket"`) | `Failure` precondition | precondition on socket kind |
 | net | net.ml:61,97,150,171,192 (`failwith` on bad TLS config / csr) | `Failure` | config/setup misuse (programmer error) |
 | hpack_tables | hpack_tables.ml:51,71,171 (`invalid_arg`, incl. `evict_oldest`); .mli:32,48 | `Invalid_argument` | table-index invariant (programmer bug) |
-| hpack | hpack.ml:22 (`exception Need_more`) | decoder control-flow sentinel | internal: signals "need more bytes"; not a caller-visible error |
-| hpack | hpack.ml:47 (`invalid_arg "read_var_int: bad n"`) | `Invalid_argument` precondition (n∉1..8) | precondition (programmer bug) |
-| hpack | hpack.ml:66,71 (`raise Exit`) | internal loop control flow | not an error |
-| hpack_huffman | hpack_huffman.ml:142 (`raise Exit`) | internal loop control flow | not an error |
-| pattern | pattern.ml:340 (`let exception Done`), :347,:353 | internal control-flow | not an error |
-| pattern | pattern.ml:368,386 (`failwith` describeConflict / literal cmp) | `Failure` invariant | called only on already-conflicting patterns (programmer bug) |
-| mapping | mapping.ml:57 (`let exception Stop`) | internal control-flow | not an error |
+| hpack | hpack.ml:66,92,311,319 (`exception Need_more`) | decoder control-flow sentinel | internal: signals "need more bytes"; not a caller-visible error (not part of `Hpack.error`) |
+| hpack | hpack.ml:64 (`invalid_arg "read_var_int: bad n"`) | `Invalid_argument` precondition (n∉1..8) | precondition (programmer bug) |
+| hpack | hpack.ml:83,88 (`raise Exit`) | internal var-int loop control flow | not an error |
+| hpack_huffman | hpack_huffman.ml:150 (`raise Exit`) | internal loop control flow | not an error |
+| pattern | pattern.ml:372,378 (`let exception Done`) | internal control-flow | not an error |
+| pattern | pattern.ml:393,411 (`failwith` describeConflict / literal cmp) | `Failure` invariant | called only on already-conflicting patterns (programmer bug) |
+| mapping | mapping.ml:58 (`let exception Stop`) | internal control-flow | not an error |
 | cookie | cookie.ml:136,168,195,198,199,201 (`raise Exit`) | internal `String.iter` early-exit | control flow (the *result* is the `Cookie.error`, not the Exit) |
-| h2_frame | h2_frame.ml:418 (`Invalid_argument "illegal window increment"`) | write-side invariant | programmer bug (building an invalid frame) |
+| h2_frame | h2_frame.ml:457 (`Invalid_argument "illegal window increment"`) | write-side invariant | programmer bug (building an invalid frame) |
+| h2_frame | h2_frame.ml:370–483 (`raise Frame_too_large \| Invalid_stream_id \| Invalid_dep_stream_id \| Pad_length_too_large`) | write-side frame-builder invariants | building an invalid frame is a programmer bug; documented in `.mli` (kept as raises; the *read* path surfaces these via the unified `H2_error.t` `result`) |
 | context | context.ml:18,19 / .mli:16,20 (`exception Canceled \| Deadline_exceeded`) | cancellation signals | port of Go `context.Canceled`/`DeadlineExceeded` — these *are* the contract (not part of this migration) |
 | httptest | httptest.ml:31 (`invalid_arg "invalid WriteHeader code"`) | `Invalid_argument` | precondition mirroring Go's `WriteHeader` panic (programmer bug) |
 | routing_tree | routing_tree.ml:26,56 (`failwith`) | `Failure` invariant | tree-construction invariant (programmer bug) |
 | h2_write | h2_write.ml:170,186 (`failwith "unexpected empty hpack"`) | `Failure` invariant | encoder invariant (programmer bug) |
+| h2_pipe | h2_pipe.ml:78,82 (`raise Closed_pipe_write \| Uninitialized_pipe_write`); .ml:53,67 (`Lwt.fail` stored err) | write-after-close / write-before-init invariants; mid-stream stored-error re-raise (Resolution #1) | invariant + internal streaming plumbing (no public `result` boundary) |
+| h2_databuffer | h2_databuffer.ml:53 (`raise Read_empty`) | read-past-empty invariant | programmer bug (read with no data) |
+| h2_transport | h2_transport.ml (internal `Lwt.fail`/`raise`: `Client_conn_closed`, `Conn_got_goaway`, `Stream_aborted`, `Malformed_response`, `H2_error.Connection_error …`) | internal conn-loop control flow | **boundary-only conversion (Resolution #2):** `read_frame`/meta-headers surface `result`; the per-connection fiber keeps raising to drive GOAWAY/RST/stream-abort. Boundary raises convert via `H2_error.to_exception`/`of_exception`. |
+| h2_server | h2_server.ml (internal `Lwt.fail`/`raise`, incl. `H2_error.to_exception` at the read boundary) | internal conn-loop control flow | boundary-only conversion (Resolution #2); `serve` failures are connection-fatal and handled internally |
+| h2_error | h2_error.ml (`exception Connection_error \| Stream_error \| Compression_error of Hpack.error`) | internal raise points for the unified `H2_error.t` | the *handleable* h2 error is the value `H2_error.t`; these exceptions are how the internal loop *raises* it (`to_exception`) — documented in `.mli` |
+| client | client.ml:153 (`raise/Lwt.fail (Aborted (Redirect _))`) | typed redirect-abort carrier | the convenience verbs (`do_`/`get`/`post`/`head`) keep a raising `Response.t Lwt.t` shape; the carried error is the **typed** `Client.error` (`Redirect of string`), documented in `.mli` (T6 decision — not a `string`/untyped failure) |
+| fs | fs.ml:519–553 (`raise Invalid_range_sentinel`) | private boundary sentinel | internal; `parse_range` catches it and returns `Error (Invalid_range _)` (the public handleable surface) |
+| io / transfer / internal/chunked | mid-stream `Body.Stream` thunk raises (`Chunk_error`/`Err_line_too_long`/`Protocol_error`) | mid-stream framing raise | **Resolution #1:** header/initial-parse boundary returns `result`; errors discovered *after* `Ok` (inside the stream thunk) keep raising, mirroring Go's later-`Read` error model. Documented in `transfer.mli`/`chunked.mli`/`io.mli` |
 
 ---
 
