@@ -204,29 +204,38 @@ type serve_mux = {
 (* Go's NewServeMux. *)
 let new_serve_mux () = { tree = Routing_tree.create (); patterns = [] }
 
-exception Register_error of string
+type error = Register of string
 
-(* Go's registerErr: parse, conflict-check, add to the tree. *)
-let register mux patstr handler =
-  if patstr = "" then raise (Register_error "http: invalid pattern");
-  match Pattern.parse patstr with
-  | Error e ->
-      raise
-        (Register_error
-           (Printf.sprintf "parsing %S: %s" patstr (Pattern.error_to_string e)))
-  | Ok pat ->
-      List.iter
-        (fun pat2 ->
-          if Pattern.conflicts_with pat pat2 then
-            raise
-              (Register_error
+let error_to_string = function Register s -> s
+
+(* Go's registerErr: parse, conflict-check, add to the tree. Returns
+   [Error (Register _)] on an invalid or conflicting pattern. *)
+let register mux patstr handler : (unit, error) result =
+  if patstr = "" then Error (Register "http: invalid pattern")
+  else
+    match Pattern.parse patstr with
+    | Error e ->
+        Error
+          (Register
+             (Printf.sprintf "parsing %S: %s" patstr
+                (Pattern.error_to_string e)))
+    | Ok pat -> (
+        let conflict =
+          List.find_opt (fun pat2 -> Pattern.conflicts_with pat pat2)
+            mux.patterns
+        in
+        match conflict with
+        | Some pat2 ->
+            Error
+              (Register
                  (Printf.sprintf
                     "pattern %S conflicts with pattern %S:\n%s"
                     (Pattern.to_string pat) (Pattern.to_string pat2)
-                    (Pattern.describe_conflict pat pat2))))
-        mux.patterns;
-      Routing_tree.add_pattern mux.tree pat handler;
-      mux.patterns <- pat :: mux.patterns
+                    (Pattern.describe_conflict pat pat2)))
+        | None ->
+            Routing_tree.add_pattern mux.tree pat handler;
+            mux.patterns <- pat :: mux.patterns;
+            Ok ())
 
 (* Go's ServeMux.Handle. *)
 let handle mux pattern handler = register mux pattern handler
@@ -614,6 +623,30 @@ let close srv =
       Lwt.catch (fun () -> Lwt_unix.close fd) (fun _ -> Lwt.return_unit)
   | None -> Lwt.return_unit
 
+(* Go's conn.serve error branch (server.go): map a request-read error to a
+   minimal HTTP response written directly onto the wire (no handler), then close.
+   - An unsupported transfer-encoding -> 501 (RFC 7230 3.3.1).
+   - A clean / unexpected EOF before a full message is a common net read error
+     -> no reply, just close.
+   - Any other malformed request (protocol error, missing Host) -> 400 Bad
+     Request. *)
+let error_headers = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
+
+let write_read_error_response oc (e : Io.error) : unit Lwt.t =
+  let write s = Lwt.catch (fun () -> Lwt_io.write oc s >>= fun () -> Lwt_io.flush oc) (fun _ -> Lwt.return_unit) in
+  match e with
+  | Io.Transfer (Transfer.Unsupported_transfer_encoding _) ->
+      let code = Status.status_not_implemented in
+      write
+        (Printf.sprintf "HTTP/1.1 %d %s%sUnsupported transfer encoding" code
+           (Status.status_text code) error_headers)
+  | Io.Unexpected_eof ->
+      (* Common net read error: don't reply. *)
+      Lwt.return_unit
+  | Io.Protocol _ | Io.Missing_host | Io.Transfer _ ->
+      let public_err = "400 Bad Request" in
+      write (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
+
 (* The per-connection serve loop: read a request, dispatch, write the response,
    loop while keep-alive holds. *)
 let serve_conn (handler : handler) (cfd, peer) =
@@ -626,11 +659,13 @@ let serve_conn (handler : handler) (cfd, peer) =
   let conn_ctx, cancel_conn = Context.with_cancel Context.background in
   let rec loop () =
     Lwt.catch
-      (fun () -> Io.read_request_exn ic >>= fun r -> Lwt.return (Some r))
-      (fun _ -> Lwt.return None)
+      (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
+      (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof)))
     >>= function
-    | None -> Lwt.return_unit (* EOF or parse error: close. *)
-    | Some r ->
+    | `Read (Error e) ->
+        (* Malformed request: reply (400 / 501) per Go's conn.serve, then close. *)
+        write_read_error_response oc e
+    | `Read (Ok r) ->
         r.Request.remote_addr <- remote;
         (* Per-request context cancelled when the handler returns (Go cancels
            the request context as ServeHTTP unwinds) and, via its parent
@@ -724,11 +759,11 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
       let conn_ctx, cancel_conn = Context.with_cancel Context.background in
       let rec loop () =
         Lwt.catch
-          (fun () -> Io.read_request_exn ic >>= fun r -> Lwt.return (Some r))
-          (fun _ -> Lwt.return None)
+          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
+          (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof)))
         >>= function
-        | None -> Lwt.return_unit
-        | Some r ->
+        | `Read (Error e) -> write_read_error_response oc e
+        | `Read (Ok r) ->
             r.Request.remote_addr <- remote;
             let req_ctx, cancel_req = Context.with_cancel conn_ctx in
             r.Request.ctx <- req_ctx;

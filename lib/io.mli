@@ -14,13 +14,15 @@
 (** A parse / protocol error, carrying Go's message text (Go's
     [ProtocolError] / [badStringError]).
 
-    {b Retained} for the [*_exn] shims and the {b mid-stream} body thunk; the
-    handleable boundary error is {!error} below. *)
+    {b Retained} for the {b mid-stream} body thunk (errors discovered after the
+    read boundary returned [Ok] keep raising) and as the internal raise
+    mechanism for the linear parse path; the handleable boundary error is
+    {!error} below. {!Transport} also raises it to carry a round-trip failure
+    message through its exception-based error flow. *)
 exception Protocol_error of string
 
-(** Raised by {!write_request_exn} when the request has no Host or URL host
-    (Go's [errMissingHost]). Retained for the [*_exn] shim; the handleable
-    boundary error is {!error}'s {!Missing_host} arm. *)
+(** Retained for the {b mid-stream} body thunk; the handleable boundary error is
+    {!error}'s {!Missing_host} arm. *)
 exception Missing_host
 
 (** Handleable error at the request/response read/write boundary. Lower-level
@@ -67,22 +69,6 @@ val read_response :
     User-Agent / framing headers, the remaining headers and the body. Always
     emits ["HTTP/1.1"]. Returns [Error Missing_host] when no host is available. *)
 val write_request : Lwt_io.output_channel -> Body.t Request.t -> (unit, error) result Lwt.t
-
-(* --- Shims: legacy raising contracts for not-yet-migrated callers (Server /
-   Transport / Client), deleted in Ticket 6. --- *)
-
-(** Shim: {!read_mime_header} raising {!Protocol_error}. *)
-val read_mime_header_exn : Lwt_io.input_channel -> Header.t Lwt.t
-
-(** Shim: {!read_request} raising {!Protocol_error} (consumed by {!Server}). *)
-val read_request_exn : Lwt_io.input_channel -> Body.t Request.t Lwt.t
-
-(** Shim: {!read_response} raising {!Protocol_error} (consumed by {!Transport}). *)
-val read_response_exn : ?request:Body.t Request.t -> Lwt_io.input_channel -> Body.t Response.t Lwt.t
-
-(** Shim: {!write_request} raising {!Missing_host} / {!Protocol_error} (consumed
-    by {!Transport}). *)
-val write_request_exn : Lwt_io.output_channel -> Body.t Request.t -> unit Lwt.t
 
 (** [write_response oc r] is [Response.Write]: write the status line, framing
     headers, the remaining headers and the body, applying Go's zero-length-body

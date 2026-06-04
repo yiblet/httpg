@@ -78,7 +78,7 @@ let parse_range_unit () =
   in
   let err_invalid name s size =
     match Fs.parse_range s size with
-    | Error Fs.Invalid_range -> ()
+    | Error (Fs.Invalid_range _) -> ()
     | Error Fs.No_overlap -> Alcotest.failf "%s: expected Invalid_range, got No_overlap" name
     | Error _ -> Alcotest.failf "%s: expected Invalid_range" name
     | Ok _ -> Alcotest.failf "%s: expected Error, got Ok" name
@@ -264,9 +264,25 @@ let unsatisfiable_range () =
     (Printf.sprintf "bytes */%d" size)
     cr
 
+(* Result migration T6: parse_range returns typed errors. *)
+let parse_range_typed () =
+  (match Fs.parse_range "not-a-range" 10L with
+  | Error (Fs.Invalid_range _) -> ()
+  | _ -> Alcotest.fail "bad Range header -> Error (Invalid_range _)");
+  (match Fs.parse_range "bytes=4-2" 10L with
+  | Error (Fs.Invalid_range _) -> ()
+  | _ -> Alcotest.fail "start>end -> Error (Invalid_range _)");
+  (match Fs.parse_range "bytes=99-" 10L with
+  | Error Fs.No_overlap -> ()
+  | _ -> Alcotest.fail "unsatisfiable -> Error No_overlap");
+  match Fs.parse_range "bytes=0-4" 10L with
+  | Ok [ { Fs.start = 0L; length = 5L } ] -> ()
+  | _ -> Alcotest.fail "valid range -> Ok"
+
 let tests =
   [
     Alcotest.test_case "parse_range" `Quick parse_range_unit;
+    Alcotest.test_case "parse_range_typed" `Quick parse_range_typed;
     Alcotest.test_case "serve_file_range" `Quick serve_file_range;
     Alcotest.test_case "single_ranges" `Quick single_ranges;
     Alcotest.test_case "multi_range" `Quick multi_range;

@@ -35,10 +35,27 @@ type file = {
   close : unit -> unit Lwt.t;  (** Go [File.Close]. *)
 }
 
+(** A handleable file-serving error. Covers the open/stat failures
+    {!to_http_error} maps to an HTTP status ({!Invalid_unsafe_path}/{!Not_exist}
+    → 404, {!Permission} → 403, {!Other} → 500) and the {!parse_range} failures
+    ({!No_overlap} → 416 with [Content-Range: bytes */SIZE], {!Invalid_range} →
+    416). Replaces the previous [exn]-typed results (Resolution #3 — a breaking,
+    in-repo-only change to {!file_system}). *)
+type error =
+  | Invalid_unsafe_path  (** Go's [errInvalidUnsafePath]: path escapes the root. *)
+  | Not_exist  (** Go's [fs.ErrNotExist]: no such file/dir. *)
+  | Permission  (** Go's [fs.ErrPermission]. *)
+  | Other of string  (** any other open/stat error (→ 500). *)
+  | No_overlap  (** Go's [errNoOverlap]: no requested range overlaps the content. *)
+  | Invalid_range of string  (** Go's ["invalid range"]: malformed Range header. *)
+
+(** Render an {!error} as its Go message text. *)
+val error_to_string : error -> string
+
 (** Go's [http.FileSystem]: access to a collection of named, '/'-separated
     files. *)
 type file_system = {
-  open_ : string -> (file, exn) result Lwt.t;  (** Go [FileSystem.Open]. *)
+  open_ : string -> (file, error) result Lwt.t;  (** Go [FileSystem.Open]. *)
 }
 
 (** Go's [Dir]: a {!file_system} backed by the native filesystem rooted at the
@@ -48,19 +65,15 @@ type file_system = {
     permission error. An empty root is treated as ["."]. *)
 val dir : string -> file_system
 
-(** Raised by {!dir}'s open for a path that cannot be represented / is unsafe
-    (Go's [errInvalidUnsafePath]); {!to_http_error} maps it to 404. *)
-exception Invalid_unsafe_path
-
 (** Go's [containsDotDot]: whether the '/'- or '\'-separated path [v] has a
     [".."] element. *)
 val contains_dot_dot : string -> bool
 
-(** Go's [toHTTPError]: map an open/stat error to a (message, status) pair —
-    {!Not_found}/{!Invalid_unsafe_path} → ["404 page not found"]/404, a
-    permission error → ["403 Forbidden"]/403, else ["500 Internal Server
+(** Go's [toHTTPError]: map an open/stat {!error} to a (message, status) pair —
+    {!Not_exist}/{!Invalid_unsafe_path} → ["404 page not found"]/404,
+    {!Permission} → ["403 Forbidden"]/403, else ["500 Internal Server
     Error"]/500. *)
-val to_http_error : exn -> string * int
+val to_http_error : error -> string * int
 
 (** Go's [localRedirect]: a 301 Moved Permanently to [new_path], preserving the
     request's raw query, {b without} converting the path to absolute (unlike
@@ -108,22 +121,13 @@ val content_range : http_range -> int64 -> string
 val mime_header :
   http_range -> content_type:string -> size:int64 -> (string * string) list
 
-(** Raised by {!parse_range} when none of the requested ranges overlaps the
-    content (Go's [errNoOverlap]) — maps to a 416 with [Content-Range: bytes
-    */SIZE]. *)
-exception No_overlap
-
-(** Raised by {!parse_range} for a syntactically malformed Range header (Go's
-    ["invalid range"]) — maps to a 416. *)
-exception Invalid_range
-
 (** Go's [parseRange]: parse a [Range] header against a content of [size] bytes
     per RFC 7233. Accepts ["bytes="] then a comma list of [start-end] (both
     inclusive), [start-] (to EOF), or [-suffix] (last N bytes). Returns the
-    satisfiable ranges (clamped to the content), or [Error Invalid_range] for a
-    malformed header / [Error No_overlap] when every range starts past the
+    satisfiable ranges (clamped to the content), or [Error (Invalid_range _)]
+    for a malformed header / [Error No_overlap] when every range starts past the
     content. An empty header returns [Ok []]. *)
-val parse_range : string -> int64 -> (http_range list, exn) result
+val parse_range : string -> int64 -> (http_range list, error) result
 
 (** Go's [ServeContent] core. Sets [Content-Type] (a small extension→MIME table,
     falling back to {!Sniff.detect_content_type} on the first bytes when the

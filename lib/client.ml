@@ -13,6 +13,17 @@ open Lwt.Infix
    function [via -> unit result] so callers can override the cap. *)
 type check_redirect = Body.t Request.t list -> (unit, string) result
 
+(* Handleable client error: the redirect policy aborted the request (Go's Do
+   returning the CheckRedirect error wrapped in a *url.Error). [do_] surfaces it
+   by raising [Aborted] (it keeps Go's [(resp, err)] split as an exception at the
+   [Body.t Response.t Lwt.t] boundary, since the convenience verbs and the test
+   suite consume that shape). *)
+type error = Redirect of string
+
+let error_to_string = function Redirect s -> "http: " ^ s
+
+exception Aborted of error
+
 let default_check_redirect : check_redirect =
  fun via ->
   if List.length via >= 10 then Error "stopped after 10 redirects" else Ok ()
@@ -139,7 +150,7 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
           in
           (match c.check_redirect via with
           | Ok () -> loop new_req via include_body
-          | Error msg -> Lwt.fail (Failure ("http: " ^ msg)))
+          | Error msg -> Lwt.fail (Aborted (Redirect msg)))
   in
   loop req [] true
 

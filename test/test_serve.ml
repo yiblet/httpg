@@ -10,6 +10,10 @@
 open Gohttp
 open Lwt.Infix
 
+(* Registration is now a [result]; at wiring time a conflict is a programmer
+   error, so unwrap with [Result.get_ok]. *)
+let handle_func mux pattern f = Result.get_ok (Server.handle_func mux pattern f)
+
 (* Read everything the server sends until EOF (connection close). *)
 let read_to_eof ic =
   let buf = Buffer.create 256 in
@@ -125,7 +129,7 @@ let hello_handler_test () =
 
 let not_found_test () =
   let mux = Server.new_serve_mux () in
-  Server.handle_func mux "/known" (fun w _r -> w.Server.write "ok");
+  handle_func mux "/known" (fun w _r -> w.Server.write "ok");
   let client ~port =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
     Lwt_io.write oc
@@ -145,9 +149,9 @@ let not_found_test () =
 
 let mux_routing_test () =
   let mux = Server.new_serve_mux () in
-  Server.handle_func mux "/a" (fun w _r -> w.Server.write "handler-a");
-  Server.handle_func mux "/b" (fun w _r -> w.Server.write "handler-b");
-  Server.handle_func mux "POST /c" (fun w _r -> w.Server.write "handler-c-post");
+  handle_func mux "/a" (fun w _r -> w.Server.write "handler-a");
+  handle_func mux "/b" (fun w _r -> w.Server.write "handler-b");
+  handle_func mux "POST /c" (fun w _r -> w.Server.write "handler-c-post");
   let get path ~port =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
     Lwt_io.write oc
@@ -230,10 +234,28 @@ let http10_close_test () =
   Alcotest.(check string) "keep-alive resp1 body" "hello" (body_of resp1);
   Alcotest.(check string) "keep-alive resp2 body" "hello" (body_of resp2)
 
+(* Result migration T6: registering two conflicting patterns returns
+   [Error (Register _)] (was a raised [Register_error]). *)
+let handle_conflict_result () =
+  let mux = Server.new_serve_mux () in
+  (match Server.handle_func mux "/a/{x}" (fun w _r -> w.Server.write "a") with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "first registration should succeed");
+  (match Server.handle_func mux "/a/{y}" (fun w _r -> w.Server.write "b") with
+  | Error (Server.Register msg) ->
+      Alcotest.(check bool) "conflict message" true
+        (contains msg "conflicts with")
+  | Ok () -> Alcotest.fail "conflicting registration should be Error");
+  (* Empty pattern and a malformed pattern are also Error (Register _). *)
+  (match Server.handle_func mux "" (fun w _r -> w.Server.write "c") with
+  | Error (Server.Register _) -> ()
+  | Ok () -> Alcotest.fail "empty pattern should be Error")
+
 let tests =
   [
     Alcotest.test_case "hello_handler" `Quick hello_handler_test;
     Alcotest.test_case "not_found" `Quick not_found_test;
     Alcotest.test_case "mux_routing" `Quick mux_routing_test;
     Alcotest.test_case "http10_close" `Quick http10_close_test;
+    Alcotest.test_case "handle_conflict_result" `Quick handle_conflict_result;
   ]

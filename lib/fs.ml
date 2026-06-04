@@ -18,9 +18,27 @@ type file = {
   close : unit -> unit Lwt.t;
 }
 
-type file_system = { open_ : string -> (file, exn) result Lwt.t }
+type error =
+  | Invalid_unsafe_path
+  | Not_exist
+  | Permission
+  | Other of string
+  | No_overlap
+  | Invalid_range of string
 
-exception Invalid_unsafe_path
+let error_to_string = function
+  | Invalid_unsafe_path -> "http: invalid or unsafe file path"
+  | Not_exist -> "file does not exist"
+  | Permission -> "permission denied"
+  | Other s -> s
+  | No_overlap -> "invalid range: failed to overlap"
+  | Invalid_range s -> if s = "" then "invalid range" else s
+
+type file_system = { open_ : string -> (file, error) result Lwt.t }
+
+(* Internal sentinel: [parse_range] raises this on a malformed Range header and
+   [parse_range] maps it back to [Error (Invalid_range _)] at the boundary. *)
+exception Invalid_range_exn of string
 
 (* ---- containsDotDot / isSlashRune ---- *)
 
@@ -80,7 +98,7 @@ let file_info_of_stat name (st : Lwt_unix.stats) =
 
 (* Build a {!file} over an opened native path. We keep the open fd for content
    reads and re-open the directory on demand for listings. *)
-let file_of_path full_name : (file, exn) result Lwt.t =
+let file_of_path full_name : (file, error) result Lwt.t =
   Lwt.catch
     (fun () ->
       Lwt_unix.stat full_name >>= fun st ->
@@ -143,10 +161,10 @@ let file_of_path full_name : (file, exn) result Lwt.t =
     (fun exn ->
       match exn with
       | Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) ->
-          Lwt.return (Error Not_found)
+          Lwt.return (Error Not_exist)
       | Unix.Unix_error ((Unix.EACCES | Unix.EPERM), _, _) ->
-          Lwt.return (Error exn)
-      | e -> Lwt.return (Error e))
+          Lwt.return (Error Permission)
+      | e -> Lwt.return (Error (Other (Printexc.to_string e))))
 
 let dir root =
   let open_ name =
@@ -172,13 +190,11 @@ let dir root =
 (* ---- toHTTPError / localRedirect ---- *)
 
 let to_http_error = function
-  | Not_found -> ("404 page not found", Status.status_not_found)
-  | Invalid_unsafe_path -> ("404 page not found", Status.status_not_found)
-  | Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) ->
+  | Not_exist | Invalid_unsafe_path ->
       ("404 page not found", Status.status_not_found)
-  | Unix.Unix_error ((Unix.EACCES | Unix.EPERM), _, _) ->
-      ("403 Forbidden", Status.status_forbidden)
-  | _ -> ("500 Internal Server Error", Status.status_internal_server_error)
+  | Permission -> ("403 Forbidden", Status.status_forbidden)
+  | No_overlap | Invalid_range _ | Other _ ->
+      ("500 Internal Server Error", Status.status_internal_server_error)
 
 let local_redirect w (r : Body.t Request.t) new_path =
   let new_path =
@@ -459,9 +475,6 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
 (* Go's httpRange. *)
 type http_range = { start : int64; length : int64 }
 
-exception No_overlap (* Go errNoOverlap *)
-exception Invalid_range (* Go errors.New("invalid range") *)
-
 (* Go httpRange.contentRange: "bytes START-END/SIZE". *)
 let content_range ra size =
   Printf.sprintf "bytes %Ld-%Ld/%Ld" ra.start
@@ -490,7 +503,7 @@ let parse_range s size =
   if s = "" then Ok []
   else
     let b = "bytes=" in
-    if not (has_prefix s b) then Error Invalid_range
+    if not (has_prefix s b) then Error (Invalid_range "")
     else begin
       try
         let body = String.sub s (String.length b) (String.length s - String.length b) in
@@ -503,7 +516,7 @@ let parse_range s size =
               if ra = "" then acc
               else begin
                 match String.index_opt ra '-' with
-                | None -> raise Invalid_range (* Go strings.Cut: no '-' *)
+                | None -> raise (Invalid_range_exn "") (* Go strings.Cut: no '-' *)
                 | Some dash ->
                     let start = trim_string (String.sub ra 0 dash) in
                     let end_ =
@@ -512,9 +525,9 @@ let parse_range s size =
                     in
                     if start = "" then begin
                       (* suffix-length: last N bytes *)
-                      if end_ = "" || end_.[0] = '-' then raise Invalid_range;
+                      if end_ = "" || end_.[0] = '-' then raise (Invalid_range_exn "");
                       match parse_int64 end_ with
-                      | None -> raise Invalid_range
+                      | None -> raise (Invalid_range_exn "")
                       | Some i ->
                           let i = if i > size then size else i in
                           let st = Int64.sub size i in
@@ -522,7 +535,7 @@ let parse_range s size =
                     end
                     else begin
                       match parse_int64 start with
-                      | None -> raise Invalid_range
+                      | None -> raise (Invalid_range_exn "")
                       | Some i ->
                           if i >= size then begin
                             (* starts after content: does not overlap *)
@@ -535,9 +548,9 @@ let parse_range s size =
                               { start = st; length = Int64.sub size st } :: acc
                             else
                               match parse_int64 end_ with
-                              | None -> raise Invalid_range
+                              | None -> raise (Invalid_range_exn "")
                               | Some j ->
-                                  if st > j then raise Invalid_range;
+                                  if st > j then raise (Invalid_range_exn "");
                                   let j = if j >= size then Int64.sub size 1L else j in
                                   {
                                     start = st;
@@ -551,7 +564,7 @@ let parse_range s size =
         in
         let ranges = List.rev ranges in
         if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
-      with Invalid_range -> Error Invalid_range
+      with Invalid_range_exn m -> Error (Invalid_range m)
     end
 
 let sum_ranges_size ranges =
@@ -689,10 +702,14 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
         Header.set h "Content-Range" (Printf.sprintf "bytes */%Ld" size);
         Server.error w "invalid range: failed to overlap"
           Status.status_requested_range_not_satisfiable
-    | Error Invalid_range ->
+    | Error (Invalid_range _) ->
         Server.error w "invalid range"
           Status.status_requested_range_not_satisfiable
-    | Error e -> Lwt.fail e
+    | Error (Not_exist | Permission | Invalid_unsafe_path | Other _) ->
+        (* parse_range only yields No_overlap / Invalid_range; the rest are
+           unreachable here but keep the match exhaustive. *)
+        Server.error w "invalid range"
+          Status.status_requested_range_not_satisfiable
     | Ok ranges ->
         (* If the total range size exceeds the file, treat as no range (Go). *)
         let ranges =

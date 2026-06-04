@@ -2,16 +2,17 @@
    go/src/net/http/internal/chunked.go: HTTP/1.x wire framing. *)
 
 (** internal.ErrLineTooLong: a chunk header / line exceeded [max_line_length].
-    Retained for the {b mid-stream} body thunk (which keeps raising) and for the
-    [*_exn] shims; the handleable boundary error is {!error} below. *)
+    Retained for the {b mid-stream} body thunk (which keeps raising on a framing
+    error discovered after {!read_transfer} returned [Ok]); the handleable
+    boundary error is {!error} below. *)
 exception Err_line_too_long
 
 (** A malformed-chunk or framing error, carrying Go's message text. Retained for
-    the {b mid-stream} body thunk and the [*_exn] shims (see {!error}). *)
+    the {b mid-stream} body thunk (see {!error}). *)
 exception Chunk_error of string
 
 (** [badStringError(what, value)]: rendered as ["what: value"]. Retained for the
-    [*_exn] shims (see {!error}). *)
+    {b mid-stream} trailer-read raise in {!read_transfer} (see {!error}). *)
 exception Bad_string_error of string * string
 
 (** Handleable framing error at the {b header / initial-parse} boundary
@@ -39,10 +40,6 @@ val max_line_length : int
 (** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] /
     [Error Line_too_long] on bad input (header/initial-parse boundary). *)
 val parse_hex_uint : string -> (int64, error) result
-
-(** Shim: {!parse_hex_uint} raising {!Chunk_error} (mid-stream / not-yet-migrated
-    callers). *)
-val parse_hex_uint_exn : string -> int64
 
 (** [new_chunked_reader ic] is [internal.NewChunkedReader]: a pull function
     returning successive decoded chunk payloads and finally [None] at the
@@ -78,11 +75,6 @@ val body_allowed_for_status : int -> bool
     [Error (Bad_content_length _)] on an invalid value. *)
 val parse_content_length : string list -> (int64, error) result
 
-(** Shim: {!parse_content_length} raising {!Bad_string_error} (preserving Go's
-    two [what] strings: ["invalid empty Content-Length"] vs
-    ["bad Content-Length"]). *)
-val parse_content_length_exn : string list -> int64
-
 (** [fixLength]: the expected body length per RFC 7230 3.3. Version-sensitive
     via [chunked]. Mutates [header] (dedup / delete Content-Length) as Go does.
     [Error] on conflicting / invalid Content-Length (header-parse boundary). *)
@@ -93,15 +85,6 @@ val fix_length :
   header:Header.t ->
   chunked:bool ->
   (int64, error) result
-
-(** Shim: {!fix_length} raising the legacy exceptions. *)
-val fix_length_exn :
-  is_response:bool ->
-  status:int ->
-  request_method:string ->
-  header:Header.t ->
-  chunked:bool ->
-  int64
 
 (** [shouldClose]: whether to hang up after the message. Version-sensitive:
     HTTP/1.0 closes unless [keep-alive]; HTTP/1.1 keeps alive unless [close].
@@ -115,17 +98,11 @@ val should_close :
     trailer key. *)
 val fix_trailer : header:Header.t -> chunked:bool -> (Header.t option, error) result
 
-(** Shim: {!fix_trailer} raising {!Bad_string_error}. *)
-val fix_trailer_exn : header:Header.t -> chunked:bool -> Header.t option
-
 (** [parse_transfer_encoding]: returns whether the message is chunked.
     HTTP/1.0 ignores Transfer-Encoding (Issue 12785). Mutates [header] (deletes
     Transfer-Encoding). [Error (Unsupported_transfer_encoding _)] /
     [Error (Chunk _)] for unsupported / too-many encodings. *)
 val parse_transfer_encoding : major:int -> minor:int -> header:Header.t -> (bool, error) result
-
-(** Shim: {!parse_transfer_encoding} raising {!Chunk_error}. *)
-val parse_transfer_encoding_exn : major:int -> minor:int -> header:Header.t -> bool
 
 (* --- read_transfer. --- *)
 

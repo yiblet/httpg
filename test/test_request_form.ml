@@ -139,9 +139,12 @@ let parse_form_unknown_content_type () =
     let res = run (Form.parse_form r) in
     match (res, want_err) with
     | Ok (), None -> ()
-    | Error e, Some sub -> Alcotest.(check bool) (name ^ " err substr") true (str_contains e sub)
+    | Error e, Some sub ->
+        Alcotest.(check bool) (name ^ " err substr") true
+          (str_contains (Form.error_to_string e) sub)
     | Ok (), Some w -> Alcotest.failf "%s: want error %S, got success" name w
-    | Error e, None -> Alcotest.failf "%s: want success, got error %S" name e
+    | Error e, None ->
+        Alcotest.failf "%s: want success, got error %S" name (Form.error_to_string e)
   in
   check "text" ~content_type:"text/plain" None;
   check "empty" None;
@@ -173,7 +176,9 @@ let multipart () =
       ~content_type:(Printf.sprintf {|multipart/form-data; boundary="%s"|} multipart_boundary)
       ~body:(multipart_body ()) ()
   in
-  run (Form.parse_multipart_form r ~max_memory:10000L);
+  (match run (Form.parse_multipart_form r ~max_memory:10000L) with
+  | Ok () -> ()
+  | Error e -> Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
   (* text field merged into Form and PostForm. *)
   Alcotest.(check string) "field1 in Form" "value1" (values_get r.Request.form "field1");
   Alcotest.(check string) "field1 in PostForm" "value1" (values_get r.Request.post_form "field1");
@@ -234,12 +239,30 @@ let values_encode () =
   Values.set v "foo" "x y";
   Alcotest.(check string) "encode space->plus" "bar=baz&foo=x+y" (Values.encode v)
 
+(* Result migration T6: ParseMultipartForm on a non-multipart request returns
+   [Error Not_multipart] (was a raised [Not_multipart]). *)
+let parse_non_multipart () =
+  let r =
+    make_req ~meth:"POST" ~url:"http://x/"
+      ~content_type:"application/x-www-form-urlencoded" ~body:"a=b" ()
+  in
+  (match run (Form.parse_multipart_form r ~max_memory:10000L) with
+  | Error Form.Not_multipart -> ()
+  | Error (Form.Form m) -> Alcotest.failf "expected Not_multipart, got Form %S" m
+  | Ok () -> Alcotest.fail "expected Error Not_multipart, got Ok");
+  (* No Content-Type at all is also Not_multipart. *)
+  let r2 = make_req ~meth:"POST" ~url:"http://x/" ~body:"a=b" () in
+  match run (Form.parse_multipart_form r2 ~max_memory:10000L) with
+  | Error Form.Not_multipart -> ()
+  | _ -> Alcotest.fail "no Content-Type -> Error Not_multipart"
+
 let tests =
   [
     Alcotest.test_case "parse_urlencoded" `Quick parse_urlencoded;
     Alcotest.test_case "parse_form_query_methods" `Quick parse_form_query_methods;
     Alcotest.test_case "parse_form_semicolon" `Quick parse_form_semicolon;
     Alcotest.test_case "parse_form_unknown_content_type" `Quick parse_form_unknown_content_type;
+    Alcotest.test_case "parse_non_multipart" `Quick parse_non_multipart;
     Alcotest.test_case "multipart" `Quick multipart;
     Alcotest.test_case "multipart_filename" `Quick multipart_filename;
     Alcotest.test_case "form_value" `Quick form_value_lazy;

@@ -658,7 +658,7 @@ Spot-check (`Io` suite): `Io read_request_malformed [OK]`.
 Resolve the current git hash with `jj log -r vylozrsw`.
 
 ### Ticket 6 — HTTP/1.x endpoints → `result` (server, client, transport, fs, form)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Migrate the h1 endpoint layer: `Server.handle`/`handle_func` (`Register_error`→`result`), `Client.do_` redirect-policy abort (`Failure`→`result` or typed error), `Transport`/`Server` request loop to consume `Io`'s `result` API, `Fs` (`Invalid_unsafe_path`/`No_overlap`/`Invalid_range` + `parse_range`/`file_system.open_` to typed variants), `Form` (`Form_error`/`Not_multipart`). Delete `Io.*_exn` and `Transfer.*_exn` shims once their last caller is migrated.
@@ -695,7 +695,119 @@ val parse_multipart_form : Body.t Request.t -> max_memory:int64 -> (unit, error)
 `dune build` clean; `dune test` full suite passes; confirm `grep -rn "_exn" lib/{io,transfer}.mli` returns nothing.
 
 **G) Execution Record**
-_(fill on completion)_
+
+**Status:** Done. The h1 endpoint layer (server / client / transport / fs / form)
+now consumes the `result` APIs and surfaces typed errors; all `Io.*_exn` shims
+and the dead `Transfer.*_exn` shims are gone. Landed as one cohesive change
+(build green throughout). Baseline at ticket start: build exit 0, **497** tests.
+
+**Per-module error types / changes:**
+
+- **`server`** (`server.mli` + `.ml`): replaced `exception Register_error of
+  string` with `type error = Register of string` + `error_to_string`. `register`
+  rewritten to return `(unit, error) result` (no raises); `handle`/`handle_func`
+  now `… -> (unit, error) result`. The per-connection serve loop (both the
+  plaintext `serve_conn` and the HTTP/1.x-over-TLS `serve_tls_conn` paths) now
+  `match`es on `Io.read_request`'s `result` instead of `Lwt.catch`-ing the
+  raising shim: a new `write_read_error_response` maps the boundary `Io.error` to
+  Go's `conn.serve` reply (`Io.Transfer (Unsupported_transfer_encoding _)` →
+  **501**; `Io.Unexpected_eof` → no reply / close; `Protocol`/`Missing_host`/other
+  `Transfer` → **400 Bad Request**, each with `Connection: close`), then closes.
+  `Ok r` proceeds exactly as before.
+
+- **`transport`** (`transport.ml`): dropped `Io.write_request_exn` /
+  `Io.read_response_exn`; `exchange` now calls `Io.write_request` /
+  `Io.read_response` (the result API) through a small `or_raise` adapter that
+  re-raises `Io.Protocol_error (Io.error_to_string e)` on `Error` — surfacing the
+  failure through Transport's existing exception-based retry/close-conn flow
+  (Go's `RoundTrip` keeps `(resp, err)` as an exception at the
+  `Body.t Response.t Lwt.t` boundary). `round_trip` signature unchanged.
+
+- **`client`** (`client.mli` + `.ml`): added `type error = Redirect of string` +
+  `error_to_string` + `exception Aborted of error`. The redirect-policy abort
+  now raises `Aborted (Redirect msg)` (was an untyped `Failure ("http: "^msg)`).
+  `do_`/`get`/`post`/`head` keep their raising `Body.t Response.t Lwt.t` shape
+  (the plan's "OR keep raising if cleaner" arm — no test asserts on the redirect
+  error, and a `result` would cascade through all the convenience verbs); the
+  handleable error is now typed and documented.
+
+- **`fs`** (`fs.mli` + `.ml`): replaced the three `exception`s
+  (`Invalid_unsafe_path`, `No_overlap`, `Invalid_range`) and the `exn`-typed
+  results with
+  `type error = Invalid_unsafe_path | Not_exist | Permission | Other of string |
+  No_overlap | Invalid_range of string` + `error_to_string`. `file_system.open_`
+  is now `string -> (file, error) result Lwt.t` (**APPROVED breaking change**,
+  Resolution #3 — `file_of_path`'s Unix-error catch maps `ENOENT/ENOTDIR` →
+  `Not_exist`, `EACCES/EPERM` → `Permission`, else `Other _`; `dir`'s guard
+  yields `Invalid_unsafe_path`). `to_http_error` now takes `error` (404 for
+  `Not_exist`/`Invalid_unsafe_path`, 403 for `Permission`, 500 otherwise).
+  `parse_range : string -> int64 -> (http_range list, error) result` (was
+  `(_, exn) result`); a private `Invalid_range_exn of string` sentinel threads
+  the malformed-header raise to the boundary. `serve_content`'s range dispatch
+  matches the typed arms (416 for `No_overlap`/`Invalid_range _`).
+
+- **`form`** (`form.mli` + `.ml`): replaced `exception Form_error of string` /
+  `exception Not_multipart` with `type error = Form of string | Not_multipart` +
+  `error_to_string`; the pure `parse_media_type` keeps an internal
+  `exception Media_type_error of string` (Go's `mime.ParseMediaType` error-as-
+  exception), caught into `Form`. `parse_form : … -> (unit, error) result Lwt.t`
+  and `parse_multipart_form : … -> (unit, error) result Lwt.t` (the latter was
+  `unit Lwt.t` raising). `parse_post_form`/`multipart_reader_check` return typed
+  results; the lazy `form_value`/`post_form_value`/`form_file` use a
+  `try_parse_multipart` helper that ignores the result + any mid-stream raise.
+
+**Shims deleted (their last callers migrated this ticket):**
+- `Io.read_request_exn`, `Io.read_response_exn`, `Io.write_request_exn`,
+  `Io.read_mime_header_exn` (`io.ml` + `io.mli`). Callers migrated: `server.ml`
+  (×2 serve loops → `Io.read_request` result), `transport.ml`
+  (→ `Io.write_request`/`Io.read_response` results), and the Go-fidelity row
+  tests `test_readrequest.ml` / `test_response.ml` / `test_requestwrite.ml` /
+  `test_stream_read.ml` (now each unwraps the result via a local `*_ok` helper).
+- Dead `Transfer.*_exn` shims with zero callers (introduced speculatively in T4,
+  never wired): `Transfer.parse_hex_uint_exn`, `parse_content_length_exn`,
+  `fix_length_exn`, `fix_trailer_exn`, `parse_transfer_encoding_exn`, plus the now
+  unused `Transfer.exn_of_error` (`transfer.ml` + `transfer.mli`).
+
+**Shims remaining (with reasons):**
+- `Gohttp_internal.Chunked.parse_hex_uint_exn` — **kept**; called by the chunked
+  reader's mid-stream `Body.Stream` thunk (`chunked.ml:135`), the
+  decision-#1 (Resolution #1) mid-stream-raise path.
+- `Hpack.decode_full_exn`, `Hpack_huffman.decode_exn` — **kept** for the HTTP/2
+  callers migrated in **Ticket 7**.
+- `Io.Protocol_error` / `Io.Missing_host` exceptions stay exported: the internal
+  linear-parse raise mechanism, the mid-stream body thunk, and Transport's
+  `or_raise` adapter all use `Io.Protocol_error`. (These are *exceptions*, not
+  `*_exn` shim functions — the plan-gate `grep -rn "_exn" lib/io.mli
+  lib/transfer.mli` returns **nothing**.)
+
+**Named tests added + registered (in `test/test_gohttp.ml` via existing suites):**
+- `Server.handle_conflict_result` (`test/test_serve.ml`, `Serve` suite) — two
+  conflicting patterns → `Error (Server.Register _)` (message contains "conflicts
+  with"); first registration `Ok`; empty pattern → `Error (Register _)`.
+- `Fs.parse_range_typed` (`test/test_fs_range.ml`, `FsRange` suite) — bad Range
+  header / `start>end` → `Error (Invalid_range _)`; `bytes=99-` (past size) →
+  `Error No_overlap`; valid `bytes=0-4` → `Ok [ {start=0; length=5} ]`.
+- `Form.parse_non_multipart` (`test/test_request_form.ml`, `Form` suite) — a
+  urlencoded request and a request with no Content-Type both →
+  `Error Form.Not_multipart`.
+Existing end-to-end suites (`Fs.serve_file_range` and the range cases, the
+Server/Client/Httptest round-trips, the streaming suites) pass unchanged.
+
+**Test evidence:**
+```
+$ dune build --root <worktree>     # warnings-as-errors
+BUILD_EXIT=0
+$ dune test --root <worktree> --force
+Test Successful in 1.79s. 500 tests run.
+TEST_EXIT=0
+```
+(Baseline at ticket start: 497 tests. Net +3 named tests.) Spot-check:
+`Serve handle_conflict_result [OK]`, `FsRange parse_range_typed [OK]`,
+`Form parse_non_multipart [OK]`. Plan gate: `grep -rn "_exn" lib/io.mli
+lib/transfer.mli` → nothing.
+
+**Commit id:** jj change **`lnmqsxoy`** (canonical, stable id; git `14cca31c`).
+Resolve the current git hash with `jj log -r lnmqsxoy`.
 
 ### Ticket 7 — HTTP/2 framing + endpoints boundaries → `result` (h2_frame, h2_error, h2_pipe, h2_databuffer, h2_server, h2_transport)
 Status: Planned

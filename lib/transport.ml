@@ -259,10 +259,18 @@ let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
       in
       Body.Stream next
   in
+  (* Consume Io's result API directly; surface a read/write failure through the
+     transport's existing exception-based error flow (the retry / close-conn
+     machinery below catches it) by raising the embedded Io error message. Go's
+     RoundTrip returns (resp, err); here a transport error remains an exception
+     at the [round_trip] boundary. *)
+  let or_raise r =
+    match r with Ok v -> Lwt.return v | Error e -> Lwt.fail (Io.Protocol_error (Io.error_to_string e))
+  in
   let exchange pc =
-    Io.write_request_exn pc.oc req >>= fun () ->
+    (Io.write_request pc.oc req >>= or_raise) >>= fun () ->
     Lwt_io.flush pc.oc >>= fun () ->
-    Io.read_response_exn ~request:req pc.ic >>= fun resp ->
+    (Io.read_response ~request:req pc.ic >>= or_raise) >>= fun resp ->
     resp.Response.body <- wrap_body_lifecycle pc resp;
     Lwt.return resp
   in

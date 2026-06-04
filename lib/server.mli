@@ -58,20 +58,26 @@ type serve_mux
 (** Go's [NewServeMux]. *)
 val new_serve_mux : unit -> serve_mux
 
-(** Raised by {!handle}/{!handle_func} on an invalid or conflicting pattern
-    (Go's [register] panic). *)
-exception Register_error of string
+(** A handleable registration error: an invalid or conflicting pattern (Go's
+    [register] error, which Go surfaces by panicking in [Handle] but returns
+    from [registerErr]). Carries Go's message text. *)
+type error = Register of string
 
-(** Go's [ServeMux.Handle]: register [handler] for [pattern]. Raises
-    {!Register_error} on an invalid or conflicting pattern. *)
-val handle : serve_mux -> string -> handler -> unit
+(** Render an {!error} as its Go message text. *)
+val error_to_string : error -> string
 
-(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern]. *)
+(** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
+    [Error (Register _)] on an invalid or conflicting pattern (a wiring-time
+    programmer error; callers may [Result.get_ok] at setup). *)
+val handle : serve_mux -> string -> handler -> (unit, error) result
+
+(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern].
+    Returns [Error (Register _)] on an invalid or conflicting pattern. *)
 val handle_func :
   serve_mux ->
   string ->
   (response_writer -> Body.t Request.t -> unit Lwt.t) ->
-  unit
+  (unit, error) result
 
 (** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 val serve_mux_serve_http :

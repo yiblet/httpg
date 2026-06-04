@@ -2,7 +2,12 @@
 
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
 
-let read ?request s = Lwt_main.run (Gohttp.Io.read_response_exn ?request (ic_of_string s))
+let read_ok ?request ic =
+  Lwt.bind (Gohttp.Io.read_response ?request ic) (function
+    | Ok r -> Lwt.return r
+    | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e)))
+
+let read ?request s = Lwt_main.run (read_ok ?request (ic_of_string s))
 
 let body_of (r : Gohttp.Body.t Gohttp.Response.t) = Lwt_main.run (Gohttp.Body.read_all r.body)
 

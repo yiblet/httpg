@@ -44,7 +44,11 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1) ?(header = Gohttp.
     ctx = Gohttp.Context.background;
   }
 
-let write r = capture (fun oc -> Gohttp.Io.write_request_exn oc r)
+let write r =
+  capture (fun oc ->
+      Lwt.bind (Gohttp.Io.write_request oc r) (function
+        | Ok () -> Lwt.return_unit
+        | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e))))
 
 (* Row 0: GET, no body, custom headers, no Content-Length. *)
 let row0 () =

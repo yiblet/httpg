@@ -13,7 +13,17 @@ let ( >|= ) p f = Lwt.map f p
 (* defaultMaxMemory (request.go). *)
 let default_max_memory = Int64.mul 32L (Int64.of_int (1 lsl 20))
 
-exception Form_error of string
+type error =
+  | Form of string
+  | Not_multipart
+
+let error_to_string = function
+  | Form s -> s
+  | Not_multipart -> "request Content-Type isn't multipart/form-data"
+
+(* Pure media-type parse keeps Go's error-as-exception shape; the
+   result-returning entrypoints catch it into [Form]. *)
+exception Media_type_error of string
 
 (* ---- mime.ParseMediaType (mime/mediatype.go), trimmed to what ParseForm
    needs: the bare type (lowercased) plus the boundary parameter, and the
@@ -49,7 +59,7 @@ let parse_media_type (v : string) : string * (string * string) list =
     match String.index_opt s '=' with
     | None ->
       (* a parameter with no '=' : Go treats as invalid media parameter *)
-      raise (Form_error "mime: invalid media parameter")
+      raise (Media_type_error "mime: invalid media parameter")
     | Some eq ->
       let key = ascii_lower (trim (String.sub s 0 eq)) in
       let after = String.sub s (eq + 1) (String.length s - eq - 1) in
@@ -97,7 +107,7 @@ let parse_media_type (v : string) : string * (string * string) list =
       in
       (* Go: an empty parameter value (e.g. "boundary=") is an invalid media
          parameter. *)
-      if value = "" then raise (Form_error "mime: invalid media parameter");
+      if value = "" then raise (Media_type_error "mime: invalid media parameter");
       (* token-validity check on the value when unquoted is skipped; values are
          accepted. *)
       params := (key, value) :: !params;
@@ -111,20 +121,20 @@ let content_type_is_multipart (mediatype : string) = mediatype = "multipart/form
 
 (* ---- parsePostForm: read & parse an application/x-www-form-urlencoded body.
    Returns the parsed Values and the first error (if any), mirroring Go. *)
-let parse_post_form (r : Body.t Request.t) : (Values.t * (unit, string) result) Lwt.t =
+let parse_post_form (r : Body.t Request.t) : (Values.t * (unit, error) result) Lwt.t =
   let ct = Header.get r.Request.header "Content-Type" in
   let ct = if ct = "" then "application/octet-stream" else ct in
   match parse_media_type ct with
-  | exception Form_error msg -> Lwt.return (Values.create (), Error msg)
+  | exception Media_type_error msg -> Lwt.return (Values.create (), Error (Form msg))
   | mediatype, _params -> (
     if mediatype = "application/x-www-form-urlencoded" then begin
       let max_form_size = Int64.of_int (10 * 1024 * 1024) in
       Body.read_all r.Request.body >>= fun b ->
       if Int64.compare (Int64.of_int (String.length b)) max_form_size > 0 then
-        Lwt.return (Values.create (), Error "http: POST too large")
+        Lwt.return (Values.create (), Error (Form "http: POST too large"))
       else
         let m, res = Values.parse_query b in
-        let res = Result.map_error Values.error_to_string res in
+        let res = Result.map_error (fun e -> Form (Values.error_to_string e)) res in
         Lwt.return (m, res)
     end
     else
@@ -135,7 +145,7 @@ let parse_post_form (r : Body.t Request.t) : (Values.t * (unit, string) result) 
 (* ParseForm: populate r.Form and r.PostForm. Idempotent. Returns the first
    error encountered (as a result) without raising, mirroring Go's error
    return. *)
-let parse_form (r : Body.t Request.t) : (unit, string) result Lwt.t =
+let parse_form (r : Body.t Request.t) : (unit, error) result Lwt.t =
   let err = ref (Ok ()) in
   let set_err e = match !err with Ok () -> err := e | Error _ -> () in
   let post_step =
@@ -167,7 +177,7 @@ let parse_form (r : Body.t Request.t) : (unit, string) result Lwt.t =
     (* parse query from URL *)
     let raw_query = match Uri.verbatim_query r.Request.url with Some q -> q | None -> "" in
     let new_values, qres = Values.parse_query raw_query in
-    set_err (Result.map_error Values.error_to_string qres);
+    set_err (Result.map_error (fun e -> Form (Values.error_to_string e)) qres);
     (match form with
     | None -> r.Request.form <- Some new_values
     | Some f ->
@@ -211,44 +221,43 @@ let base_filename name =
   in
   if last_sep < 0 then s else String.sub s (last_sep + 1) (String.length s - last_sep - 1)
 
-exception Not_multipart
-
 (* multipartReader content-type check (request.go): error if not
    multipart/form-data (the form path; the general MultipartReader also accepts
    multipart/mixed, but ParseMultipartForm only deals with form-data). *)
-let multipart_reader_check (r : Body.t Request.t) : (string, exn) result =
+let multipart_reader_check (r : Body.t Request.t) : (string, error) result =
   let v = Header.get r.Request.header "Content-Type" in
   if v = "" then Error Not_multipart
   else
     match parse_media_type v with
-    | exception Form_error msg -> Error (Form_error msg)
+    | exception Media_type_error msg -> Error (Form msg)
     | mediatype, _ -> if content_type_is_multipart mediatype then Ok v else Error Not_multipart
 
 (* ParseMultipartForm: parse a multipart/form-data body, merging into Form and
-   PostForm (Issue 9305). Calls parse_form first. Raises on parse failure
+   PostForm (Issue 9305). Calls parse_form first. Returns the parse error
    (mirroring Go returning a non-nil error), but a ParseForm error is deferred
    to the end like Go. *)
-let parse_multipart_form (r : Body.t Request.t) ~(max_memory : int64) : unit Lwt.t =
+let parse_multipart_form (r : Body.t Request.t) ~(max_memory : int64) :
+    (unit, error) result Lwt.t =
   ignore max_memory;
   (* If already parsed, no-op (idempotent). *)
   match r.Request.multipart_form with
-  | Some _ -> Lwt.return_unit
+  | Some _ -> Lwt.return (Ok ())
   | None -> (
     let parse_form_step =
       match r.Request.form with Some _ -> Lwt.return (Ok ()) | None -> parse_form r
     in
     parse_form_step >>= fun parse_form_err ->
     match multipart_reader_check r with
-    | Error e -> Lwt.fail e
+    | Error e -> Lwt.return (Error e)
     | Ok ct_value -> (
       match to_content_type ct_value with
-      | Error m -> Lwt.fail (Form_error m)
+      | Error m -> Lwt.return (Error (Form m))
       | Ok content_type ->
         Body.read_all r.Request.body >>= fun body_str ->
         let stream = Lwt_stream.of_list [ body_str ] in
         Multipart_form_lwt.of_stream_to_tree stream content_type >>= fun res ->
         (match res with
-        | Error (`Msg m) -> Lwt.fail (Form_error m)
+        | Error (`Msg m) -> Lwt.return (Error (Form m))
         | Ok tree ->
           let value = Values.create () in
           let file : (string, Request.file_header list) Hashtbl.t = Hashtbl.create 8 in
@@ -291,18 +300,23 @@ let parse_multipart_form (r : Body.t Request.t) ~(max_memory : int64) : unit Lwt
             value;
           r.Request.multipart_form <- Some mf;
           (* Defer the ParseForm error like Go (return parseFormErr). *)
-          (match parse_form_err with Ok () -> Lwt.return_unit | Error m -> Lwt.fail (Form_error m)))))
+          Lwt.return parse_form_err)))
 
 (* ---- FormValue / PostFormValue / FormFile.
    These lazily parse and ignore errors (mirroring Go). *)
 
+(* Run parse_multipart_form for its side effects, ignoring both the result error
+   and any mid-stream body-read exception (Go's lazy FormValue/FormFile ignore
+   the error). *)
+let try_parse_multipart (r : Body.t Request.t) : unit Lwt.t =
+  Lwt.catch
+    (fun () -> parse_multipart_form r ~max_memory:default_max_memory >|= ignore)
+    (fun _ -> Lwt.return_unit)
+
 let ensure_parsed_for_form (r : Body.t Request.t) : unit Lwt.t =
   match r.Request.form with
   | Some _ -> Lwt.return_unit
-  | None ->
-    Lwt.catch
-      (fun () -> parse_multipart_form r ~max_memory:default_max_memory)
-      (fun _ -> Lwt.return_unit)
+  | None -> try_parse_multipart r
 
 let form_value (r : Body.t Request.t) (key : string) : string Lwt.t =
   ensure_parsed_for_form r >|= fun () ->
@@ -311,20 +325,14 @@ let form_value (r : Body.t Request.t) (key : string) : string Lwt.t =
 let post_form_value (r : Body.t Request.t) (key : string) : string Lwt.t =
   (match r.Request.post_form with
   | Some _ -> Lwt.return_unit
-  | None ->
-    Lwt.catch
-      (fun () -> parse_multipart_form r ~max_memory:default_max_memory)
-      (fun _ -> Lwt.return_unit))
+  | None -> try_parse_multipart r)
   >|= fun () -> match r.Request.post_form with Some pf -> Values.get pf key | None -> ""
 
 (* FormFile: simplified to (filename, content) of the first file for [key]. *)
 let form_file (r : Body.t Request.t) (key : string) : (string * string) option Lwt.t =
   (match r.Request.multipart_form with
   | Some _ -> Lwt.return_unit
-  | None ->
-    Lwt.catch
-      (fun () -> parse_multipart_form r ~max_memory:default_max_memory)
-      (fun _ -> Lwt.return_unit))
+  | None -> try_parse_multipart r)
   >|= fun () ->
   match r.Request.multipart_form with
   | None -> None

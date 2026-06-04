@@ -10,6 +10,19 @@ type check_redirect = Body.t Request.t list -> (unit, string) result
 (** Go's [defaultCheckRedirect]: abort after 10 redirects. *)
 val default_check_redirect : check_redirect
 
+(** A handleable client error: the redirect policy aborted the request (Go's
+    [Client.Do] returning the [CheckRedirect] error). *)
+type error = Redirect of string
+
+(** Render an {!error} as its Go message text (with the ["http: "] prefix). *)
+val error_to_string : error -> string
+
+(** Raised by {!do_} (and the convenience verbs) when the redirect policy aborts
+    the request — the handleable {!error} carried as an exception, since
+    {!do_}/{!get}/{!post}/{!head} keep Go's [Response]/[error] split as a
+    raising [Body.t Response.t Lwt.t] boundary. *)
+exception Aborted of error
+
 (** A [Client] wrapping a {!Transport.t}, a redirect policy and an optional
     overall timeout (Go's [Client.Timeout]). *)
 type t
@@ -42,7 +55,8 @@ val default_client : t
     client's policy (301/302/303 rewrite the method to GET unless the original
     was GET/HEAD and drop the body; 307/308 preserve method and body), composing
     {!Transport.round_trip} for each hop. A non-2xx status is not an error.
-    Raises [Failure] when the redirect policy aborts.
+    Raises {!Aborted} (carrying the typed {!error}) when the redirect policy
+    aborts.
 
     {b The response body streams} (a {!Body.Stream}, see {!Transport.round_trip}):
     it is not buffered, and the underlying connection is returned to the

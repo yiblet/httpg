@@ -7,14 +7,14 @@ open Lwt.Infix
 
 (* A protocol/parse error, carrying Go's message text. Retained as the internal
    raise mechanism for the parse helpers (caught at the read/write boundary and
-   mapped to {!error}), for the mid-stream body thunk, and for the [*_exn]
-   shims. *)
+   mapped to {!error}) and for the mid-stream body thunk. Transport also raises
+   it to thread a round-trip failure message through its exception-based flow. *)
 exception Protocol_error of string
 
-(* Raised by [write_request_exn] when no Host is available (Go's
-   errMissingHost). Declared before [type error] so its constructor name is the
-   exception; [missing_host_exn] aliases it for raising after the [error]
-   variant (which also has a [Missing_host] arm) shadows the name. *)
+(* The write_request "no Host" case (Go's errMissingHost). Declared before
+   [type error] so its constructor name is the exception; [missing_host_exn]
+   aliases it for raising after the [error] variant (which also has a
+   [Missing_host] arm) shadows the name. *)
 exception Missing_host
 
 let missing_host_exn = Missing_host
@@ -455,7 +455,7 @@ let write_request_raising (oc : Lwt_io.output_channel) (r : Body.t Request.t) : 
   end
 
 (* ------------------------------------------------------------------ *)
-(* Result boundary wrappers + legacy *_exn shims.                      *)
+(* Result boundary wrappers.                                           *)
 (* ------------------------------------------------------------------ *)
 
 (* Catch the internal raising sentinels and map them to a boundary [error];
@@ -476,12 +476,6 @@ let read_response ?request ic : (Body.t Response.t, error) result Lwt.t =
 
 let write_request oc r : (unit, error) result Lwt.t =
   to_result (fun () -> write_request_raising oc r)
-
-(* Shims: raising contracts for not-yet-migrated callers (deleted in Ticket 6). *)
-let read_mime_header_exn = read_mime_header_raising
-let read_request_exn = read_request_raising
-let read_response_exn = read_response_raising
-let write_request_exn = write_request_raising
 
 (* ------------------------------------------------------------------ *)
 (* write_response (Response.Write).                                    *)

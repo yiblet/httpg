@@ -42,16 +42,6 @@ let error_to_string = function
   | Bad_header (what, value) -> Printf.sprintf "%s: %s" what value
   | Unexpected_eof -> "unexpected EOF"
 
-(* Map a handleable [error] to its legacy exception (for the [*_exn] shims that
-   thread the original exception identity to not-yet-migrated callers). *)
-let exn_of_error = function
-  | Line_too_long -> Err_line_too_long
-  | Chunk msg -> Chunk_error msg
-  | Bad_content_length cl -> Bad_string_error ("bad Content-Length", cl)
-  | Unsupported_transfer_encoding te -> Chunk_error (Printf.sprintf "unsupported transfer encoding: %S" te)
-  | Bad_header (what, value) -> Bad_string_error (what, value)
-  | Unexpected_eof -> Chunk_error "unexpected EOF"
-
 (* ------------------------------------------------------------------ *)
 (* Small string helpers (ports of the textproto / ascii helpers).     *)
 (* ------------------------------------------------------------------ *)
@@ -145,7 +135,6 @@ let parse_hex_uint (v : string) : (int64, error) result =
   | Error Gohttp_internal.Chunked.Line_too_long -> Error Line_too_long
   | Error (Gohttp_internal.Chunked.Chunk msg) -> Error (Chunk msg)
 
-let parse_hex_uint_exn = Gohttp_internal.Chunked.parse_hex_uint_exn
 let new_chunked_reader = Gohttp_internal.Chunked.new_chunked_reader
 let chunked_writer_write = Gohttp_internal.Chunked.chunked_writer_write
 let chunked_writer_close = Gohttp_internal.Chunked.chunked_writer_close
@@ -226,17 +215,6 @@ let parse_content_length (cl_headers : string list) : (int64, error) result =
         | _ -> Error (Bad_content_length cl)
     end
 
-(* Shim: {!parse_content_length} raising the legacy exception. The empty-value
-   case maps to ["invalid empty Content-Length"], the rest to
-   ["bad Content-Length"], preserving Go's two [badStringError] [what] strings. *)
-let parse_content_length_exn (cl_headers : string list) : int64 =
-  match parse_content_length cl_headers with
-  | Ok n -> n
-  | Error (Bad_content_length cl) ->
-    if cl = "" then raise (bad_string_error "invalid empty Content-Length" cl)
-    else raise (bad_string_error "bad Content-Length" cl)
-  | Error e -> raise (exn_of_error e)
-
 (* fixLength: determine the expected body length per RFC 7230 3.3.
    [header] is mutated (dedup / delete Content-Length) exactly as Go does.
    Returns [result]: header-parse boundary errors (conflicting / invalid
@@ -291,12 +269,6 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t) ~chunke
             Ok (if is_request then 0L else -1L)
           end))
 
-(* Shim: {!fix_length} raising the legacy exceptions. *)
-let fix_length_exn ~is_response ~status ~request_method ~header ~chunked : int64 =
-  match fix_length ~is_response ~status ~request_method ~header ~chunked with
-  | Ok n -> n
-  | Error e -> raise (exn_of_error e)
-
 (* shouldClose: whether to hang up after this message. Version-sensitive.
    [remove_close_header] mutates [header] to drop a Connection: close. *)
 let should_close ~major ~minor ~(header : Header.t) ~remove_close_header : bool =
@@ -339,12 +311,6 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked : (Header.t option, err
       | None -> Ok (if Hashtbl.length trailer = 0 then None else Some trailer)
     end
 
-(* Shim: {!fix_trailer} raising the legacy exception. *)
-let fix_trailer_exn ~header ~chunked : Header.t option =
-  match fix_trailer ~header ~chunked with
-  | Ok r -> r
-  | Error e -> raise (exn_of_error e)
-
 (* parseTransferEncoding equivalent: set whether chunked, version-sensitive.
    Mutates [header] (deletes Transfer-Encoding). Raises Chunk_error for
    unsupported encodings (the unsupportedTEError analogue). HTTP/1.0 ignores
@@ -366,12 +332,6 @@ let parse_transfer_encoding ~major ~minor ~(header : Header.t) : (bool, error) r
       if not (ascii_equal_fold only "chunked") then
         Error (Unsupported_transfer_encoding only)
       else Ok true
-
-(* Shim: {!parse_transfer_encoding} raising the legacy exception. *)
-let parse_transfer_encoding_exn ~major ~minor ~header : bool =
-  match parse_transfer_encoding ~major ~minor ~header with
-  | Ok b -> b
-  | Error e -> raise (exn_of_error e)
 
 (* ------------------------------------------------------------------ *)
 (* read_transfer: the transferReader logic.                            *)
