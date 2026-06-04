@@ -70,14 +70,17 @@ let contains ~needle haystack =
    [H2_error.t] in its result-returning signatures); [h2_error] owns the
    unified type as [type t]. *)
 
+(* The HTTP/2 stack lives in lib/internal/http2/ (its own gohttp_http2 library);
+   hpack/hpack_huffman/h2_frame/h2_error are reached by their nested path. *)
 let modules_with_type_error =
-  [ "transfer"; "io"; "hpack"; "hpack_huffman"; "pattern"; "values"; "cookie";
-    "fs"; "form"; "server" ]
+  [ "transfer"; "io"; "internal/http2/hpack"; "internal/http2/hpack_huffman";
+    "pattern"; "values"; "cookie"; "fs"; "form"; "server" ]
 
 (* All [.mli] files we sweep for the no-[_exn] guard. *)
 let all_mli_modules =
   modules_with_type_error
-  @ [ "h2_frame"; "h2_error"; "client"; "transport"; "internal/chunked" ]
+  @ [ "internal/http2/h2_frame"; "internal/http2/h2_error"; "client";
+      "transport"; "internal/chunked" ]
 
 (* The unhandleable allowlist: modules whose surviving exceptions /
    invariants / control-flow sentinels are deliberately kept (never converted
@@ -128,11 +131,11 @@ let test_no_handleable_raise_escapes () =
         (contains ~needle:"type error" src))
     modules_with_type_error;
   (* h2_error owns the unified handleable type as [type t]. *)
-  let h2_error = read_mli lib "h2_error" in
+  let h2_error = read_mli lib "internal/http2/h2_error" in
   Alcotest.(check bool) "h2_error.mli declares 'type t'" true
     (contains ~needle:"type t" h2_error);
   (* h2_frame surfaces the unified [H2_error.t] at its read boundary. *)
-  let h2_frame = read_mli lib "h2_frame" in
+  let h2_frame = read_mli lib "internal/http2/h2_frame" in
   Alcotest.(check bool) "h2_frame.mli references H2_error.t in a result" true
     (contains ~needle:"H2_error.t) result" h2_frame)
 

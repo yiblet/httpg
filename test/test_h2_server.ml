@@ -5,6 +5,7 @@
    concurrent streams). Bounded by Net.with_timeout so a hang fails. *)
 
 open Gohttp
+open Gohttp_http2
 module F = H2_frame
 module S = H2_server
 
@@ -126,10 +127,10 @@ let run ~handler client =
 
 (* ---- TestServer: simple GET, 200 + "hello" body ---- *)
 let test_get () =
-  let handler (rw : S.response_writer) (_req : Body.t Request.t) =
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
     let open Lwt.Syntax in
-    let* () = rw.write "hello" in
-    rw.flush ()
+    let* () = rw.rw_write "hello" in
+    rw.rw_flush ()
   in
   let client ic oc =
     let open Lwt.Syntax in
@@ -151,11 +152,11 @@ let test_get () =
 
 (* ---- TestServer POST echo ---- *)
 let test_post_echo () =
-  let handler (rw : S.response_writer) (req : Body.t Request.t) =
+  let handler (rw : S.response_writer) (req : Api.server_request) =
     let open Lwt.Syntax in
-    let* body = Body.read_all req.body in
-    let* () = rw.write body in
-    rw.flush ()
+    let* body = Api.Body.read_all req.sreq_body in
+    let* () = rw.rw_write body in
+    rw.rw_flush ()
   in
   let client ic oc =
     let open Lwt.Syntax in
@@ -178,12 +179,12 @@ let test_post_echo () =
 
 (* ---- TestServer two concurrent streams (ids 1 and 3) ---- *)
 let test_two_streams () =
-  let handler (rw : S.response_writer) (req : Body.t Request.t) =
+  let handler (rw : S.response_writer) (req : Api.server_request) =
     let open Lwt.Syntax in
     (* echo the path so we can distinguish streams *)
-    let path = Uri.path req.url in
-    let* () = rw.write ("ok:" ^ path) in
-    rw.flush ()
+    let path = Uri.path req.sreq_url in
+    let* () = rw.rw_write ("ok:" ^ path) in
+    rw.rw_flush ()
   in
   let client ic oc =
     let open Lwt.Syntax in

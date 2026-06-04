@@ -4,8 +4,8 @@
    than blocking. A blocked read is unblocked by a later write and by
    close/break-with-error. *)
 
-module Pipe = Gohttp.H2_pipe
-module DB = Gohttp.H2_databuffer
+module Pipe = Gohttp_http2.H2_pipe
+module DB = Gohttp_http2.H2_databuffer
 module Net = Gohttp.Net
 
 exception Err_a

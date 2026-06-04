@@ -46,7 +46,7 @@ val new_client_conn :
     {!Body.Stream} fed by DATA frames through a per-stream {!H2_pipe}. Mirrors
     Go's [ClientConn.roundTrip]/[clientStream.writeRequest] +
     [clientConnReadLoop.handleResponse]. *)
-val round_trip : client_conn -> Body.t Request.t -> Body.t Response.t Lwt.t
+val round_trip : client_conn -> Api.client_request -> Api.client_response Lwt.t
 
 (** [close cc] marks the connection closed and aborts the read loop / pending
     streams. Mirrors Go's [ClientConn.Close]. *)
@@ -75,5 +75,5 @@ val create : unit -> t
 val round_trip_pooled :
   t ->
   connect:(string -> (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t) ->
-  Body.t Request.t ->
-  Body.t Response.t Lwt.t
+  Api.client_request ->
+  Api.client_response Lwt.t

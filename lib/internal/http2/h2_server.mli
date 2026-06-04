@@ -25,20 +25,13 @@
    - Go's per-stream request {!H2_pipe} feeds the streaming {!Body}; DATA frames
      write into it and a blocked handler read awaits the pipe's condition. *)
 
-(** Go's [ResponseWriter], modeled as a record of operations (identical shape to
-    {!Server.response_writer}). [header ()] is the mutable header map the handler
-    fills before headers are flushed; [write_header code] sets the status
-    (implicit 200 on first [write]); [write data] appends body bytes. [flush]
-    forces the buffered headers/body onto the wire (Go's [Flush]). *)
-type response_writer = {
-  header : unit -> Header.t;
-  write_header : int -> unit;
-  write : string -> unit Lwt.t;
-  flush : unit -> unit Lwt.t;
-}
+(** Go's [ResponseWriter] / [Handler], defined in {!Api} (Go's api.go) so the
+    HTTP/2 stack does not name the public Request/Response types; the public
+    {!Server} shim adapts them to {!Server.response_writer} / a [Request.t]
+    handler. *)
+type response_writer = Api.response_writer
 
-(** Go's [Handler]: [ServeHTTP(ResponseWriter, *Request)]. *)
-type handler = response_writer -> Body.t Request.t -> unit Lwt.t
+type handler = Api.handler
 
 (** [serve ic oc ~handler] serves a single HTTP/2 connection over the duplex
     channel pair [(ic, oc)] (already past TLS/ALPN): it reads and validates the

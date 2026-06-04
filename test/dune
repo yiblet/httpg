@@ -2,5 +2,8 @@
  (name test_gohttp)
  (deps
   (glob_files ../lib/*.mli)
-  (glob_files ../lib/internal/*.mli))
- (libraries gohttp gohttp_internal alcotest lwt lwt.unix str base64 fmt uri))
+  (glob_files ../lib/base/*.mli)
+  (glob_files ../lib/internal/*.mli)
+  (glob_files ../lib/internal/http2/*.mli))
+ (libraries gohttp gohttp_base gohttp_internal gohttp_http2 alcotest lwt
+   lwt.unix str base64 fmt uri))

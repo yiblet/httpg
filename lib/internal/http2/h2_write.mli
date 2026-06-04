@@ -8,6 +8,7 @@
    here they are the constructors of a single {!write_framer} variant. The
    serialization (Go's [writeFrame] method) is the {!write_frame} function. *)
 
+
 (** A request to write a set of HTTP response headers or trailers, mirroring
     Go's [writeResHeaders] struct. [http_res_code] = 0 means no [:status]
     line. [trailers] = [Some keys] selects which keys of [h] to write (Go's
@@ -15,7 +16,7 @@
 type write_res_headers = {
   rh_stream_id : int;
   http_res_code : int;
-  h : Header.t;
+  h : Api.Header.t;
   trailers : string list option;
   rh_end_stream : bool;
   date : string;
@@ -34,7 +35,7 @@ type write_push_promise = {
   pp_scheme : string;
   pp_authority : string;
   pp_path : string;
-  pp_h : Header.t;
+  pp_h : Api.Header.t;
 }
 
 (** The concrete frame-writer values. Each constructor mirrors a Go type that
@@ -76,7 +77,7 @@ val httpcode_string : int -> string
     keys, in the given order). Lower-cases names, skips non-ASCII / invalid
     names and values, and only emits [transfer-encoding: trailers]. Mirrors
     Go's [encodeHeaders]. *)
-val encode_headers : Hpack.encoder -> Header.t -> string list option -> unit
+val encode_headers : Hpack.encoder -> Api.Header.t -> string list option -> unit
 
 (** [write_frame ~enc oc w] serializes [w] to the channel [oc] using the
     {!H2_frame} writers, encoding any header block with [enc]. Header writers

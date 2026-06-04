@@ -2,7 +2,7 @@
    cases of hpack_test.go (TestHuffmanRoundtrip / TestHuffmanDecode /
    TestHuffmanEncode). Pure tests. *)
 
-open Gohttp
+open Gohttp_http2
 module H = Hpack_huffman
 module T = Hpack_tables
 

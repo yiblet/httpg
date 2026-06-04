@@ -9,6 +9,7 @@
    Composes {!H2_write} (the writer values) and {!H2_flow} (per-stream
    outbound flow control). *)
 
+
 (** Per-stream scheduling state, mirroring the fields of Go's [stream] that the
     scheduler reads via a [FrameWriteRequest]: the stream id, the outbound
     flow-control window ([stream.flow], an {!H2_flow.outflow}) and the

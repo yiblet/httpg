@@ -1,7 +1,7 @@
 (* Ported from go/src/net/http/internal/http2/flow_test.go.
    Window add/take/available + int32 overflow semantics for inflow/outflow. *)
 
-module Flow = Gohttp.H2_flow
+module Flow = Gohttp_http2.H2_flow
 
 let i32 = Alcotest.testable (Fmt.of_to_string Int32.to_string) Int32.equal
 

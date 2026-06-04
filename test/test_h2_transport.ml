@@ -5,34 +5,26 @@
    concurrent streams). Bounded by Net.with_timeout so a hang fails. *)
 
 open Gohttp
+open Gohttp_http2
 
 let ( let* ) = Lwt.bind
 
-let mk_request ~meth ~path ?(body = Body.Empty) () : Body.t Request.t =
+let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
   let content_length =
     match body with
-    | Body.String s -> Int64.of_int (String.length s)
+    | Api.Body.String s -> Int64.of_int (String.length s)
     | _ -> 0L
   in
   {
-    Request.meth;
-    url = Uri.of_string ("https://example.com" ^ path);
-    proto = "HTTP/2.0";
-    proto_major = 2;
-    proto_minor = 0;
-    header = Header.create ();
-    body;
-    content_length;
-    transfer_encoding = [];
-    close = false;
-    host = "";
-    trailer = None;
-    request_uri = "";
-    remote_addr = "";
-    form = None;
-    post_form = None;
-    multipart_form = None;
-    ctx = Context.background;
+    Api.creq_ctx = Context.background;
+    creq_meth = meth;
+    creq_url = Uri.of_string ("https://example.com" ^ path);
+    creq_header = Api.Header.create ();
+    creq_trailer = Api.Header.create ();
+    creq_body = body;
+    creq_host = "";
+    creq_content_length = content_length;
+    creq_close = false;
   }
 
 (* Run [client cc] against an H2_server.serve over a real loopback socket pair,
@@ -61,15 +53,15 @@ let run ~handler client =
 
 (* ---- TestTransport: simple GET, 200 + "hello" body ---- *)
 let test_get () =
-  let handler (rw : H2_server.response_writer) (_req : Body.t Request.t) =
-    let* () = rw.write "hello" in
-    rw.flush ()
+  let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
+    let* () = rw.rw_write "hello" in
+    rw.rw_flush ()
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/" () in
     let* resp = H2_transport.round_trip cc req in
-    let* body = Body.read_all resp.Response.body in
-    Lwt.return (resp.Response.status_code, body)
+    let* body = Api.Body.read_all resp.cres_body in
+    Lwt.return (resp.cres_status_code, body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -77,16 +69,16 @@ let test_get () =
 
 (* ---- TestTransport POST echo ---- *)
 let test_post_echo () =
-  let handler (rw : H2_server.response_writer) (req : Body.t Request.t) =
-    let* body = Body.read_all req.Request.body in
-    let* () = rw.write body in
-    rw.flush ()
+  let handler (rw : H2_server.response_writer) (req : Api.server_request) =
+    let* body = Api.Body.read_all req.sreq_body in
+    let* () = rw.rw_write body in
+    rw.rw_flush ()
   in
   let client cc =
-    let req = mk_request ~meth:"POST" ~path:"/echo" ~body:(Body.String "ping") () in
+    let req = mk_request ~meth:"POST" ~path:"/echo" ~body:(Api.Body.String "ping") () in
     let* resp = H2_transport.round_trip cc req in
-    let* body = Body.read_all resp.Response.body in
-    Lwt.return (resp.Response.status_code, body)
+    let* body = Api.Body.read_all resp.cres_body in
+    Lwt.return (resp.cres_status_code, body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -94,17 +86,17 @@ let test_post_echo () =
 
 (* ---- TestTransport two concurrent round trips on one ClientConn ---- *)
 let test_concurrent () =
-  let handler (rw : H2_server.response_writer) (req : Body.t Request.t) =
-    let path = Uri.path req.Request.url in
-    let* () = rw.write ("ok:" ^ path) in
-    rw.flush ()
+  let handler (rw : H2_server.response_writer) (req : Api.server_request) =
+    let path = Uri.path req.sreq_url in
+    let* () = rw.rw_write ("ok:" ^ path) in
+    rw.rw_flush ()
   in
   let client cc =
     let do_rt path =
       let req = mk_request ~meth:"GET" ~path () in
       let* resp = H2_transport.round_trip cc req in
-      let* body = Body.read_all resp.Response.body in
-      Lwt.return (resp.Response.status_code, body)
+      let* body = Api.Body.read_all resp.cres_body in
+      Lwt.return (resp.cres_status_code, body)
     in
     Lwt.both (do_rt "/a") (do_rt "/b")
   in

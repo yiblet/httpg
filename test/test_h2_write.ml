@@ -3,6 +3,7 @@
    This covers the write.go writeFramer values and splitHeaderBlock. *)
 
 open Gohttp
+open Gohttp_http2
 module W = H2_write
 module F = H2_frame
 

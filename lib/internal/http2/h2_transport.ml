@@ -1,9 +1,12 @@
 (* Port of the client subset of go/src/net/http/internal/http2/transport.go and
    client_conn_pool.go. See h2_transport.mli for the goroutine -> Lwt mapping. *)
 
+
 let ( let* ) = Lwt.bind
 
 module F = H2_frame
+module Body = Api.Body
+module Header = Api.Header
 
 (* errClientConnClosed / errClientConnGotGoAway / aborts, as exceptions. *)
 exception Client_conn_closed
@@ -22,7 +25,7 @@ type client_stream = {
   inflow : H2_flow.inflow;
   mutable bytes_remain : int;  (* -1 means unknown; declared Content-Length. *)
   (* response: set when headers received, resolves resp_recv. *)
-  mutable res : Body.t Response.t option;
+  mutable res : Api.client_response option;
   resp_recv : unit Lwt_condition.t;  (* broadcast when [res] is set *)
   mutable resp_recv_done : bool;
   peer_closed : unit Lwt_condition.t;  (* broadcast on END_STREAM *)
@@ -123,9 +126,9 @@ let write_headers_block cc ~stream_id ~end_stream (hdrs : string) =
   let* () = loop 0 true in
   Lwt_io.flush cc.oc
 
-(* ---- request header encoding (Go httpcommon.EncodeHeaders subset) ---- *)
+(* ---- request header encoding (Go httpcommon.EncodeHeaders) ---- *)
 
-let ascii_eq_fold a b = String.lowercase_ascii a = String.lowercase_ascii b
+module HC = Gohttp_internal.Httpcommon
 
 (* RequestURI of the request URL: path?query (or "/" if empty). *)
 let request_uri_of (u : Uri.t) : string =
@@ -135,68 +138,59 @@ let request_uri_of (u : Uri.t) : string =
 
 (* actualContentLength: Body.String -> its length; Empty -> 0; Stream -> the
    request's declared content_length (-1 unknown). *)
-let actual_content_length (req : Body.t Request.t) =
-  match req.Request.body with
+let actual_content_length (req : Api.client_request) =
+  match req.creq_body with
   | Body.Empty -> 0
   | Body.String s -> String.length s
-  | Body.Stream _ -> Int64.to_int req.Request.content_length
-
-(* Enumerate the (lower-cased) header fields to encode, in Go's order. *)
-let enumerate_headers (req : Body.t Request.t) (acl : int) (f : string -> string -> unit) =
-  let url = req.Request.url in
-  let host =
-    if req.Request.host <> "" then req.Request.host
-    else match Uri.host url with Some h ->
-      (match Uri.port url with Some p -> Printf.sprintf "%s:%d" h p | None -> h)
-    | None -> ""
-  in
-  let meth = if req.Request.meth = "" then "GET" else req.Request.meth in
-  let is_normal_connect = meth = "CONNECT" in
-  f ":authority" host;
-  f ":method" meth;
-  if not is_normal_connect then begin
-    f ":path" (request_uri_of url);
-    f ":scheme" (match Uri.scheme url with Some s -> s | None -> "");
-  end;
-  (* regular fields *)
-  let did_ua = ref false in
-  List.iter
-    (fun (k, vv) ->
-      if ascii_eq_fold k "host" || ascii_eq_fold k "content-length" then ()
-      else if
-        ascii_eq_fold k "connection" || ascii_eq_fold k "proxy-connection"
-        || ascii_eq_fold k "transfer-encoding" || ascii_eq_fold k "upgrade"
-        || ascii_eq_fold k "keep-alive"
-      then ()
-      else if ascii_eq_fold k "user-agent" then begin
-        did_ua := true;
-        match vv with
-        | [] -> ()
-        | v :: _ -> if v <> "" then f k v
-      end
-      else List.iter (fun v -> f k v) vv)
-    (Header.to_list req.Request.header);
-  (* content-length: Go's shouldSendReqContentLength. *)
-  let send_cl =
-    match meth with
-    | "GET" | "HEAD" | "DELETE" | "OPTIONS" | "PROPFIND" | "TRACE" ->
-        false (* only when > 0 *)
-    | _ -> acl >= 0
-  in
-  if (send_cl && acl > 0) || (acl > 0) then f "content-length" (string_of_int acl);
-  if not !did_ua then f "user-agent" Request.default_user_agent
-
-(* Lower-case a header name (Go LowerHeader). *)
-let lower_header = String.lowercase_ascii
+  | Body.Stream _ -> Int64.to_int req.creq_content_length
 
 (* encode the request headers into a single HPACK block (Go encodeAndWriteHeaders
-   without the wmu plumbing). *)
-let encode_request_headers cc (req : Body.t Request.t) (acl : int) : string =
+   without the wmu plumbing), via httpcommon.EncodeHeaders. *)
+let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
+  let url = req.creq_url in
+  let host =
+    if req.creq_host <> "" then req.creq_host
+    else
+      match Uri.host url with
+      | Some h -> (
+          match Uri.port url with
+          | Some p -> Printf.sprintf "%s:%d" h p
+          | None -> h)
+      | None -> ""
+  in
+  let trailer = req.creq_trailer in
+  let hc_req : HC.request =
+    {
+      url_scheme = (match Uri.scheme url with Some s -> s | None -> "");
+      url_host = host;
+      request_uri = request_uri_of url;
+      url_opaque = "";
+      meth = req.creq_meth;
+      host = req.creq_host;
+      header = req.creq_header;
+      trailer;
+      actual_content_length = Int64.of_int acl;
+    }
+  in
+  let param : HC.encode_headers_param =
+    {
+      request = hc_req;
+      (* our client does not do transparent gzip decoding, so never request it
+         (Go's IsRequestGzip path); the peer's MAX_HEADER_LIST_SIZE is not yet
+         tracked, so the size pre-pass stays disabled as it was inline. *)
+      add_gzip_header = false;
+      peer_max_header_list_size = 0L;
+      default_user_agent = Api.default_user_agent;
+    }
+  in
   let buf = Buffer.create 256 in
   Hpack.set_writer cc.henc (fun s -> Buffer.add_string buf s);
-  enumerate_headers req acl (fun name value ->
-      let name = lower_header name in
-      Hpack.write_field cc.henc { name; value; sensitive = false });
+  let (_ : HC.encode_headers_result) =
+    HC.encode_headers ~canonical:Header.canonical_header_key param
+      (fun name value ->
+        (* httpcommon already lower-cased and validated [name]. *)
+        Hpack.write_field cc.henc { name; value; sensitive = false })
+  in
   Buffer.contents buf
 
 (* ---- request body writing (Go writeRequestBody + awaitFlowControl) ---- *)
@@ -243,13 +237,13 @@ let write_data_chunk cc cs ~end_stream (data : string) : unit Lwt.t =
   if len = 0 then Lwt.return_unit else loop 0
 
 (* send the request body then the terminating END_STREAM. *)
-let write_request_body cc cs (req : Body.t Request.t) : unit Lwt.t =
+let write_request_body cc cs (req : Api.client_request) : unit Lwt.t =
   let send_empty_end () =
     Lwt_mutex.with_lock cc.wmu (fun () ->
         let* () = F.write_data cc.oc cs.id true "" in
         Lwt_io.flush cc.oc)
   in
-  match req.Request.body with
+  match req.creq_body with
   | Body.Empty -> Lwt.return_unit (* END_STREAM already on HEADERS *)
   | Body.String s ->
       if String.length s = 0 then Lwt.return_unit
@@ -271,7 +265,7 @@ let write_request_body cc cs (req : Body.t Request.t) : unit Lwt.t =
 (* ---- response construction (Go handleResponse) ---- *)
 
 let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
-    Body.t Response.t =
+    Api.client_response =
   ignore cc;
   let status = ref "" in
   let header = Header.create () in
@@ -314,20 +308,15 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
               | e -> Lwt.fail e))
     end
   in
+  (* Api.client_response: the status text, proto, and request back-pointer are
+     filled in by the public Transport shim (Go's http2RoundTrip). *)
   {
-    Response.status = !status ^ " " ^ Status.status_text status_code;
-    status_code;
-    proto = "HTTP/2.0";
-    proto_major = 2;
-    proto_minor = 0;
-    header;
-    body;
-    content_length;
-    transfer_encoding = [];
-    close = false;
-    uncompressed = false;
-    trailer = None;
-    request = None;
+    Api.cres_status_code = status_code;
+    cres_content_length = content_length;
+    cres_uncompressed = false;
+    cres_header = header;
+    cres_trailer = Api.Header.create ();
+    cres_body = body;
   }
 
 (* ---- read loop (Go clientConnReadLoop) ---- *)
@@ -391,7 +380,7 @@ let process_headers cc (mf : F.meta_headers_frame) : unit Lwt.t =
             end_stream_error cc cs (Stream_aborted e);
             Lwt.return_unit
         | Ok res ->
-            let status_code = res.Response.status_code in
+            let status_code = res.Api.cres_status_code in
             if status_code >= 100 && status_code <= 199 then begin
               (* 1xx informational: ignore and wait for the real headers. *)
               cs.past_headers <- false;
@@ -565,10 +554,10 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
     Lwt.catch
       (fun () ->
         (* HEADERS need read_meta_headers assembly; peek the frame header by
-           reading a full frame, then for HEADERS assemble continuations.
-           The boundary returns [result]; the conn loop drives stream-abort /
-           GOAWAY by raising, so convert [Error] back via [to_exception]
-           (Resolution #2 — boundary-only). *)
+           reading a full frame, then for HEADERS assemble continuations. The
+           boundary returns [result]; the conn loop drives stream-abort / GOAWAY
+           by raising, so convert [Error] back via [to_exception] (Resolution #2
+           — boundary-only). *)
         let* f =
           Lwt.map
             (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
@@ -605,7 +594,8 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
               let* () =
                 match f with
                 | F.Headers (fh, hf) ->
-                    (* assemble HEADERS (+CONTINUATION) via read_meta_headers. *)
+                    (* assemble HEADERS (+CONTINUATION) via read_meta_headers
+                       (boundary returns [result]; convert via [to_exception]). *)
                     let* mf =
                       Lwt.map
                         (function
@@ -740,7 +730,7 @@ let make_stream cc id ~is_head =
   }
 
 (* wait for either the response headers, an abort, or the reader to die. *)
-let await_response cc cs : Body.t Response.t Lwt.t =
+let await_response cc cs : Api.client_response Lwt.t =
   let rec loop () =
     match cs.res with
     | Some res -> Lwt.return res
@@ -763,11 +753,11 @@ let await_response cc cs : Body.t Response.t Lwt.t =
   in
   loop ()
 
-let round_trip cc (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+let round_trip cc (req : Api.client_request) : Api.client_response Lwt.t =
   if cc.closed || cc.closing then
     Lwt.fail (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
   else begin
-    let is_head = req.Request.meth = "HEAD" in
+    let is_head = req.creq_meth = "HEAD" in
     let acl = actual_content_length req in
     let has_body = acl <> 0 in
     (* allocate stream id + write HEADERS under req_header_mu (Go reqHeaderMu). *)
@@ -816,9 +806,9 @@ type t = { conns : (string, client_conn list) Hashtbl.t }
 let create () = { conns = Hashtbl.create 8 }
 
 (* authority key for a request: host[:port] (Go authorityAddr). *)
-let authority_of (req : Body.t Request.t) =
-  let url = req.Request.url in
-  let host = match Uri.host url with Some h -> h | None -> req.Request.host in
+let authority_of (req : Api.client_request) =
+  let url = req.creq_url in
+  let host = match Uri.host url with Some h -> h | None -> req.creq_host in
   match Uri.port url with
   | Some p -> Printf.sprintf "%s:%d" host p
   | None -> host
@@ -829,8 +819,8 @@ let get_usable t authority =
   | Some conns ->
       List.find_opt (fun cc -> not (cc.closed || cc.closing)) conns
 
-let round_trip_pooled t ~connect (req : Body.t Request.t) :
-    Body.t Response.t Lwt.t =
+let round_trip_pooled t ~connect (req : Api.client_request) :
+    Api.client_response Lwt.t =
   let authority = authority_of req in
   let* cc =
     match get_usable t authority with

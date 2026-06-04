@@ -721,23 +721,54 @@ let listen_and_serve ~addr ~port handler =
    of preference (Go's [http2.NextProtoTLS] + ["http/1.1"]). *)
 let default_alpn_protocols = [ "h2"; "http/1.1" ]
 
-(* Adapt an HTTP/1.x [Server.handler] into an [H2_server.handler]: build the
-   H2 response_writer, expose it to the user handler as a {!response_writer}
-   (the H2 writer minus [flush]), run the handler, then flush the buffered
-   headers/body onto the wire. The two writer types are structurally identical
-   apart from H2's extra [flush] (which the serve loop drives), so the bridge is
-   a straight field projection. *)
-let h2_handler_of_handler (handler : handler) : H2_server.handler =
- fun (h2w : H2_server.response_writer) (r : Body.t Request.t) ->
+(* net/http <-> http2 translation shim (Go's http2.go: http2Handler.ServeHTTP).
+   The HTTP/2 server hands the handler a decoupled {!Gohttp_http2.Api} request +
+   response_writer; we expand them to a [Request.t] and a {!response_writer}. *)
+
+let body_of_api_body (b : Gohttp_http2.Api.Body.t) : Body.t =
+  match b with
+  | Gohttp_http2.Api.Body.Empty -> Body.Empty
+  | Gohttp_http2.Api.Body.String s -> Body.String s
+  | Gohttp_http2.Api.Body.Stream f -> Body.Stream f
+
+let request_of_server_request (r : Gohttp_http2.Api.server_request) :
+    Body.t Request.t =
+  {
+    meth = r.sreq_meth;
+    url = r.sreq_url;
+    proto = r.sreq_proto;
+    proto_major = r.sreq_proto_major;
+    proto_minor = r.sreq_proto_minor;
+    header = r.sreq_header;
+    body = body_of_api_body r.sreq_body;
+    content_length = r.sreq_content_length;
+    transfer_encoding = [];
+    close = false;
+    host = r.sreq_host;
+    trailer =
+      (if Hashtbl.length r.sreq_trailer = 0 then None else Some r.sreq_trailer);
+    request_uri = r.sreq_request_uri;
+    remote_addr = r.sreq_remote_addr;
+    form = None;
+    post_form = None;
+    multipart_form = None;
+    ctx = r.sreq_ctx;
+  }
+
+(* Adapt a [Server.handler] into a {!Gohttp_http2.Api.handler}: expose the H2
+   response_writer to the user handler as a {!response_writer} (the H2 writer
+   minus [flush]), run the handler, then flush the buffered headers/body. *)
+let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
+ fun (h2w : Gohttp_http2.Api.response_writer) (r : Gohttp_http2.Api.server_request) ->
   let w =
     {
-      header = h2w.H2_server.header;
-      write_header = h2w.H2_server.write_header;
-      write = h2w.H2_server.write;
-      flush = h2w.H2_server.flush;
+      header = h2w.Gohttp_http2.Api.rw_header;
+      write_header = h2w.rw_write_header;
+      write = h2w.rw_write;
+      flush = h2w.rw_flush;
     }
   in
-  handler.serve_http w r >>= fun () -> h2w.H2_server.flush ()
+  handler.serve_http w (request_of_server_request r) >>= fun () -> h2w.rw_flush ()
 
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the
@@ -746,7 +777,9 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
   match alpn with
   | Some "h2" ->
       Lwt.finalize
-        (fun () -> H2_server.serve ic oc ~handler:(h2_handler_of_handler handler))
+        (fun () ->
+          Gohttp_http2.H2_server.serve ic oc
+            ~handler:(h2_handler_of_handler handler))
         (fun () ->
           Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
           >>= fun () ->

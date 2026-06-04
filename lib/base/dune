@@ -1,0 +1,4 @@
+(library
+ (name gohttp_base)
+ (package gohttp)
+ (libraries lwt lwt.unix unix))

@@ -1,9 +1,10 @@
 (* Port of go/src/net/http/internal/http2/write.go. *)
 
+
 type write_res_headers = {
   rh_stream_id : int;
   http_res_code : int;
-  h : Header.t;
+  h : Api.Header.t;
   trailers : string list option;
   rh_end_stream : bool;
   date : string;
@@ -18,7 +19,7 @@ type write_push_promise = {
   pp_scheme : string;
   pp_authority : string;
   pp_path : string;
-  pp_h : Header.t;
+  pp_h : Api.Header.t;
 }
 
 type write_framer =
@@ -50,55 +51,11 @@ let data_size = function
 let httpcode_string code =
   match code with 200 -> "200" | 404 -> "404" | _ -> string_of_int code
 
-(* http2.validWireHeaderFieldName + httpguts.IsTokenRune (reject uppercase).
-   Mirrors the same predicate in h2_frame.ml. *)
-let is_token_byte b =
-  let c = Char.code b in
-  if c >= 128 then false
-  else
-    match b with
-    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
-    | '`' | '|' | '~' ->
-        true
-    | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
-    | _ -> false
-
-let valid_wire_header_field_name v =
-  if String.length v = 0 then false
-  else begin
-    let ok = ref true in
-    String.iter
-      (fun c ->
-        if not (is_token_byte c) then ok := false
-        else if c >= 'A' && c <= 'Z' then ok := false)
-      v;
-    !ok
-  end
-
-(* httpguts.ValidHeaderFieldValue: reject CTL chars that are not LWS. *)
-let valid_header_field_value v =
-  let ok = ref true in
-  String.iter
-    (fun c ->
-      let b = Char.code c in
-      let is_ctl = b < 0x20 || b = 0x7f in
-      let is_lws = c = ' ' || c = '\t' in
-      if is_ctl && not is_lws then ok := false)
-    v;
-  !ok
-
-(* httpcommon.LowerHeader: lower-case an ASCII header name, reporting whether
-   it was ASCII. *)
-let lower_header k =
-  let ascii = ref true in
-  let b = Bytes.of_string k in
-  for i = 0 to Bytes.length b - 1 do
-    let c = Bytes.get b i in
-    if Char.code c >= 128 then ascii := false
-    else if c >= 'A' && c <= 'Z' then
-      Bytes.set b i (Char.chr (Char.code c + 32))
-  done;
-  (Bytes.to_string b, !ascii)
+(* http2.validWireHeaderFieldName, httpguts.ValidHeaderFieldValue and
+   httpcommon.LowerHeader now live in Gohttp_internal.Httpcommon. *)
+let valid_wire_header_field_name = Gohttp_internal.Httpcommon.valid_wire_header_field_name
+let valid_header_field_value = Gohttp_internal.Httpcommon.valid_header_field_value
+let lower_header = Gohttp_internal.Httpcommon.lower_header
 
 (* encKV: encode one header field. *)
 let enc_kv enc k v =
@@ -112,12 +69,12 @@ let encode_headers enc h keys =
     match keys with
     | Some ks -> ks
     | None ->
-        let ks = List.map fst (Header.to_list h) in
+        let ks = List.map fst (Api.Header.to_list h) in
         List.sort String.compare ks
   in
   List.iter
     (fun k ->
-      let vv = Header.values h k in
+      let vv = Api.Header.values h k in
       let k, ascii = lower_header k in
       if ascii && valid_wire_header_field_name k then begin
         let is_te = k = "transfer-encoding" in

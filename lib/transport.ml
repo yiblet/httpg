@@ -28,6 +28,9 @@ open Lwt.Infix
    [defaultUserAgent]); this port advertises its own UA so the wire string is
    not mistaken for the Go runtime's. Mirrors Go's "<name>/<http-version>"
    shape. *)
+
+open Gohttp_http2
+
 let default_user_agent = "gohttp-client/1.1"
 
 (* A pooled, reusable connection: the buffered channels plus the underlying fd
@@ -170,10 +173,60 @@ let get_h2_conn t authority =
       None
   | None -> None
 
+(* ---- net/http <-> http2 translation shim (Go's http2.go: http2RoundTrip) ----
+   The HTTP/2 stack works in its own decoupled {!Api} types so it never names
+   the public Request/Response/Body types; these convert across the boundary. *)
+
+let api_body_of_body (b : Body.t) : Api.Body.t =
+  match b with
+  | Body.Empty -> Api.Body.Empty
+  | Body.String s -> Api.Body.String s
+  | Body.Stream f -> Api.Body.Stream f
+
+let body_of_api_body (b : Api.Body.t) : Body.t =
+  match b with
+  | Api.Body.Empty -> Body.Empty
+  | Api.Body.String s -> Body.String s
+  | Api.Body.Stream f -> Body.Stream f
+
+let client_request_of_request (req : Body.t Request.t) : Api.client_request =
+  {
+    creq_ctx = req.Request.ctx;
+    creq_meth = req.Request.meth;
+    creq_url = req.Request.url;
+    creq_header = req.Request.header;
+    creq_trailer =
+      (match req.Request.trailer with Some t -> t | None -> Header.create ());
+    creq_body = api_body_of_body req.Request.body;
+    creq_host = req.Request.host;
+    creq_content_length = req.Request.content_length;
+    creq_close = req.Request.close;
+  }
+
+let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
+  {
+    Response.status =
+      string_of_int cr.cres_status_code ^ " "
+      ^ Status.status_text cr.cres_status_code;
+    status_code = cr.cres_status_code;
+    proto = "HTTP/2.0";
+    proto_major = 2;
+    proto_minor = 0;
+    header = cr.cres_header;
+    body = body_of_api_body cr.cres_body;
+    content_length = cr.cres_content_length;
+    transfer_encoding = [];
+    close = false;
+    uncompressed = cr.cres_uncompressed;
+    trailer = (if Hashtbl.length cr.cres_trailer = 0 then None else Some cr.cres_trailer);
+    request = None;
+  }
+
 (* The h2 request/response exchange over [cc], counted for the test hook. *)
 let h2_round_trip t cc req =
   t.h2_round_trips <- t.h2_round_trips + 1;
-  H2_transport.round_trip cc req
+  Lwt.map response_of_client_response
+    (H2_transport.round_trip cc (client_request_of_request req))
 
 (* Go's Transport.RoundTrip. For https (or when [force_h2]) the dial advertises
    ALPN ["h2"; "http/1.1"]; if "h2" is negotiated the request is multiplexed

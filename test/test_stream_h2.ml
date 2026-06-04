@@ -9,32 +9,24 @@
    fails. *)
 
 open Gohttp
+open Gohttp_http2
 
 let ( let* ) = Lwt.bind
 
-let mk_request ~meth ~path ?(body = Body.Empty) () : Body.t Request.t =
+let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
   let content_length =
-    match body with Body.String s -> Int64.of_int (String.length s) | _ -> 0L
+    match body with Api.Body.String s -> Int64.of_int (String.length s) | _ -> 0L
   in
   {
-    Request.meth;
-    url = Uri.of_string ("https://example.com" ^ path);
-    proto = "HTTP/2.0";
-    proto_major = 2;
-    proto_minor = 0;
-    header = Header.create ();
-    body;
-    content_length;
-    transfer_encoding = [];
-    close = false;
-    host = "";
-    trailer = None;
-    request_uri = "";
-    remote_addr = "";
-    form = None;
-    post_form = None;
-    multipart_form = None;
-    ctx = Context.background;
+    Api.creq_ctx = Context.background;
+    creq_meth = meth;
+    creq_url = Uri.of_string ("https://example.com" ^ path);
+    creq_header = Api.Header.create ();
+    creq_trailer = Api.Header.create ();
+    creq_body = body;
+    creq_host = "";
+    creq_content_length = content_length;
+    creq_close = false;
   }
 
 (* Run [client cc] against an H2_server.serve over a real loopback socket pair,
@@ -66,14 +58,14 @@ let run ?(timeout = 15.) ~handler client =
    whole-body buffer). It then writes "beta"/"gamma" with flushes between. *)
 let test_server_streams_multiple_data () =
   let released, release = Lwt.wait () in
-  let handler (rw : H2_server.response_writer) (_req : Body.t Request.t) =
-    let* () = rw.write "alpha" in
-    let* () = rw.flush () in
+  let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
+    let* () = rw.rw_write "alpha" in
+    let* () = rw.rw_flush () in
     let* () = released in
-    let* () = rw.write "beta" in
-    let* () = rw.flush () in
-    let* () = rw.write "gamma" in
-    rw.flush ()
+    let* () = rw.rw_write "beta" in
+    let* () = rw.rw_flush () in
+    let* () = rw.rw_write "gamma" in
+    rw.rw_flush ()
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/" () in
@@ -82,18 +74,18 @@ let test_server_streams_multiple_data () =
        suspended on [released] until we wake it, so receiving "alpha" here proves
        the first DATA frame arrived before the handler finished. *)
     let first =
-      match resp.Response.body with
-      | Body.Stream next -> next ()
+      match resp.cres_body with
+      | Api.Body.Stream next -> next ()
       | _ -> Lwt.return None
     in
     let* first_chunk = first in
     let handler_suspended_when_first_seen = Lwt.state released = Lwt.Sleep in
     Lwt.wakeup_later release ();
     (* drain the rest *)
-    let* rest = Body.read_all resp.Response.body in
+    let* rest = Api.Body.read_all resp.cres_body in
     let full = (match first_chunk with Some s -> s | None -> "") ^ rest in
     Lwt.return
-      (resp.Response.status_code, first_chunk, handler_suspended_when_first_seen, full)
+      (resp.cres_status_code, first_chunk, handler_suspended_when_first_seen, full)
   in
   let code, first_chunk, suspended, full = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -107,16 +99,16 @@ let test_server_streams_multiple_data () =
 let test_large_body () =
   let n = 200 * 1024 in
   let payload = String.init n (fun i -> Char.chr (i mod 256)) in
-  let handler (rw : H2_server.response_writer) (_req : Body.t Request.t) =
+  let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
     (* one big write: the writer must auto-frame it into many DATA frames *)
-    let* () = rw.write payload in
-    rw.flush ()
+    let* () = rw.rw_write payload in
+    rw.rw_flush ()
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/big" () in
     let* resp = H2_transport.round_trip cc req in
-    let* body = Body.read_all resp.Response.body in
-    Lwt.return (resp.Response.status_code, body)
+    let* body = Api.Body.read_all resp.cres_body in
+    Lwt.return (resp.cres_status_code, body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -129,12 +121,12 @@ let test_large_body () =
 let test_incremental_client_read () =
   let chunk = String.make 8192 'x' in
   let chunks = 20 in
-  let handler (rw : H2_server.response_writer) (_req : Body.t Request.t) =
+  let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
     let rec loop i =
       if i >= chunks then Lwt.return_unit
       else
-        let* () = rw.write chunk in
-        let* () = rw.flush () in
+        let* () = rw.rw_write chunk in
+        let* () = rw.rw_flush () in
         loop (i + 1)
     in
     loop 0
@@ -143,14 +135,14 @@ let test_incremental_client_read () =
     let req = mk_request ~meth:"GET" ~path:"/stream" () in
     let* resp = H2_transport.round_trip cc req in
     let* first =
-      match resp.Response.body with
-      | Body.Stream next -> next ()
+      match resp.cres_body with
+      | Api.Body.Stream next -> next ()
       | _ -> Lwt.return None
     in
     let first_len = match first with Some s -> String.length s | None -> 0 in
-    let* rest = Body.read_all resp.Response.body in
+    let* rest = Api.Body.read_all resp.cres_body in
     let total = first_len + String.length rest in
-    Lwt.return (resp.Response.status_code, first_len, total)
+    Lwt.return (resp.cres_status_code, first_len, total)
   in
   let code, first_len, total = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;

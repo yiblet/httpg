@@ -1,14 +1,13 @@
 (* Port of the HTTP/2 subset of go/src/net/http/internal/http2/server.go.
    See h2_server.mli for the Go -> Lwt concurrency mapping. *)
 
-type response_writer = {
-  header : unit -> Header.t;
-  write_header : int -> unit;
-  write : string -> unit Lwt.t;
-  flush : unit -> unit Lwt.t;
-}
+module Body = Api.Body
+module Header = Api.Header
+module Context = Gohttp_base.Context
 
-type handler = response_writer -> Body.t Request.t -> unit Lwt.t
+(* The handler-facing ResponseWriter and Handler now live in Api (Go's api.go). *)
+type response_writer = Api.response_writer
+type handler = Api.handler
 
 (* Go: defaultMaxStreams = 250 *)
 let default_max_concurrent_streams = 250
@@ -372,7 +371,7 @@ let body_of_pipe sc (st : stream) : Body.t =
    fiber posts Want_write_frame events and blocks on reply conditions. *)
 type rws = {
   rws_stream : stream;
-  rws_req : Body.t Request.t;
+  rws_req : Api.server_request;
   mutable handler_header : Header.t;
   mutable status : int;
   mutable wrote_header : bool; (* WriteHeader called *)
@@ -432,7 +431,7 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
     rws.wrote_header <- true;
     rws.status <- 200
   end;
-  let is_head = rws.rws_req.meth = "HEAD" in
+  let is_head = rws.rws_req.sreq_meth = "HEAD" in
   let* header_ended_stream =
     if not rws.sent_header then begin
       rws.sent_header <- true;
@@ -484,7 +483,7 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
       write_data_from_handler sc rws.rws_stream p ~end_stream
     else Lwt.return_unit
 
-let new_response_writer sc (st : stream) (req : Body.t Request.t) :
+let new_response_writer sc (st : stream) (req : Api.server_request) :
     response_writer * rws =
   let rws =
     { rws_stream = st;
@@ -533,11 +532,13 @@ let new_response_writer sc (st : stream) (req : Body.t Request.t) :
     Buffer.clear rws.buf;
     write_chunk sc rws p
   in
-  ({ header; write_header; write; flush }, rws)
+  ( { Api.rw_header = header; rw_write_header = write_header; rw_write = write;
+      rw_flush = flush },
+    rws )
 
 (* runHandler: run the handler, then flush the buffered response and end the
    stream. Mirrors runHandler + handlerDone. *)
-let run_handler sc (st : stream) (req : Body.t Request.t)
+let run_handler sc (st : stream) (req : Api.server_request)
     (rw : response_writer) (rws : rws) (h : handler) : unit Lwt.t =
   let open Lwt.Syntax in
   let finish () =
@@ -570,7 +571,7 @@ let run_handler sc (st : stream) (req : Body.t Request.t)
 
 (* ---- frame processing (serve loop) ---- *)
 
-let schedule_handler sc (st : stream) (req : Body.t Request.t) (rw : response_writer)
+let schedule_handler sc (st : stream) (req : Api.server_request) (rw : response_writer)
     (rws : rws) =
   let start () = run_handler sc st req rw rws sc.handler in
   if sc.cur_handlers < sc.adv_max_streams then begin
@@ -625,14 +626,17 @@ let new_stream sc id state : stream =
   st
 
 (* Build the Request.t from the meta-headers frame (subset of
-   newWriterAndRequest). *)
+   newWriterAndRequest). The http2-level pseudo-header validation stays here;
+   the Cookie/Expect/Trailer/userinfo/:path handling is httpcommon's
+   NewServerRequest. *)
 let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
-    (Body.t Request.t * bool, H2_error.err_code) result =
+    (Api.server_request * bool, H2_error.err_code) result =
   let fields = mf.fields in
   let meth = pseudo_value fields "method" in
   let scheme = pseudo_value fields "scheme" in
   let authority = pseudo_value fields "authority" in
   let path = pseudo_value fields "path" in
+  let protocol = pseudo_value fields "protocol" in
   let is_connect = meth = "CONNECT" in
   let bad =
     if is_connect then path <> "" || scheme <> "" || authority = ""
@@ -649,52 +653,64 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
     let authority =
       if authority = "" then Header.get header "Host" else authority
     in
-    let body_open = not (meta_end_stream mf) in
-    (* content-length *)
-    let content_length =
-      match Header.values header "Content-Length" with
-      | v :: _ -> (
-          match Int64.of_string_opt v with Some cl -> cl | None -> 0L)
-      | [] -> if body_open then -1L else 0L
+    let result : Gohttp_internal.Httpcommon.server_request_result =
+      Gohttp_internal.Httpcommon.new_server_request
+        ~canonical:Header.canonical_header_key
+        {
+          sp_method = meth;
+          sp_scheme = scheme;
+          sp_authority = authority;
+          sp_path = path;
+          sp_protocol = protocol;
+          sp_header = header;
+        }
     in
-    (* build URL: use path as request-uri; authority is host. *)
-    let url =
-      let raw =
-        if scheme <> "" && authority <> "" && String.length path > 0
-           && path.[0] = '/'
-        then scheme ^ "://" ^ authority ^ path
-        else path
+    if result.sr_invalid_reason <> "" then Error H2_error.ProtocolError
+    else begin
+      let body_open = not (meta_end_stream mf) in
+      (* content-length *)
+      let content_length =
+        match Header.values header "Content-Length" with
+        | v :: _ -> (
+            match Int64.of_string_opt v with Some cl -> cl | None -> 0L)
+        | [] -> if body_open then -1L else 0L
       in
-      Uri.of_string raw
-    in
-    let req : Body.t Request.t =
-      { meth;
-        url;
-        proto = "HTTP/2.0";
-        proto_major = 2;
-        proto_minor = 0;
-        header;
-        body = Body.Empty;
-        content_length;
-        transfer_encoding = [];
-        close = false;
-        host = authority;
-        trailer = None;
-        request_uri = path;
-        remote_addr = "";
-        form = None;
-        post_form = None;
-        multipart_form = None;
-        ctx = Context.background }
-    in
-    if body_open then begin
-      let pipe = H2_pipe.create () in
-      H2_pipe.set_buffer pipe (H2_databuffer.create ~expected:content_length ());
-      st.body <- Some pipe;
-      st.decl_body_bytes <- content_length;
-      req.body <- body_of_pipe sc st
-    end;
-    Ok (req, body_open)
+      (* build URL: use path as request-uri; authority is host. *)
+      let url =
+        let raw =
+          if scheme <> "" && authority <> "" && String.length path > 0
+             && path.[0] = '/'
+          then scheme ^ "://" ^ authority ^ path
+          else path
+        in
+        Uri.of_string raw
+      in
+      let req : Api.server_request =
+        { sreq_meth = meth;
+          sreq_url = url;
+          sreq_proto = "HTTP/2.0";
+          sreq_proto_major = 2;
+          sreq_proto_minor = 0;
+          sreq_header = header;
+          sreq_body = Body.Empty;
+          sreq_content_length = content_length;
+          sreq_host = authority;
+          sreq_trailer =
+            (match result.sr_trailer with Some t -> t | None -> Header.create ());
+          sreq_request_uri = result.sr_request_uri;
+          sreq_remote_addr = "";
+          sreq_ctx = Context.background }
+      in
+      if body_open then begin
+        let pipe = H2_pipe.create () in
+        H2_pipe.set_buffer pipe
+          (H2_databuffer.create ~expected:content_length ());
+        st.body <- Some pipe;
+        st.decl_body_bytes <- content_length;
+        req.sreq_body <- body_of_pipe sc st
+      end;
+      Ok (req, body_open)
+    end
   end
 
 let process_headers sc (mf : H2_frame.meta_headers_frame) :

@@ -1,7 +1,7 @@
 (* Ported from golang.org/x/net/http2/hpack hpack_test.go and encode_test.go.
    Includes the RFC 7541 appendix C examples (C.2 through C.6). Pure. *)
 
-open Gohttp
+open Gohttp_http2
 module H = Hpack
 
 let hf ?(sensitive = false) name value : H.header_field =
