@@ -14,7 +14,16 @@ let build_tree pats =
 
 let get_test_tree () =
   build_tree
-    [ "/a"; "/a/b"; "/a/{x}"; "/g/h/i"; "/g/{x}/j"; "/a/b/{x...}"; "/a/b/{y}"; "/a/b/{$}" ]
+    [
+      "/a";
+      "/a/b";
+      "/a/{x}";
+      "/g/h/i";
+      "/g/{x}/j";
+      "/a/b/{x...}";
+      "/a/b/{y}";
+      "/a/b/{$}";
+    ]
 
 (* TestRoutingFirstSegment. *)
 let test_first_segment () =
@@ -36,7 +45,9 @@ let test_first_segment () =
         got := !got @ [ seg ];
         rest := r
       done;
-      Alcotest.(check (list string)) (Printf.sprintf "firstSegment %s" in_) want !got)
+      Alcotest.(check (list string))
+        (Printf.sprintf "firstSegment %s" in_)
+        want !got)
     cases
 
 (* TestRoutingAddPattern: tree structure rendering. *)
@@ -83,22 +94,23 @@ let run_match_cases name tree cases =
       (* want_matches: None means Go's nil; Some [] means empty non-nil slice.
          For the pattern we compare the list when there is a match. *)
       match (want_matches, got_matches) with
-      | None, _ ->
-        (* expecting nil matches (or no match). got should be [] or n/a. *)
-        (match got_matches with
-        | None -> ()
-        | Some m ->
+      | None, _ -> (
+          (* expecting nil matches (or no match). got should be [] or n/a. *)
+          match got_matches with
+          | None -> ()
+          | Some m ->
+              Alcotest.(check (list string))
+                (Printf.sprintf "%s: %s %s %s matches" name host method_ path)
+                [] m)
+      | Some wm, Some gm ->
           Alcotest.(check (list string))
             (Printf.sprintf "%s: %s %s %s matches" name host method_ path)
-            [] m)
-      | Some wm, Some gm ->
-        Alcotest.(check (list string))
-          (Printf.sprintf "%s: %s %s %s matches" name host method_ path)
-          wm gm
+            wm gm
       | Some wm, None ->
-        Alcotest.(check (list string))
-          (Printf.sprintf "%s: %s %s %s matches (no match)" name host method_ path)
-          wm [])
+          Alcotest.(check (list string))
+            (Printf.sprintf "%s: %s %s %s matches (no match)" name host method_
+               path)
+            wm [])
     cases
 
 let test_node_match () =
@@ -117,9 +129,17 @@ let test_node_match () =
   let tree =
     build_tree
       [
-        "/item/"; "POST /item/{user}"; "GET /item/{user}"; "/item/{user}";
-        "/item/{user}/{id}"; "/item/{user}/new"; "/item/{$}"; "POST alt.com/item/{user}";
-        "GET /headwins"; "HEAD /headwins"; "/path/{p...}";
+        "/item/";
+        "POST /item/{user}";
+        "GET /item/{user}";
+        "/item/{user}";
+        "/item/{user}/{id}";
+        "/item/{user}/new";
+        "/item/{$}";
+        "POST alt.com/item/{user}";
+        "GET /headwins";
+        "HEAD /headwins";
+        "/path/{p...}";
       ]
   in
   run_match_cases "tree2" tree
@@ -132,7 +152,11 @@ let test_node_match () =
       ("GET", "", "/item/jba/new", "/item/{user}/new", Some [ "jba" ]);
       ("GET", "", "/item/", "/item/{$}", Some []);
       ("GET", "", "/item/jba/17/line2", "/item/", None);
-      ("POST", "alt.com", "/item/jba", "POST alt.com/item/{user}", Some [ "jba" ]);
+      ( "POST",
+        "alt.com",
+        "/item/jba",
+        "POST alt.com/item/{user}",
+        Some [ "jba" ] );
       ("GET", "alt.com", "/item/jba", "GET /item/{user}", Some [ "jba" ]);
       ("GET", "", "/item", "", None);
       ("GET", "", "/headwins", "GET /headwins", None);
@@ -141,7 +165,8 @@ let test_node_match () =
       ("GET", "", "/path/*", "/path/{p...}", Some [ "*" ]);
     ];
   (* {$} only matches trailing slash. *)
-  run_match_cases "pat1" (build_tree [ "/a/b/{$}" ])
+  run_match_cases "pat1"
+    (build_tree [ "/a/b/{$}" ])
     [
       ("GET", "", "/a/b", "", None);
       ("GET", "", "/a/b/", "/a/b/{$}", None);
@@ -149,7 +174,8 @@ let test_node_match () =
       ("GET", "", "/a/b/c/d", "", None);
     ];
   (* single wildcard does not match trailing slash. *)
-  run_match_cases "pat2" (build_tree [ "/a/b/{w}" ])
+  run_match_cases "pat2"
+    (build_tree [ "/a/b/{w}" ])
     [
       ("GET", "", "/a/b", "", None);
       ("GET", "", "/a/b/", "", None);
@@ -157,7 +183,8 @@ let test_node_match () =
       ("GET", "", "/a/b/c/d", "", None);
     ];
   (* multi wildcard matches both. *)
-  run_match_cases "pat3" (build_tree [ "/a/b/{w...}" ])
+  run_match_cases "pat3"
+    (build_tree [ "/a/b/{w...}" ])
     [
       ("GET", "", "/a/b", "", None);
       ("GET", "", "/a/b/", "/a/b/{w...}", Some [ "" ]);
@@ -165,7 +192,8 @@ let test_node_match () =
       ("GET", "", "/a/b/c/d", "/a/b/{w...}", Some [ "c/d" ]);
     ];
   (* all three together. *)
-  run_match_cases "all" (build_tree [ "/a/b/{$}"; "/a/b/{w}"; "/a/b/{w...}" ])
+  run_match_cases "all"
+    (build_tree [ "/a/b/{$}"; "/a/b/{w}"; "/a/b/{w...}" ])
     [
       ("GET", "", "/a/b", "", None);
       ("GET", "", "/a/b/", "/a/b/{$}", None);
@@ -191,9 +219,14 @@ let test_matching_methods () =
     (fun (name, tree, host, path, want) ->
       let set = Hashtbl.create 8 in
       Routing_tree.matching_methods tree ~host ~path set;
-      let keys = Hashtbl.fold (fun k _ acc -> k :: acc) set [] |> List.sort String.compare in
+      let keys =
+        Hashtbl.fold (fun k _ acc -> k :: acc) set []
+        |> List.sort String.compare
+      in
       let got = String.concat "," keys in
-      Alcotest.(check string) (Printf.sprintf "matchingMethods %s" name) want got)
+      Alcotest.(check string)
+        (Printf.sprintf "matchingMethods %s" name)
+        want got)
     cases
 
 let tests =

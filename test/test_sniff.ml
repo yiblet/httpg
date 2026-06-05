@@ -97,8 +97,8 @@ let tests =
     (* Font types. *)
     ( "TTF sample I",
       `Quick,
-      check "TTF sample I" "\x00\x01\x00\x00\x00\x17\x01\x00\x00\x04\x01\x60\x4f"
-        "font/ttf" );
+      check "TTF sample I"
+        "\x00\x01\x00\x00\x00\x17\x01\x00\x00\x04\x01\x60\x4f" "font/ttf" );
     ( "TTF sample II",
       `Quick,
       check "TTF sample II"
@@ -115,7 +115,8 @@ let tests =
         "font/woff" );
     ( "woff2 sample",
       `Quick,
-      check "woff2 sample" "\x77\x4f\x46\x32\x00\x01\x00\x00\x00" "font/woff2" );
+      check "woff2 sample" "\x77\x4f\x46\x32\x00\x01\x00\x00\x00" "font/woff2"
+    );
     ( "wasm sample",
       `Quick,
       check "wasm sample" "\x00\x61\x73\x6d\x01\x00" "application/wasm" );

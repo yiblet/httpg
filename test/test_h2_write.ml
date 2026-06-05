@@ -43,7 +43,8 @@ let test_settings_ack () =
 
 let test_window_update () =
   let f =
-    with_pipe (write_one (W.Write_window_update { stream_id = 1; n = 100 }))
+    with_pipe
+      (write_one (W.Write_window_update { stream_id = 1; n = 100 }))
       read_frame_ok
   in
   match f with
@@ -55,7 +56,8 @@ let test_window_update () =
 let test_data () =
   let f =
     with_pipe
-      (write_one (W.Write_data { stream_id = 3; data = "hello"; end_stream = true }))
+      (write_one
+         (W.Write_data { stream_id = 3; data = "hello"; end_stream = true }))
       read_frame_ok
   in
   match f with
@@ -80,7 +82,8 @@ let test_rst () =
 let test_goaway () =
   let f =
     with_pipe
-      (write_one (W.Write_goaway { max_stream_id = 7; code = H2_error.NoError }))
+      (write_one
+         (W.Write_goaway { max_stream_id = 7; code = H2_error.NoError }))
       read_frame_ok
   in
   match f with
@@ -101,9 +104,12 @@ let read_meta ic =
   Lwt.bind (F.read_frame ic) (fun fr ->
       match fr with
       | Ok (F.Headers (fh, h)) ->
-          let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
+          let dec =
+            Hpack.new_decoder H2.initial_header_table_size (fun _ -> ())
+          in
           Lwt.map
-            (function Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
+            (function
+              | Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
             (F.read_meta_headers dec (fh, h) ic)
       | Ok _ -> Lwt.fail (Failure "expected HEADERS")
       | Error e -> raise (H2_error.to_exception e))
@@ -133,7 +139,8 @@ let test_res_headers () =
   in
   let m = with_pipe (write_one w) read_meta in
   Alcotest.(check string) ":status" "200" (field_value m ":status");
-  Alcotest.(check string) "content-type" "text/plain"
+  Alcotest.(check string)
+    "content-type" "text/plain"
     (field_value m "content-type");
   Alcotest.(check string) "content-length" "5" (field_value m "content-length");
   Alcotest.(check string) "x-foo lowercased" "bar" (field_value m "x-foo")
@@ -163,7 +170,8 @@ let test_continuation_split () =
   in
   let m = with_pipe (write_one w) read_meta in
   Alcotest.(check string) ":status" "200" (field_value m ":status");
-  Alcotest.(check int) "big value length" 40000
+  Alcotest.(check int)
+    "big value length" 40000
     (String.length (field_value m "x-big"))
 
 let tests =

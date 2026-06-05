@@ -39,28 +39,24 @@ let write_tests =
         ("Content-Type", [ "text/html; charset=UTF-8" ]);
         ("Content-Length", [ "0" ]);
       ]
-      []
-      "Content-Length: 0\r\nContent-Type: text/html; charset=UTF-8\r\n";
+      [] "Content-Length: 0\r\nContent-Type: text/html; charset=UTF-8\r\n";
     write_test "multi-value"
       [ ("Content-Length", [ "0"; "1"; "2" ]) ]
-      []
-      "Content-Length: 0\r\nContent-Length: 1\r\nContent-Length: 2\r\n";
+      [] "Content-Length: 0\r\nContent-Length: 1\r\nContent-Length: 2\r\n";
     write_test "exclude one key"
       [
         ("Expires", [ "-1" ]);
         ("Content-Length", [ "0" ]);
         ("Content-Encoding", [ "gzip" ]);
       ]
-      [ "Content-Length" ]
-      "Content-Encoding: gzip\r\nExpires: -1\r\n";
+      [ "Content-Length" ] "Content-Encoding: gzip\r\nExpires: -1\r\n";
     write_test "exclude multi-value key"
       [
         ("Expires", [ "-1" ]);
         ("Content-Length", [ "0"; "1"; "2" ]);
         ("Content-Encoding", [ "gzip" ]);
       ]
-      [ "Content-Length" ]
-      "Content-Encoding: gzip\r\nExpires: -1\r\n";
+      [ "Content-Length" ] "Content-Encoding: gzip\r\nExpires: -1\r\n";
     write_test "exclude all keys"
       [
         ("Expires", [ "-1" ]);
@@ -71,8 +67,7 @@ let write_tests =
       "";
     write_test "blank values"
       [ ("Blank", [ "" ]); ("Double-Blank", [ ""; "" ]) ]
-      []
-      "Blank: \r\nDouble-Blank: \r\nDouble-Blank: \r\n";
+      [] "Blank: \r\nDouble-Blank: \r\nDouble-Blank: \r\n";
     write_test "sort over insertion threshold"
       [
         ("k1", [ "1a"; "1b" ]);
@@ -107,7 +102,9 @@ let write_tests =
 
 let canon_tests =
   [
-    ("canonical uSER-aGeNT", `Quick, canon "user-agent" "uSER-aGeNT" "User-Agent");
+    ( "canonical uSER-aGeNT",
+      `Quick,
+      canon "user-agent" "uSER-aGeNT" "User-Agent" );
     ( "canonical accept-encoding",
       `Quick,
       canon "accept-encoding" "accept-encoding" "Accept-Encoding" );
@@ -119,9 +116,7 @@ let canon_tests =
       `Quick,
       canon "user-agent canonical" "User-Agent" "User-Agent" );
     (* Invalid bytes => returned unchanged. *)
-    ( "invalid space unchanged",
-      `Quick,
-      canon "space" "Foo Bar" "Foo Bar" );
+    ("invalid space unchanged", `Quick, canon "space" "Foo Bar" "Foo Bar");
     ("invalid colon unchanged", `Quick, canon "colon" "Foo:Bar" "Foo:Bar");
     ("empty unchanged", `Quick, canon "empty" "" "");
   ]
@@ -146,7 +141,8 @@ let values_and_first () =
   Header.add h "X-Multi" "b";
   Header.add h "X-Multi" "c";
   Alcotest.(check (list string))
-    "values returns all" [ "a"; "b"; "c" ] (Header.values h "x-multi");
+    "values returns all" [ "a"; "b"; "c" ]
+    (Header.values h "x-multi");
   Alcotest.(check string) "get returns first" "a" (Header.get h "x-multi")
 
 let clone_independent () =

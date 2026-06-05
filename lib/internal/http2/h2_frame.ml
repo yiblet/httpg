@@ -17,7 +17,6 @@ let flag_ping_ack = H2.flag_ack (* 0x1 *)
 let flag_continuation_end_headers = H2.flag_end_headers (* 0x4 *)
 let flag_push_promise_end_headers = H2.flag_end_headers (* 0x4 *)
 let flag_push_promise_padded = H2.flag_padded (* 0x8 *)
-
 let has flags v = flags land v = v
 
 (* ---- types ---- *)
@@ -120,7 +119,8 @@ let conn_error code = H2_error.Connection_error code
 (* Map an exception raised by the raising parse path to a unified boundary
    {!H2_error.t}. A clean [End_of_file] is propagated (re-raised) by the read
    boundary, not turned into an error value. *)
-let h2_error_of_exception (e : exn) : H2_error.t option = H2_error.of_exception e
+let h2_error_of_exception (e : exn) : H2_error.t option =
+  H2_error.of_exception e
 
 (* ---- stream id validity (mirror validStreamID / validStreamIDOrZero) ---- *)
 
@@ -139,8 +139,7 @@ let put_uint32 buf v =
   Buffer.add_char buf (Char.chr ((v lsr 8) land 0xff));
   Buffer.add_char buf (Char.chr (v land 0xff))
 
-let get_uint16 s off =
-  (Char.code s.[off] lsl 8) lor Char.code s.[off + 1]
+let get_uint16 s off = (Char.code s.[off] lsl 8) lor Char.code s.[off + 1]
 
 let get_uint32 s off =
   (Char.code s.[off] lsl 24)
@@ -175,8 +174,7 @@ let decode_frame_header_raw s =
   in
   ({ length; typ; flags; stream_id }, raw_type)
 
-let decode_frame_header s =
-  fst (decode_frame_header_raw s)
+let decode_frame_header s = fst (decode_frame_header_raw s)
 
 (* ---- pure payload parsers (mirror parse* funcs). Each takes the
    frame_header and the (already padding-inclusive) payload string. ---- *)
@@ -190,8 +188,7 @@ let parse_data fh p =
   let p, pad_size =
     if has fh.flags flag_data_padded then read_byte p else (p, 0)
   in
-  if pad_size > String.length p then
-    raise (conn_error H2_error.ProtocolError);
+  if pad_size > String.length p then raise (conn_error H2_error.ProtocolError);
   let data = String.sub p 0 (String.length p - pad_size) in
   Data (fh, { data; end_stream = has fh.flags flag_data_end_stream })
 
@@ -213,7 +210,9 @@ let parse_headers fh p =
     else (p, None)
   in
   if String.length p - pad_length < 0 then
-    raise (H2_error.Stream_error (H2_error.stream_error fh.stream_id H2_error.ProtocolError));
+    raise
+      (H2_error.Stream_error
+         (H2_error.stream_error fh.stream_id H2_error.ProtocolError));
   let header_frag = String.sub p 0 (String.length p - pad_length) in
   Headers
     ( fh,
@@ -245,8 +244,7 @@ let parse_settings fh p =
   if has fh.flags flag_settings_ack && fh.length > 0 then
     raise (conn_error H2_error.FrameSizeError);
   if fh.stream_id <> 0 then raise (conn_error H2_error.ProtocolError);
-  if String.length p mod 6 <> 0 then
-    raise (conn_error H2_error.FrameSizeError);
+  if String.length p mod 6 <> 0 then raise (conn_error H2_error.FrameSizeError);
   let n = String.length p / 6 in
   let settings = ref [] in
   for i = n - 1 downto 0 do
@@ -296,7 +294,11 @@ let parse_window_update fh p =
 let parse_continuation fh p =
   if fh.stream_id = 0 then raise (conn_error H2_error.ProtocolError);
   Continuation
-    (fh, { header_frag = p; end_headers = has fh.flags flag_continuation_end_headers })
+    ( fh,
+      {
+        header_frag = p;
+        end_headers = has fh.flags flag_continuation_end_headers;
+      } )
 
 let parse_push_promise fh p =
   if fh.stream_id = 0 then raise (conn_error H2_error.ProtocolError);
@@ -306,8 +308,7 @@ let parse_push_promise fh p =
   if String.length p < 4 then raise End_of_file;
   let promise_id = get_uint32 p 0 land 0x7fffffff in
   let p = String.sub p 4 (String.length p - 4) in
-  if pad_length > String.length p then
-    raise (conn_error H2_error.ProtocolError);
+  if pad_length > String.length p then raise (conn_error H2_error.ProtocolError);
   let header_frag = String.sub p 0 (String.length p - pad_length) in
   Push_promise
     ( fh,
@@ -369,11 +370,12 @@ let write_frame oc typ flags stream_id (payload : string) =
   let length = String.length payload in
   if length >= 1 lsl 24 then raise Frame_too_large;
   let fh = { length; typ; flags; stream_id } in
-  Lwt.bind (Lwt_io.write oc (encode_frame_header fh)) (fun () ->
-      Lwt_io.write oc payload)
+  Lwt.bind
+    (Lwt_io.write oc (encode_frame_header fh))
+    (fun () -> Lwt_io.write oc payload)
 
 let write_data ?pad oc stream_id end_stream data =
-  if (not (valid_stream_id stream_id)) then raise Invalid_stream_id;
+  if not (valid_stream_id stream_id) then raise Invalid_stream_id;
   (match pad with
   | Some p when String.length p > 255 -> raise Pad_length_too_large
   | _ -> ());
@@ -389,25 +391,32 @@ let write_data ?pad oc stream_id end_stream data =
   | None -> Buffer.add_string buf data);
   write_frame oc H2.Data !flags stream_id (Buffer.contents buf)
 
-let priority_is_zero p =
-  p.stream_dep = 0 && (not p.exclusive) && p.weight = 0
+let priority_is_zero p = p.stream_dep = 0 && (not p.exclusive) && p.weight = 0
 
 let write_headers oc ~stream_id ?(end_stream = false) ?(end_headers = false)
     ?(pad_length = 0) ?priority block =
   if not (valid_stream_id stream_id) then raise Invalid_stream_id;
-  let prio = match priority with Some p when not (priority_is_zero p) -> Some p | _ -> None in
+  let prio =
+    match priority with
+    | Some p when not (priority_is_zero p) -> Some p
+    | _ -> None
+  in
   let flags = ref 0 in
   if pad_length <> 0 then flags := !flags lor flag_headers_padded;
   if end_stream then flags := !flags lor flag_headers_end_stream;
   if end_headers then flags := !flags lor flag_headers_end_headers;
-  (match prio with Some _ -> flags := !flags lor flag_headers_priority | None -> ());
+  (match prio with
+  | Some _ -> flags := !flags lor flag_headers_priority
+  | None -> ());
   let buf = Buffer.create (String.length block + pad_length + 6) in
   if pad_length <> 0 then Buffer.add_char buf (Char.chr pad_length);
   (match prio with
   | Some p ->
       if not (valid_stream_id_or_zero p.stream_dep) then
         raise Invalid_dep_stream_id;
-      let v = if p.exclusive then p.stream_dep lor (1 lsl 31) else p.stream_dep in
+      let v =
+        if p.exclusive then p.stream_dep lor (1 lsl 31) else p.stream_dep
+      in
       put_uint32 buf v;
       Buffer.add_char buf (Char.chr (p.weight land 0xff))
   | None -> ());
@@ -583,9 +592,9 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
   Hpack.set_max_string_length dec max_header_list_size;
   Hpack.set_emit_func dec (fun (f : Hpack.header_field) ->
       if not (valid_header_field_value f.value) then invalid := true;
-      if is_pseudo f then begin
-        if !saw_regular then invalid := true
-      end
+      if is_pseudo f then
+        begin if !saw_regular then invalid := true
+        end
       else begin
         saw_regular := true;
         if not (valid_wire_header_field_name f.name) then invalid := true
@@ -616,8 +625,8 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
          underlying {!Hpack.error} via the Compression arm (Go wraps it in a
          CompressionError). *)
       (match Hpack.write_result dec frag with
-       | Ok _ -> ()
-       | Error e -> raise (H2_error.Compression_error e));
+      | Ok _ -> ()
+      | Error e -> raise (H2_error.Compression_error e));
       if ended then Lwt.return_unit
       else
         (* read next frame; it MUST be a CONTINUATION on the same stream. *)
@@ -635,16 +644,15 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
   in
   Lwt.bind (loop hf.header_frag hf.end_headers) (fun () ->
       (match Hpack.close_result dec with
-       | Ok () -> ()
-       | Error e -> raise (H2_error.Compression_error e));
+      | Ok () -> ()
+      | Error e -> raise (H2_error.Compression_error e));
       let result_fields = List.rev !fields in
       if !invalid then
         raise
           (H2_error.Stream_error
              (H2_error.stream_error stream_id H2_error.ProtocolError));
       check_pseudos stream_id result_fields;
-      Lwt.return
-        { fh = hf_fh; fields = result_fields; truncated = !truncated })
+      Lwt.return { fh = hf_fh; fields = result_fields; truncated = !truncated })
 
 (* Public boundary: surface a unified {!H2_error.t} on a meta-headers framing /
    HPACK / pseudo-header error. A clean [End_of_file] (a CONTINUATION never

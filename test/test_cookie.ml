@@ -31,16 +31,19 @@ let cookie_to_string c =
      max_age=%d secure=%b http_only=%b same_site=%s partitioned=%b raw=%S \
      unparsed=[%s]}"
     c.name c.value c.quoted c.path c.domain c.expires c.raw_expires c.max_age
-    c.secure c.http_only (same_site_to_string c.same_site) c.partitioned c.raw
+    c.secure c.http_only
+    (same_site_to_string c.same_site)
+    c.partitioned c.raw
     (String.concat "; " c.unparsed)
 
 let cookie_eq a b =
   a.name = b.name && a.value = b.value && a.quoted = b.quoted && a.path = b.path
   && a.domain = b.domain && a.expires = b.expires
-  && a.raw_expires = b.raw_expires && a.max_age = b.max_age
-  && a.secure = b.secure && a.http_only = b.http_only
-  && a.same_site = b.same_site && a.partitioned = b.partitioned && a.raw = b.raw
-  && a.unparsed = b.unparsed
+  && a.raw_expires = b.raw_expires
+  && a.max_age = b.max_age && a.secure = b.secure && a.http_only = b.http_only
+  && a.same_site = b.same_site
+  && a.partitioned = b.partitioned
+  && a.raw = b.raw && a.unparsed = b.unparsed
 
 let cookie_t = Alcotest.testable (Fmt.of_to_string cookie_to_string) cookie_eq
 
@@ -67,11 +70,21 @@ let write_set_cookies_tests =
     ({ default with name = "cookie-1"; value = "v$1" }, "cookie-1=v$1");
     ( { default with name = "cookie-2"; value = "two"; max_age = 3600 },
       "cookie-2=two; Max-Age=3600" );
-    ( { default with name = "cookie-3"; value = "three"; domain = ".example.com" },
+    ( {
+        default with
+        name = "cookie-3";
+        value = "three";
+        domain = ".example.com";
+      },
       "cookie-3=three; Domain=example.com" );
     ( { default with name = "cookie-4"; value = "four"; path = "/restricted/" },
       "cookie-4=four; Path=/restricted/" );
-    ( { default with name = "cookie-5"; value = "five"; domain = "wrong;bad.abc" },
+    ( {
+        default with
+        name = "cookie-5";
+        value = "five";
+        domain = "wrong;bad.abc";
+      },
       "cookie-5=five" );
     ( { default with name = "cookie-6"; value = "six"; domain = "bad-.abc" },
       "cookie-6=six" );
@@ -81,43 +94,50 @@ let write_set_cookies_tests =
       "cookie-8=eight" );
     ( { default with name = "cookie-9"; value = "expiring"; expires = exp_2009 },
       "cookie-9=expiring; Expires=Tue, 10 Nov 2009 23:00:00 GMT" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-10";
         value = "expiring-1601";
         expires = exp_1601;
       },
       "cookie-10=expiring-1601; Expires=Mon, 01 Jan 1601 01:01:01 GMT" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-11";
         value = "invalid-expiry";
         expires = exp_1600;
       },
       "cookie-11=invalid-expiry" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-12";
         value = "samesite-default";
         same_site = Same_site_default_mode;
       },
       "cookie-12=samesite-default" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-13";
         value = "samesite-lax";
         same_site = Same_site_lax_mode;
       },
       "cookie-13=samesite-lax; SameSite=Lax" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-14";
         value = "samesite-strict";
         same_site = Same_site_strict_mode;
       },
       "cookie-14=samesite-strict; SameSite=Strict" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-15";
         value = "samesite-none";
         same_site = Same_site_none_mode;
       },
       "cookie-15=samesite-none; SameSite=None" );
-    ( { default with
+    ( {
+        default with
         name = "cookie-16";
         value = "partitioned";
         same_site = Same_site_none_mode;
@@ -142,13 +162,15 @@ let write_set_cookies_tests =
     ({ default with name = "a\rb"; value = "v" }, "");
     ( { default with name = "cookie"; value = "quoted"; quoted = true },
       "cookie=\"quoted\"" );
-    ( { default with
+    ( {
+        default with
         name = "cookie";
         value = "quoted with spaces";
         quoted = true;
       },
       "cookie=\"quoted with spaces\"" );
-    ( { default with
+    ( {
+        default with
         name = "cookie";
         value = "quoted,with,commas";
         quoted = true;
@@ -169,9 +191,11 @@ let write_set_cookies_cases =
 let read_set_cookies_tests =
   [
     ( [ ("Set-Cookie", [ "Cookie-1=v$1" ]) ],
-      [ { default with name = "Cookie-1"; value = "v$1"; raw = "Cookie-1=v$1" } ]
-    );
-    ( [ ( "Set-Cookie",
+      [
+        { default with name = "Cookie-1"; value = "v$1"; raw = "Cookie-1=v$1" };
+      ] );
+    ( [
+        ( "Set-Cookie",
           [
             "NID=99=YsDT5i3E-CXax-; expires=Wed, 23-Nov-2011 01:05:03 GMT; \
              path=/; domain=.google.ch; HttpOnly";
@@ -192,9 +216,12 @@ let read_set_cookies_tests =
              path=/; domain=.google.ch; HttpOnly";
         };
       ] );
-    ( [ ( "Set-Cookie",
-          [ ".ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; HttpOnly" ]
-        );
+    ( [
+        ( "Set-Cookie",
+          [
+            ".ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; \
+             HttpOnly";
+          ] );
       ],
       [
         {
@@ -206,7 +233,8 @@ let read_set_cookies_tests =
           raw_expires = "Wed, 07-Mar-2012 14:25:06 GMT";
           http_only = true;
           raw =
-            ".ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; HttpOnly";
+            ".ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; \
+             HttpOnly";
         };
       ] );
     ( [ ("Set-Cookie", [ "ASP.NET_SessionId=foo; path=/; HttpOnly" ]) ],
@@ -271,8 +299,14 @@ let read_set_cookies_tests =
         };
       ] );
     ( [ ("Set-Cookie", [ "special-1=a z" ]) ],
-      [ { default with name = "special-1"; value = "a z"; raw = "special-1=a z" } ]
-    );
+      [
+        {
+          default with
+          name = "special-1";
+          value = "a z";
+          raw = "special-1=a z";
+        };
+      ] );
     ( [ ("Set-Cookie", [ "special-2=\" z\"" ]) ],
       [
         {
@@ -304,8 +338,14 @@ let read_set_cookies_tests =
         };
       ] );
     ( [ ("Set-Cookie", [ "special-5=a,z" ]) ],
-      [ { default with name = "special-5"; value = "a,z"; raw = "special-5=a,z" } ]
-    );
+      [
+        {
+          default with
+          name = "special-5";
+          value = "a,z";
+          raw = "special-5=a,z";
+        };
+      ] );
     ( [ ("Set-Cookie", [ "special-6=\",z\"" ]) ],
       [
         {
@@ -317,8 +357,9 @@ let read_set_cookies_tests =
         };
       ] );
     ( [ ("Set-Cookie", [ "special-7=a," ]) ],
-      [ { default with name = "special-7"; value = "a,"; raw = "special-7=a," } ]
-    );
+      [
+        { default with name = "special-7"; value = "a,"; raw = "special-7=a," };
+      ] );
     ( [ ("Set-Cookie", [ "special-8=\",\"" ]) ],
       [
         {
@@ -362,10 +403,8 @@ let read_set_cookies_cases =
         fun () ->
           let h = header_of hdr in
           (* Run twice to verify readSetCookies doesn't mutate its input. *)
-          Alcotest.(check (list cookie_t))
-            "first" want (read_set_cookies h);
-          Alcotest.(check (list cookie_t))
-            "second" want (read_set_cookies h) ))
+          Alcotest.(check (list cookie_t)) "first" want (read_set_cookies h);
+          Alcotest.(check (list cookie_t)) "second" want (read_set_cookies h) ))
     read_set_cookies_tests
 
 (* ---------- readCookiesTests ---------- *)
@@ -404,7 +443,8 @@ let read_cookies_tests =
       ] );
     ([ ("Cookie", [ "" ]) ], "", []);
     (* Default cookie-limit exceeded (one Cookie field) -> empty slice. *)
-    ( [ ( "Cookie",
+    ( [
+        ( "Cookie",
           [
             (let b = Buffer.create 8192 in
              for _ = 1 to default_cookie_max_num + 1 do
@@ -430,8 +470,7 @@ let read_cookies_cases =
         `Quick,
         fun () ->
           let h = header_of hdr in
-          Alcotest.(check (list cookie_t))
-            "first" want (read_cookies h ~filter);
+          Alcotest.(check (list cookie_t)) "first" want (read_cookies h ~filter);
           Alcotest.(check (list cookie_t))
             "second" want (read_cookies h ~filter) ))
     read_cookies_tests
@@ -554,7 +593,9 @@ let valid_cases =
       ( Printf.sprintf "Cookie.Valid #%d" i,
         `Quick,
         fun () ->
-          let got_valid = match valid c with Ok () -> true | Error _ -> false in
+          let got_valid =
+            match valid c with Ok () -> true | Error _ -> false
+          in
           Alcotest.(check bool) "valid" want_valid got_valid ))
     valid_tests
 
@@ -570,19 +611,27 @@ let valid_typed_cases =
   [
     ( "valid_typed bad name",
       `Quick,
-      check "bad name"
-        { default with name = "in valid"; value = "v" }
-        (function Invalid_name -> true | _ -> false) );
+      check "bad name" { default with name = "in valid"; value = "v" } (function
+        | Invalid_name -> true
+        | _ -> false) );
     ( "valid_typed bad value",
       `Quick,
-      check "bad value"
-        { default with name = "ok"; value = "bad\x00value" }
-        (function Invalid_value _ -> true | _ -> false) );
+      check "bad value" { default with name = "ok"; value = "bad\x00value" }
+        (function
+        | Invalid_value _ -> true
+        | _ -> false) );
     ( "valid_typed partitioned without secure",
       `Quick,
       check "partitioned"
-        { default with name = "ok"; value = "v"; partitioned = true; secure = false }
-        (function Partitioned_without_secure -> true | _ -> false) );
+        {
+          default with
+          name = "ok";
+          value = "v";
+          partitioned = true;
+          secure = false;
+        } (function
+        | Partitioned_without_secure -> true
+        | _ -> false) );
     ( "valid_typed ok",
       `Quick,
       fun () ->

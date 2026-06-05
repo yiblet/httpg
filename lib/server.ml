@@ -616,8 +616,28 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
   end
 
 (* Note: Io.read_request returns a streaming request body; the serve loop runs
-   Body.drain on it before reusing a kept-alive connection (Go's finishRequest
-   drain) so the connection is positioned at the next message boundary. *)
+   a bounded Body.drain on it before reusing a kept-alive connection (Go's
+   finishRequest drain) so the connection is positioned at the next message
+   boundary. *)
+
+(* maxPostHandlerReadBytes (Go's server.go): the max number of unread
+   Request.Body bytes the server will discard in order to keep a connection
+   alive. Past this, to be paranoid, the server closes the connection instead of
+   reading an unbounded amount. *)
+let max_post_handler_read_bytes = 256 * 1024
+
+(* Go's finishRequest: consume the unread request body before reusing a
+   kept-alive connection, but only up to [max_post_handler_read_bytes]. If more
+   than that remains, drop keep-alive and close so a client cannot make the
+   server read an unbounded amount. Returns whether the connection may still be
+   reused. *)
+let drain_request_body (r : Body.t Request.t) : bool Lwt.t =
+  Lwt.catch
+    (fun () ->
+      Body.drain ~limit:max_post_handler_read_bytes r.Request.body >>= function
+      | `Drained -> Lwt.return true
+      | `Too_big -> Lwt.return false)
+    (fun _ -> Lwt.return false)
 
 (* ---- Server ---- *)
 
@@ -704,12 +724,11 @@ let serve_conn (handler : handler) (cfd, peer) =
         cancel_req Context.Canceled;
         (* Go's finishRequest: consume/close the request body before reusing the
            connection, so a kept-alive connection is positioned at the next
-           message boundary (and any chunked trailer is read). *)
+           message boundary (and any chunked trailer is read). The drain is
+           bounded; if too much remained unread, close instead of reusing. *)
         if keep_alive then
-          Lwt.catch
-            (fun () -> Body.drain r.Request.body)
-            (fun _ -> Lwt.return_unit)
-          >>= loop
+          drain_request_body r >>= fun reusable ->
+          if reusable then loop () else Lwt.return_unit
         else Lwt.return_unit
   in
   Lwt.finalize loop (fun () ->
@@ -835,10 +854,8 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
             >>= fun keep_alive ->
             cancel_req Context.Canceled;
             if keep_alive then
-              Lwt.catch
-                (fun () -> Body.drain r.Request.body)
-                (fun _ -> Lwt.return_unit)
-              >>= loop
+              drain_request_body r >>= fun reusable ->
+              if reusable then loop () else Lwt.return_unit
             else Lwt.return_unit
       in
       Lwt.finalize loop (fun () ->

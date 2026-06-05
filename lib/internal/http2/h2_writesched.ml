@@ -1,12 +1,7 @@
 (* Port of go/src/net/http/internal/http2/writesched.go +
    writesched_roundrobin.go. *)
 
-
-type stream = {
-  id : int;
-  flow : H2_flow.outflow;
-  mutable max_frame_size : int;
-}
+type stream = { id : int; flow : H2_flow.outflow; mutable max_frame_size : int }
 
 let make_stream ?(max_frame_size = H2.initial_max_frame_size) id =
   { id; flow = H2_flow.create_outflow (); max_frame_size }
@@ -33,7 +28,6 @@ let is_control wr = wr.stream = None
 
 (* FrameWriteRequest.DataSize. *)
 let data_size wr = H2_write.data_size wr.write
-
 let max_int32 = 0x7fffffff
 
 (* FrameWriteRequest.Consume. *)
@@ -41,7 +35,7 @@ let consume wr n =
   let empty = { write = H2_write.Write_settings_ack; stream = None } in
   match wr.write with
   | H2_write.Write_data { stream_id; data; end_stream }
-    when String.length data > 0 -> (
+    when String.length data > 0 ->
       let st =
         match wr.stream with
         | Some s -> s
@@ -50,7 +44,9 @@ let consume wr n =
       (* allowed = min(n, stream.flow.available()), capped by maxFrameSize. *)
       let avail = Int32.to_int (H2_flow.available st.flow) in
       let allowed = min n avail in
-      let allowed = if st.max_frame_size < allowed then st.max_frame_size else allowed in
+      let allowed =
+        if st.max_frame_size < allowed then st.max_frame_size else allowed
+      in
       if allowed <= 0 then (empty, empty, 0)
       else if String.length data > allowed then begin
         H2_flow.take st.flow (Int32.of_int allowed);
@@ -74,8 +70,7 @@ let consume wr n =
               H2_write.Write_data
                 {
                   stream_id;
-                  data =
-                    String.sub data allowed (String.length data - allowed);
+                  data = String.sub data allowed (String.length data - allowed);
                   end_stream;
                 };
           }
@@ -86,7 +81,7 @@ let consume wr n =
         (* Consumed whole. *)
         H2_flow.take st.flow (Int32.of_int (String.length data));
         (wr, empty, 1)
-      end)
+      end
   | _ ->
       (* Non-DATA frames (and empty DATA) are always consumed whole. *)
       (wr, empty, 1)
@@ -104,9 +99,7 @@ type write_queue = {
 let new_write_queue () =
   { curr = [||]; next_q = [||]; curr_pos = 0; prev = None; next = None }
 
-let wq_empty q =
-  Array.length q.curr - q.curr_pos + Array.length q.next_q = 0
-
+let wq_empty q = Array.length q.curr - q.curr_pos + Array.length q.next_q = 0
 let wq_push q wr = q.next_q <- Array.append q.next_q [| wr |]
 
 let wq_shift q =
@@ -185,12 +178,12 @@ let close_stream ws stream_id =
       | Some n when n == q ->
           (* Only open stream. *)
           ws.head <- None
-      | _ ->
+      | _ -> (
           let prev = match q.prev with Some p -> p | None -> q in
           let next = match q.next with Some n -> n | None -> q in
           prev.next <- Some next;
           next.prev <- Some prev;
-          (match ws.head with
+          match ws.head with
           | Some h when h == q -> ws.head <- Some next
           | _ -> ()));
       Hashtbl.remove ws.streams stream_id

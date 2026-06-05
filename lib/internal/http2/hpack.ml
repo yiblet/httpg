@@ -24,7 +24,8 @@ type error =
 
 let error_to_string = function
   | Decoding s -> s
-  | Invalid_indexed i -> Printf.sprintf "invalid indexed representation index %d" i
+  | Invalid_indexed i ->
+      Printf.sprintf "invalid indexed representation index %d" i
   | String_too_long -> "header string too long"
   | Invalid_huffman -> "invalid Huffman-coded data"
   | Var_int_overflow -> "varint integer overflow"
@@ -197,7 +198,8 @@ let search_table e f =
   end
 
 (* Go: shouldIndex *)
-let should_index e f = (not f.sensitive) && T.size f <= T.dynamic_max_size e.dyn_tab
+let should_index e f =
+  (not f.sensitive) && T.size f <= T.dynamic_max_size e.dyn_tab
 
 (* Go: WriteField *)
 let write_field e f =
@@ -273,7 +275,9 @@ let set_emit_func d f = d.emit <- f
 let set_emit_enabled d v = d.emit_enabled <- v
 let emit_enabled d = d.emit_enabled
 let set_max_dynamic_table_size_dec d v = T.set_max_size d.d_dyn_tab v
-let set_allowed_max_dynamic_table_size d v = T.set_allowed_max_size d.d_dyn_tab v
+
+let set_allowed_max_dynamic_table_size d v =
+  T.set_allowed_max_size d.d_dyn_tab v
 
 (* Go: Decoder.at *)
 let at d i = T.at d.d_dyn_tab i
@@ -289,8 +293,9 @@ type undecoded_string = { is_huff : bool; b : string }
 (* Go: callEmit *)
 let call_emit d hf =
   if d.max_str_len <> 0 then
-    if String.length hf.name > d.max_str_len
-       || String.length hf.value > d.max_str_len
+    if
+      String.length hf.name > d.max_str_len
+      || String.length hf.value > d.max_str_len
     then raise String_too_long_sentinel;
   if d.emit_enabled then d.emit hf
 
@@ -460,8 +465,9 @@ let write_result d p : (int, error) result =
       | `Need_more ->
           let var_int_overhead = 8 in
           let remaining = buf_len - !pos in
-          if d.max_str_len <> 0
-             && remaining > 2 * (d.max_str_len + var_int_overhead)
+          if
+            d.max_str_len <> 0
+            && remaining > 2 * (d.max_str_len + var_int_overhead)
           then begin
             err := Some String_too_long;
             continue := false

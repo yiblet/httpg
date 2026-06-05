@@ -28,7 +28,9 @@ module Header = struct
     | None -> Hashtbl.replace h k [ v ]
 
   let get h k =
-    match find_opt h (canonical_header_key k) with Some (v :: _) -> v | _ -> ""
+    match find_opt h (canonical_header_key k) with
+    | Some (v :: _) -> v
+    | _ -> ""
 
   let values h k =
     match find_opt h (canonical_header_key k) with Some vs -> vs | None -> []
@@ -41,10 +43,7 @@ end
 (* The http2 body abstraction (Go's io.ReadCloser body), mirroring the public
    Body.t variant so the shim maps the two with a trivial case split. *)
 module Body = struct
-  type t =
-    | Empty
-    | String of string
-    | Stream of (unit -> string option Lwt.t)
+  type t = Empty | String of string | Stream of (unit -> string option Lwt.t)
 
   let empty = Empty
   let of_string s = String s

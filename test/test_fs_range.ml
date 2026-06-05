@@ -10,7 +10,6 @@
 
 open Gohttp
 open Lwt.Infix
-
 module Ts = Httptest.Server
 
 (* ---- temp-dir helpers (same shape as test_fs_conditional.ml) ---- *)
@@ -42,7 +41,11 @@ let write_file path contents =
 
 let with_tmpdir f =
   let dir = mktempdir () in
-  Lwt.finalize (fun () -> f dir) (fun () -> rm_rf dir; Lwt.return_unit)
+  Lwt.finalize
+    (fun () -> f dir)
+    (fun () ->
+      rm_rf dir;
+      Lwt.return_unit)
 
 (* Send a GET with extra headers, return (status, body, headers). 206/416 are
    not redirects, so [Client.do_] returns them directly. *)
@@ -79,7 +82,8 @@ let parse_range_unit () =
   let err_invalid name s size =
     match Fs.parse_range s size with
     | Error (Fs.Invalid_range _) -> ()
-    | Error Fs.No_overlap -> Alcotest.failf "%s: expected Invalid_range, got No_overlap" name
+    | Error Fs.No_overlap ->
+        Alcotest.failf "%s: expected Invalid_range, got No_overlap" name
     | Error _ -> Alcotest.failf "%s: expected Invalid_range" name
     | Ok _ -> Alcotest.failf "%s: expected Error, got Ok" name
   in
@@ -165,7 +169,8 @@ let serve_file_range () =
   (* range *)
   Alcotest.(check int) "Range -> 206" 206 st206;
   Alcotest.(check string) "range bytes" (String.sub contents 4 4) b206;
-  Alcotest.(check string) "Content-Range"
+  Alcotest.(check string)
+    "Content-Range"
     (Printf.sprintf "bytes 4-7/%d" size)
     cr;
   (* conditional *)
@@ -201,12 +206,14 @@ let single_ranges () =
   Alcotest.(check string) "2-5 CR" (Printf.sprintf "bytes 2-5/%d" size) cr1;
   Alcotest.(check int) "-4 status" 206 s2;
   Alcotest.(check string) "-4 body" (String.sub contents (size - 4) 4) b2;
-  Alcotest.(check string) "-4 CR"
+  Alcotest.(check string)
+    "-4 CR"
     (Printf.sprintf "bytes %d-%d/%d" (size - 4) (size - 1) size)
     cr2;
   Alcotest.(check int) "3- status" 206 s3;
   Alcotest.(check string) "3- body" (String.sub contents 3 (size - 3)) b3;
-  Alcotest.(check string) "3- CR"
+  Alcotest.(check string)
+    "3- CR"
     (Printf.sprintf "bytes 3-%d/%d" (size - 1) size)
     cr3
 
@@ -228,23 +235,29 @@ let multi_range () =
     with_server
       [ ("m.txt", contents) ]
       (fun c base ->
-        request_with_headers c (base ^ "/m.txt")
-          [ ("Range", "bytes=0-1,3-4") ]
+        request_with_headers c (base ^ "/m.txt") [ ("Range", "bytes=0-1,3-4") ]
         >>= fun (st, body, h) ->
         Lwt.return (st, body, Header.get h "Content-Type"))
   in
   let st, body, ct = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "multi -> 206" 206 st;
-  Alcotest.(check bool) "Content-Type multipart/byteranges" true
+  Alcotest.(check bool)
+    "Content-Type multipart/byteranges" true
     (contains ct "multipart/byteranges; boundary=");
   (* both parts' Content-Range headers present *)
-  Alcotest.(check bool) "part1 CR" true
+  Alcotest.(check bool)
+    "part1 CR" true
     (contains body (Printf.sprintf "Content-Range: bytes 0-1/%d" size));
-  Alcotest.(check bool) "part2 CR" true
+  Alcotest.(check bool)
+    "part2 CR" true
     (contains body (Printf.sprintf "Content-Range: bytes 3-4/%d" size));
   (* both parts' bytes present *)
-  Alcotest.(check bool) "part1 bytes" true (contains body (String.sub contents 0 2));
-  Alcotest.(check bool) "part2 bytes" true (contains body (String.sub contents 3 2))
+  Alcotest.(check bool)
+    "part1 bytes" true
+    (contains body (String.sub contents 0 2));
+  Alcotest.(check bool)
+    "part2 bytes" true
+    (contains body (String.sub contents 3 2))
 
 (* ---- unsatisfiable range -> 416 + Content-Range: bytes */SIZE ---- *)
 
@@ -260,7 +273,8 @@ let unsatisfiable_range () =
   in
   let st, cr = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "beyond size -> 416" 416 st;
-  Alcotest.(check string) "Content-Range bytes */SIZE"
+  Alcotest.(check string)
+    "Content-Range bytes */SIZE"
     (Printf.sprintf "bytes */%d" size)
     cr
 

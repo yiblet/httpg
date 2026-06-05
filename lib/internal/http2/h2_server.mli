@@ -25,14 +25,20 @@
    - Go's per-stream request {!H2_pipe} feeds the streaming {!Body}; DATA frames
      write into it and a blocked handler read awaits the pipe's condition. *)
 
+type response_writer = Api.response_writer
 (** Go's [ResponseWriter] / [Handler], defined in {!Api} (Go's api.go) so the
     HTTP/2 stack does not name the public Request/Response types; the public
     {!Server} shim adapts them to {!Server.response_writer} / a [Request.t]
     handler. *)
-type response_writer = Api.response_writer
 
 type handler = Api.handler
 
+val serve :
+  ?max_concurrent_streams:int ->
+  Lwt_io.input_channel ->
+  Lwt_io.output_channel ->
+  handler:handler ->
+  unit Lwt.t
 (** [serve ic oc ~handler] serves a single HTTP/2 connection over the duplex
     channel pair [(ic, oc)] (already past TLS/ALPN): it reads and validates the
     client preface, sends the server's initial SETTINGS, ACKs the client's
@@ -44,13 +50,7 @@ type handler = Api.handler
 
     [max_concurrent_streams] is the advertised SETTINGS_MAX_CONCURRENT_STREAMS
     (default {!default_max_concurrent_streams}). *)
-val serve :
-  ?max_concurrent_streams:int ->
-  Lwt_io.input_channel ->
-  Lwt_io.output_channel ->
-  handler:handler ->
-  unit Lwt.t
 
+val default_max_concurrent_streams : int
 (** The default advertised SETTINGS_MAX_CONCURRENT_STREAMS. Mirrors Go's
     [defaultMaxStreams] (250). *)
-val default_max_concurrent_streams : int

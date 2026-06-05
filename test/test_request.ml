@@ -74,15 +74,17 @@ let dummy_req () : Gohttp.Body.t Gohttp.Request.t =
   }
 
 let basic_auth_roundtrip () =
-  let cases = [ ("Aladdin", "open sesame"); ("Aladdin", "open:sesame"); ("", "") ] in
+  let cases =
+    [ ("Aladdin", "open sesame"); ("Aladdin", "open:sesame"); ("", "") ]
+  in
   List.iter
     (fun (u, p) ->
       let r = dummy_req () in
       Gohttp.Request.set_basic_auth r u p;
       match Gohttp.Request.basic_auth r with
       | Some (gu, gp) ->
-        Alcotest.(check string) "user" u gu;
-        Alcotest.(check string) "pass" p gp
+          Alcotest.(check string) "user" u gu;
+          Alcotest.(check string) "pass" p gp
       | None -> Alcotest.fail "expected basic auth")
     cases;
   (* Unauthenticated request. *)
@@ -91,9 +93,13 @@ let basic_auth_roundtrip () =
 
 let add_cookie () =
   let r = dummy_req () in
-  Gohttp.Request.add_cookie r { Gohttp.Cookie.default with name = "a"; value = "1" };
-  Gohttp.Request.add_cookie r { Gohttp.Cookie.default with name = "b"; value = "2" };
-  Alcotest.(check string) "cookie header" "a=1; b=2" (Gohttp.Header.get r.header "Cookie")
+  Gohttp.Request.add_cookie r
+    { Gohttp.Cookie.default with name = "a"; value = "1" };
+  Gohttp.Request.add_cookie r
+    { Gohttp.Cookie.default with name = "b"; value = "2" };
+  Alcotest.(check string)
+    "cookie header" "a=1; b=2"
+    (Gohttp.Header.get r.header "Cookie")
 
 let tests =
   [

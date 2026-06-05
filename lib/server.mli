@@ -4,6 +4,12 @@
    RedirectHandler helpers. HTTP/2, hijacking, TLS-NPN and graceful-shutdown
    niceties are out of scope. *)
 
+type response_writer = {
+  header : unit -> Header.t;
+  write_header : int -> unit;
+  write : string -> unit Lwt.t;
+  flush : unit -> unit Lwt.t;
+}
 (** Go's [ResponseWriter] interface, modeled as a record of operations.
     - [header ()] returns the mutable header map the handler writes to before
       the response headers are flushed (Go's [ResponseWriter.Header]).
@@ -18,120 +24,105 @@
       streamed chunked (HTTP/1.1) or close-delimited (HTTP/1.0).
     - [flush ()] forces the headers/framing decision and pushes buffered bytes
       to the client (Go's [http.Flusher.Flush]). *)
-type response_writer = {
-  header : unit -> Header.t;
-  write_header : int -> unit;
-  write : string -> unit Lwt.t;
-  flush : unit -> unit Lwt.t;
+
+type handler = {
+  serve_http : response_writer -> Body.t Request.t -> unit Lwt.t;
 }
-
 (** Go's [Handler] interface: [ServeHTTP(ResponseWriter, *Request)]. *)
-type handler = { serve_http : response_writer -> Body.t Request.t -> unit Lwt.t }
 
-(** Go's [HandlerFunc]: adapt a function to a {!handler}. *)
 val handler_func :
   (response_writer -> Body.t Request.t -> unit Lwt.t) -> handler
+(** Go's [HandlerFunc]: adapt a function to a {!handler}. *)
 
+val error : response_writer -> string -> int -> unit Lwt.t
 (** Go's [Error]: reply with a plain-text error message and status [code],
     resetting Content-Type, deleting Content-Length and setting the nosniff
     option. *)
-val error : response_writer -> string -> int -> unit Lwt.t
 
-(** Go's [NotFound]: a 404 "404 page not found" reply. *)
 val not_found : response_writer -> Body.t Request.t -> unit Lwt.t
+(** Go's [NotFound]: a 404 "404 page not found" reply. *)
 
-(** Go's [NotFoundHandler]. *)
 val not_found_handler : unit -> handler
+(** Go's [NotFoundHandler]. *)
 
+val redirect :
+  response_writer -> Body.t Request.t -> string -> int -> unit Lwt.t
 (** Go's [Redirect]: reply with a redirect to [url] (which may be relative to
     the request path) using status [code]. *)
-val redirect : response_writer -> Body.t Request.t -> string -> int -> unit Lwt.t
 
-(** Go's [RedirectHandler]. *)
 val redirect_handler : string -> int -> handler
+(** Go's [RedirectHandler]. *)
 
 (* ---- ServeMux ---- *)
 
-(** Go's [ServeMux]: an HTTP request multiplexer backed by the routing tree. *)
 type serve_mux
+(** Go's [ServeMux]: an HTTP request multiplexer backed by the routing tree. *)
 
-(** Go's [NewServeMux]. *)
 val new_serve_mux : unit -> serve_mux
+(** Go's [NewServeMux]. *)
 
 (** A handleable registration error: an invalid or conflicting pattern (Go's
     [register] error, which Go surfaces by panicking in [Handle] but returns
     from [registerErr]). Carries Go's message text. *)
 type error = Register of string
 
-(** Render an {!error} as its Go message text. *)
 val error_to_string : error -> string
+(** Render an {!error} as its Go message text. *)
 
+val handle : serve_mux -> string -> handler -> (unit, error) result
 (** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
     [Error (Register _)] on an invalid or conflicting pattern (a wiring-time
     programmer error; callers may [Result.get_ok] at setup). *)
-val handle : serve_mux -> string -> handler -> (unit, error) result
 
-(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern].
-    Returns [Error (Register _)] on an invalid or conflicting pattern. *)
 val handle_func :
   serve_mux ->
   string ->
   (response_writer -> Body.t Request.t -> unit Lwt.t) ->
   (unit, error) result
+(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern].
+    Returns [Error (Register _)] on an invalid or conflicting pattern. *)
 
-(** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 val serve_mux_serve_http :
   serve_mux -> response_writer -> Body.t Request.t -> unit Lwt.t
+(** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 
-(** A {!serve_mux} viewed as a {!handler}. *)
 val serve_mux_handler : serve_mux -> handler
+(** A {!serve_mux} viewed as a {!handler}. *)
 
 (* ---- Server ---- *)
 
+type t
 (** Go's [Server]. The zero-ish value carries an address, a handler and an
     internal stop signal used to shut the accept loop down (for tests). *)
-type t
 
-(** [create ?addr ?port handler] builds a server bound to [addr]:[port]. *)
 val create : ?addr:string -> ?port:int -> handler -> t
+(** [create ?addr ?port handler] builds a server bound to [addr]:[port]. *)
 
-(** Minimal [Server.Close]: stop accepting and close the listening socket. *)
 val close : t -> unit Lwt.t
+(** Minimal [Server.Close]: stop accepting and close the listening socket. *)
 
+val serve : t -> Lwt_unix.file_descr -> unit Lwt.t
 (** [serve srv fd] is Go's [Server.Serve]: accept connections on the listening
     socket [fd] and handle each in its own Lwt fiber until {!close} is called.
     Each connection runs the per-request keep-alive loop. *)
-val serve : t -> Lwt_unix.file_descr -> unit Lwt.t
 
+val listen_and_serve : addr:string -> port:int -> handler -> unit Lwt.t
 (** Go's [ListenAndServe]: bind [addr]:[port] and serve [handler] until the
     process or the listener is torn down. *)
-val listen_and_serve :
-  addr:string -> port:int -> handler -> unit Lwt.t
 
-(** Like {!listen_and_serve} but binds first and returns the running
-    [Server.t], the bound port (useful when [port = 0] selects an ephemeral
-    port) and the serve loop promise — so tests can connect and {!close}. *)
 val listen_and_serve_started :
-  addr:string ->
-  port:int ->
-  handler ->
-  (t * int * unit Lwt.t) Lwt.t
+  addr:string -> port:int -> handler -> (t * int * unit Lwt.t) Lwt.t
+(** Like {!listen_and_serve} but binds first and returns the running [Server.t],
+    the bound port (useful when [port = 0] selects an ephemeral port) and the
+    serve loop promise — so tests can connect and {!close}. *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 
+val default_alpn_protocols : string list
 (** The default ALPN protocols advertised by {!listen_and_serve_tls}, in
     descending order of preference: [["h2"; "http/1.1"]] (Go's
     [http2.NextProtoTLS] + ["http/1.1"]). *)
-val default_alpn_protocols : string list
 
-(** Go's [ListenAndServeTLS]: bind [addr]:[port] with server-side TLS carrying
-    [certificates] and advertising the ALPN protocols [alpn] (default
-    {!default_alpn_protocols}), then serve [handler] over each accepted
-    connection — dispatching to the HTTP/2 server connection ({!H2_server.serve})
-    when the negotiated ALPN protocol is ["h2"], and to the existing HTTP/1.x
-    serve loop otherwise (incl. when no ALPN protocol was agreed). The same
-    {!handler} serves both protocols (the h2 path adapts it via the
-    {!H2_server} response_writer). *)
 val listen_and_serve_tls :
   certificates:Tls.Config.certchain ->
   ?alpn:string list ->
@@ -139,10 +130,15 @@ val listen_and_serve_tls :
   port:int ->
   handler ->
   unit Lwt.t
+(** Go's [ListenAndServeTLS]: bind [addr]:[port] with server-side TLS carrying
+    [certificates] and advertising the ALPN protocols [alpn] (default
+    {!default_alpn_protocols}), then serve [handler] over each accepted
+    connection — dispatching to the HTTP/2 server connection
+    ({!H2_server.serve}) when the negotiated ALPN protocol is ["h2"], and to the
+    existing HTTP/1.x serve loop otherwise (incl. when no ALPN protocol was
+    agreed). The same {!handler} serves both protocols (the h2 path adapts it
+    via the {!H2_server} response_writer). *)
 
-(** Like {!listen_and_serve_tls} but binds first and returns the running
-    [Server.t], the bound port (useful with an ephemeral [port = 0]) and the
-    serve loop promise — so tests can connect over TLS and {!close}. *)
 val listen_and_serve_tls_started :
   certificates:Tls.Config.certchain ->
   ?alpn:string list ->
@@ -150,3 +146,6 @@ val listen_and_serve_tls_started :
   port:int ->
   handler ->
   (t * int * unit Lwt.t) Lwt.t
+(** Like {!listen_and_serve_tls} but binds first and returns the running
+    [Server.t], the bound port (useful with an ephemeral [port = 0]) and the
+    serve loop promise — so tests can connect over TLS and {!close}. *)

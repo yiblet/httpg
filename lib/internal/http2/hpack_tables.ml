@@ -14,11 +14,13 @@ let size hf = String.length hf.name + String.length hf.value + 32
    1-based and stable across evictions: the id for ents[k] is
    [k + evict_count + 1]. *)
 type header_field_table = {
-  mutable ents : header_field list; (* oldest first; kept as a growable array view *)
+  mutable ents : header_field list;
+      (* oldest first; kept as a growable array view *)
   mutable ents_arr : header_field array; (* mirror of [ents] for O(1) index *)
   mutable evict_count : int;
   by_name : (string, int) Hashtbl.t; (* name -> newest unique id *)
-  by_name_value : (string * string, int) Hashtbl.t; (* (name,value) -> newest id *)
+  by_name_value : (string * string, int) Hashtbl.t;
+      (* (name,value) -> newest id *)
   is_static : bool;
 }
 
@@ -54,8 +56,8 @@ let evict_oldest t n =
     let f = t.ents_arr.(k) in
     let id = t.evict_count + k + 1 in
     (match Hashtbl.find_opt t.by_name f.name with
-     | Some v when v = id -> Hashtbl.remove t.by_name f.name
-     | _ -> ());
+    | Some v when v = id -> Hashtbl.remove t.by_name f.name
+    | _ -> ());
     match Hashtbl.find_opt t.by_name_value (f.name, f.value) with
     | Some v when v = id -> Hashtbl.remove t.by_name_value (f.name, f.value)
     | _ -> ()

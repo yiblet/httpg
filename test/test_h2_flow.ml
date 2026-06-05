@@ -76,7 +76,9 @@ let test_outflow_add () =
   Alcotest.(check bool) "add 1" true (Flow.add f 1l);
   Alcotest.(check bool) "add -1" true (Flow.add f (-1l));
   Alcotest.check i32 "available 0" 0l (Flow.available f);
-  Alcotest.(check bool) "add 2^31-1" true (Flow.add f (Int32.of_int Flow.max_window));
+  Alcotest.(check bool)
+    "add 2^31-1" true
+    (Flow.add f (Int32.of_int Flow.max_window));
   Alcotest.check i32 "available 2^31-1"
     (Int32.of_int Flow.max_window)
     (Flow.available f);
@@ -93,7 +95,9 @@ let test_outflow_add_overflow () =
   Alcotest.(check bool) "add 0" true (Flow.add f 0l);
   Alcotest.(check bool) "add -3" true (Flow.add f (-3l));
   Alcotest.check i32 "available -2" (-2l) (Flow.available f);
-  Alcotest.(check bool) "add 2^31-1" true (Flow.add f (Int32.of_int Flow.max_window));
+  Alcotest.(check bool)
+    "add 2^31-1" true
+    (Flow.add f (Int32.of_int Flow.max_window));
   Alcotest.check i32 "available"
     (Int32.add (Int32.add 1l (-3l)) (Int32.of_int Flow.max_window))
     (Flow.available f)

@@ -73,13 +73,18 @@ let client_body_streamed () =
     Lwt.return (first, handler_done_early, rest)
   in
   let first, handler_done_early, rest = with_server handler client in
-  Alcotest.(check bool) "first chunk readable" true (first <> None && first <> Some "");
-  Alcotest.(check bool) "first chunk arrived before handler completed"
-    false handler_done_early;
+  Alcotest.(check bool)
+    "first chunk readable" true
+    (first <> None && first <> Some "");
+  Alcotest.(check bool)
+    "first chunk arrived before handler completed" false handler_done_early;
   let first_s = match first with Some s -> s | None -> "" in
   let full = first_s ^ rest in
-  let expected = "FIRST" ^ String.concat "" (List.init n_more (fun _ -> more_chunk)) in
-  Alcotest.(check int) "full body length" (String.length expected) (String.length full);
+  let expected =
+    "FIRST" ^ String.concat "" (List.init n_more (fun _ -> more_chunk))
+  in
+  Alcotest.(check int)
+    "full body length" (String.length expected) (String.length full);
   Alcotest.(check string) "full body content" expected full
 
 (* ---- Stream.reuse_after_drain ---- *)
@@ -94,7 +99,7 @@ let reuse_after_drain () =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     Client.get c url >>= fun resp1 ->
     (* Drain (not read_all) the first body to release the connection. *)
-    Body.drain resp1.Response.body >>= fun () ->
+    Body.drain resp1.Response.body >>= fun _ ->
     let dials_after_1 = Transport.dial_count transport in
     let idle_after_1 =
       Transport.idle_count transport
@@ -105,12 +110,14 @@ let reuse_after_drain () =
     let dials_after_2 = Transport.dial_count transport in
     Lwt.return (dials_after_1, idle_after_1, b2, dials_after_2)
   in
-  let dials_after_1, idle_after_1, b2, dials_after_2 = with_server handler client in
+  let dials_after_1, idle_after_1, b2, dials_after_2 =
+    with_server handler client
+  in
   Alcotest.(check int) "first request dialed once" 1 dials_after_1;
   Alcotest.(check int) "connection pooled after drain" 1 idle_after_1;
   Alcotest.(check string) "resp2 body" "hello" b2;
-  Alcotest.(check int) "second request reused the connection (no new dial)" 1
-    dials_after_2
+  Alcotest.(check int)
+    "second request reused the connection (no new dial)" 1 dials_after_2
 
 (* ---- Stream.cancel_mid_body ---- *)
 (* The handler streams one chunk, flushes, then stalls long past the context
@@ -121,8 +128,7 @@ let cancel_mid_body () =
     Server.handler_func (fun w _r ->
         w.Server.write "early" >>= fun () ->
         w.Server.flush () >>= fun () ->
-        Lwt_unix.sleep 5.0 >>= fun () ->
-        w.Server.write "late")
+        Lwt_unix.sleep 5.0 >>= fun () -> w.Server.write "late")
   in
   let client ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
@@ -134,16 +140,20 @@ let cancel_mid_body () =
        aborts the in-flight body read. *)
     Lwt.catch
       (fun () ->
-        Body.read_all resp.Response.body >>= fun _ -> Lwt.return (first, `No_error))
+        Body.read_all resp.Response.body >>= fun _ ->
+        Lwt.return (first, `No_error))
       (function
         | Context.Deadline_exceeded -> Lwt.return (first, `Deadline)
         | e -> Lwt.return (first, `Other (Printexc.to_string e)))
   in
   let first, outcome = with_server handler client in
-  Alcotest.(check bool) "first chunk readable" true (first <> None && first <> Some "");
+  Alcotest.(check bool)
+    "first chunk readable" true
+    (first <> None && first <> Some "");
   match outcome with
   | `Deadline -> ()
-  | `No_error -> Alcotest.fail "expected Deadline_exceeded mid-body, got full body"
+  | `No_error ->
+      Alcotest.fail "expected Deadline_exceeded mid-body, got full body"
   | `Other s -> Alcotest.failf "expected Deadline_exceeded mid-body, got %s" s
 
 let tests =

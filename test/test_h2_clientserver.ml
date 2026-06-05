@@ -12,7 +12,8 @@ let ( let* ) = Lwt.bind
 (* A ServeMux-style handler: GET /hello -> 200 "hello, h2"; POST /echo echoes the
    request body. Works identically over h2 and http/1.1. *)
 let test_handler =
-  Server.handler_func (fun (w : Server.response_writer) (r : Body.t Request.t) ->
+  Server.handler_func
+    (fun (w : Server.response_writer) (r : Body.t Request.t) ->
       match (r.Request.meth, Uri.path r.Request.url) with
       | "POST", "/echo" ->
           let* body = Body.read_all r.Request.body in
@@ -31,9 +32,7 @@ let with_tls_server ~alpn body =
         in
         Lwt.async (fun () ->
             Lwt.catch (fun () -> serve_loop) (fun _ -> Lwt.return_unit));
-        Lwt.finalize
-          (fun () -> body port)
-          (fun () -> Server.close srv)))
+        Lwt.finalize (fun () -> body port) (fun () -> Server.close srv)))
 
 (* ---- Success Criterion: H2.clientserver_roundtrip ---- *)
 (* TLS server advertises ["h2"; "http/1.1"]; the gohttp Client (https) negotiates
@@ -54,8 +53,11 @@ let test_clientserver_roundtrip () =
       let* post_body = Body.read_all post_resp.Response.body in
       let h2_count = Transport.h2_round_trip_count transport in
       Lwt.return
-        ( get_resp.Response.status_code, get_body,
-          post_resp.Response.status_code, post_body, h2_count ))
+        ( get_resp.Response.status_code,
+          get_body,
+          post_resp.Response.status_code,
+          post_body,
+          h2_count ))
   |> fun (gc, gb, pc, pb, h2_count) ->
   Alcotest.(check int) "GET status 200" 200 gc;
   Alcotest.(check string) "GET body" "hello, h2" gb;
@@ -75,7 +77,9 @@ let test_http11_fallback () =
       let* resp = Client.get client (base ^ "/hello") in
       let* body = Body.read_all resp.Response.body in
       Lwt.return
-        (resp.Response.status_code, body, Transport.h2_round_trip_count transport))
+        ( resp.Response.status_code,
+          body,
+          Transport.h2_round_trip_count transport ))
   |> fun (code, body, h2_count) ->
   Alcotest.(check int) "status 200" 200 code;
   Alcotest.(check string) "body" "hello, h2" body;
@@ -83,6 +87,7 @@ let test_http11_fallback () =
 
 let tests =
   [
-    Alcotest.test_case "clientserver_roundtrip" `Quick test_clientserver_roundtrip;
+    Alcotest.test_case "clientserver_roundtrip" `Quick
+      test_clientserver_roundtrip;
     Alcotest.test_case "http11_fallback" `Quick test_http11_fallback;
   ]

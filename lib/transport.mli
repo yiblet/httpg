@@ -4,18 +4,19 @@
    round-tripper -- but {!t} is the [Transport] and {!round_trip} is
    [Transport.RoundTrip]. *)
 
+val default_user_agent : string
 (** The default User-Agent advertised by {!round_trip} when the request carries
     none. Go uses ["Go-http-client/1.1"] ([request.go]'s [defaultUserAgent]);
     this port advertises ["gohttp-client/1.1"] so the wire string is not
     mistaken for the Go runtime's. *)
-val default_user_agent : string
 
+type t
 (** A [Transport]: an idle-connection pool keyed by scheme/host/port (Go's
     [idleConn map[connectMethodKey][]*persistConn], modeled as a [Hashtbl] from
     a ["scheme|host:port"] cache key to a list of idle connections) plus a
     keep-alive toggle. *)
-type t
 
+val create : ?insecure:bool -> ?authenticator:X509.Authenticator.t -> unit -> t
 (** [create ?insecure ?authenticator ()] is Go's [&Transport{}]: a fresh
     transport with an empty pool and keep-alives enabled.
 
@@ -26,9 +27,13 @@ type t
     precedence); [?insecure:true] disables verification entirely (Go's
     [InsecureSkipVerify], suitable only for self-signed/loopback test servers).
     See {!Net.connect_alpn}. *)
-val create :
-  ?insecure:bool -> ?authenticator:X509.Authenticator.t -> unit -> t
 
+val round_trip :
+  ?context:Context.t ->
+  ?force_h2:bool ->
+  t ->
+  Body.t Request.t ->
+  Body.t Response.t Lwt.t
 (** [round_trip t req] is Go's [Transport.RoundTrip] (HTTP/1.x path): pick
     scheme/host/port from [req.url] (TLS when the scheme is ["https"]), reuse an
     idle pooled connection or dial a fresh one via {!Net.connect}, send the
@@ -40,18 +45,18 @@ val create :
     [resp.body] is a {!Body.Stream} pulling bytes lazily from the connection; it
     is not pre-buffered. Reusability (keep-alives enabled, neither request nor
     response asked to close) is decided up front, and a one-shot release action
-    is wrapped onto the body's EOF (Go's [bodyEOFSignal] over [waitForBodyRead]):
-    the connection is returned to the idle pool {b only after the caller consumes
-    the body to EOF} ({!Body.read_all} or {!Body.drain} — the analogue of
-    [resp.Body.Close]); if it is not reusable, or if the read fails, the
-    connection is closed instead. A caller that never drains the body simply
-    forgoes reuse. A failure on a recycled idle connection triggers one
-    fresh-dial retry.
+    is wrapped onto the body's EOF (Go's [bodyEOFSignal] over
+    [waitForBodyRead]): the connection is returned to the idle pool
+    {b only after the caller consumes the body to EOF} ({!Body.read_all} or
+    {!Body.drain} — the analogue of [resp.Body.Close]); if it is not reusable,
+    or if the read fails, the connection is closed instead. A caller that never
+    drains the body simply forgoes reuse. A failure on a recycled idle
+    connection triggers one fresh-dial retry.
 
-    {b Cancellation covers the body read.} Each body chunk read races
-    [req]'s context ([?context], or a client timeout composed onto it): if the
-    context fires mid-stream the read aborts with the context cause and the
-    connection is closed (never pooled) — Go aborting an in-flight body read on
+    {b Cancellation covers the body read.} Each body chunk read races [req]'s
+    context ([?context], or a client timeout composed onto it): if the context
+    fires mid-stream the read aborts with the context cause and the connection
+    is closed (never pooled) — Go aborting an in-flight body read on
     [<-ctx.Done()].
 
     {b HTTP/2:} for an ["https"] request (or when [?force_h2] is set) the dial
@@ -66,29 +71,23 @@ val create :
     ergonomics layer: when supplied it is applied to [req] before the round
     trip, so the deadline/cancellation race uses it; when omitted the request's
     existing context is used (defaulting to {!Context.background}). *)
-val round_trip :
-  ?context:Context.t ->
-  ?force_h2:bool ->
-  t ->
-  Body.t Request.t ->
-  Body.t Response.t Lwt.t
 
+val conn_key : scheme:string -> host:string -> port:int -> string
 (** The cache key for a scheme/host/port (Go's [connectMethodKey.String]:
     ["scheme|host:port"]). Exposed for tests/inspection. *)
-val conn_key : scheme:string -> host:string -> port:int -> string
 
+val dial_count : t -> int
 (** Total number of connections this transport has dialed. Go has no exact
     analogue; exposed so the keep-alive-reuse test can assert that a second
     request did not open a second connection. *)
-val dial_count : t -> int
 
-(** Number of idle connections currently pooled under [key]. *)
 val idle_count : t -> string -> int
+(** Number of idle connections currently pooled under [key]. *)
 
-(** Total number of requests this transport has served over HTTP/2. Go has no
-    exact analogue; exposed so the ALPN end-to-end test can assert that the
-    [h2] path was actually taken. *)
 val h2_round_trip_count : t -> int
+(** Total number of requests this transport has served over HTTP/2. Go has no
+    exact analogue; exposed so the ALPN end-to-end test can assert that the [h2]
+    path was actually taken. *)
 
-(** The process-wide default transport (Go's [DefaultTransport]). *)
 val default_transport : t
+(** The process-wide default transport (Go's [DefaultTransport]). *)

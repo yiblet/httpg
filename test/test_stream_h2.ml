@@ -15,7 +15,9 @@ let ( let* ) = Lwt.bind
 
 let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
   let content_length =
-    match body with Api.Body.String s -> Int64.of_int (String.length s) | _ -> 0L
+    match body with
+    | Api.Body.String s -> Int64.of_int (String.length s)
+    | _ -> 0L
   in
   {
     Api.creq_ctx = Context.background;
@@ -85,11 +87,15 @@ let test_server_streams_multiple_data () =
     let* rest = Api.Body.read_all resp.cres_body in
     let full = (match first_chunk with Some s -> s | None -> "") ^ rest in
     Lwt.return
-      (resp.cres_status_code, first_chunk, handler_suspended_when_first_seen, full)
+      ( resp.cres_status_code,
+        first_chunk,
+        handler_suspended_when_first_seen,
+        full )
   in
   let code, first_chunk, suspended, full = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
-  Alcotest.(check (option string)) "first chunk is alpha" (Some "alpha") first_chunk;
+  Alcotest.(check (option string))
+    "first chunk is alpha" (Some "alpha") first_chunk;
   Alcotest.(check bool) "handler suspended when first chunk seen" true suspended;
   Alcotest.(check string) "full body" "alphabetagamma" full
 
@@ -147,7 +153,10 @@ let test_incremental_client_read () =
   let code, first_len, total = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
   Alcotest.(check bool) "first chunk readable before EOF" true (first_len > 0);
-  Alcotest.(check int) "total body length" (chunk |> String.length |> ( * ) chunks) total
+  Alcotest.(check int)
+    "total body length"
+    (chunk |> String.length |> ( * ) chunks)
+    total
 
 let tests =
   [

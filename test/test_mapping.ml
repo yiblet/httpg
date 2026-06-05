@@ -11,12 +11,16 @@ let test_mapping () =
   Alcotest.(check bool) "still slice (m.m == nil)" false (Mapping.using_map m);
   for i = 0 to Mapping.max_slice - 1 do
     let g = Mapping.find m i in
-    Alcotest.(check (option string)) (Printf.sprintf "find %d" i) (Some (string_of_int i)) g
+    Alcotest.(check (option string))
+      (Printf.sprintf "find %d" i)
+      (Some (string_of_int i))
+      g
   done;
   (* Adding one more switches to the map representation. *)
   Mapping.add m 4 "4";
   Alcotest.(check bool) "now map (m.m != nil)" true (Mapping.using_map m);
-  Alcotest.(check (option string)) "find 4 after switch" (Some "4") (Mapping.find m 4)
+  Alcotest.(check (option string))
+    "find 4 after switch" (Some "4") (Mapping.find m 4)
 
 (* TestMappingEachPair: eachPair visits every pair (any order). *)
 let test_each_pair () =

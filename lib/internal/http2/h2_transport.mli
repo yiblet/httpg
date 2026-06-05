@@ -23,57 +23,57 @@
    - Go's [wmu] write mutex becomes an {!Lwt_mutex} serializing all channel
      writes (HEADERS, DATA, WINDOW_UPDATE, PING ACK, RST_STREAM, …). *)
 
+type client_conn
 (** One HTTP/2 client connection, multiplexing concurrent streams. Mirrors Go's
     [ClientConn]. *)
-type client_conn
 
+val new_client_conn :
+  Lwt_io.input_channel -> Lwt_io.output_channel -> client_conn Lwt.t
 (** [new_client_conn ic oc] establishes a [ClientConn] over the duplex channel
     pair [(ic, oc)] (already past TLS/ALPN): it writes the client preface and an
     initial SETTINGS frame, reads (and ACKs) the server's SETTINGS, and starts
     the shared read-loop fiber. Resolves once the server's first SETTINGS frame
     has been seen (mirroring Go's [newClientConn] + waiting on
     [seenSettingsChan]). *)
-val new_client_conn :
-  Lwt_io.input_channel -> Lwt_io.output_channel -> client_conn Lwt.t
 
+val round_trip : client_conn -> Api.client_request -> Api.client_response Lwt.t
 (** [round_trip cc req] performs one HTTP/2 request/response exchange on [cc],
     multiplexed with any other concurrent {!round_trip} calls on the same
     connection. It allocates the next odd stream id, encodes the request
     pseudo-headers ([:method]/[:path]/[:scheme]/[:authority]) and headers via
     HPACK, writes the HEADERS frame (and DATA frames for the request body,
     respecting flow control, with END_STREAM on the last), then awaits the
-    response HEADERS and returns a {!Response.t} whose body is a
-    {!Body.Stream} fed by DATA frames through a per-stream {!H2_pipe}. Mirrors
-    Go's [ClientConn.roundTrip]/[clientStream.writeRequest] +
+    response HEADERS and returns a {!Response.t} whose body is a {!Body.Stream}
+    fed by DATA frames through a per-stream {!H2_pipe}. Mirrors Go's
+    [ClientConn.roundTrip]/[clientStream.writeRequest] +
     [clientConnReadLoop.handleResponse]. *)
-val round_trip : client_conn -> Api.client_request -> Api.client_response Lwt.t
 
+val close : client_conn -> unit Lwt.t
 (** [close cc] marks the connection closed and aborts the read loop / pending
     streams. Mirrors Go's [ClientConn.Close]. *)
-val close : client_conn -> unit Lwt.t
 
+val is_closed : client_conn -> bool
 (** [is_closed cc] is [true] once the connection has been closed (cleanly or by
     a reader error) or is shutting down — i.e. it can no longer take new
     requests. Mirrors the negation of Go's [canTakeNewRequest]; exposed so a
     transport pool can evict dead connections. *)
-val is_closed : client_conn -> bool
 
 (* ---- minimal connection pool (client_conn_pool.go subset) ---- *)
 
+type t
 (** A transport: a connection pool keyed by authority string ([host:port]).
     Mirrors the subset of Go's [Transport]/[clientConnPool] needed here. *)
-type t
 
-(** A fresh transport with an empty pool. *)
 val create : unit -> t
+(** A fresh transport with an empty pool. *)
 
-(** [round_trip_pooled t ~connect req] dispatches [req] over a pooled
-    [client_conn] for the request's authority, dialing a new one via
-    [connect authority] (returning a duplex channel pair) when the pool has no
-    usable connection. Mirrors Go's [clientConnPool.GetClientConn] +
-    [ClientConn.RoundTrip]. *)
 val round_trip_pooled :
   t ->
   connect:(string -> (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t) ->
   Api.client_request ->
   Api.client_response Lwt.t
+(** [round_trip_pooled t ~connect req] dispatches [req] over a pooled
+    [client_conn] for the request's authority, dialing a new one via
+    [connect authority] (returning a duplex channel pair) when the pool has no
+    usable connection. Mirrors Go's [clientConnPool.GetClientConn] +
+    [ClientConn.RoundTrip]. *)

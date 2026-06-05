@@ -31,9 +31,7 @@ let unit_with_deadline () =
        Context.with_deadline Context.background (Unix.gettimeofday () +. 0.05)
      in
      Context.done_ ctx >>= fun () ->
-     Alcotest.(check bool)
-       "deadline set" true
-       (Context.deadline ctx <> None);
+     Alcotest.(check bool) "deadline set" true (Context.deadline ctx <> None);
      Alcotest.(check bool)
        "err is Deadline_exceeded" true
        (Context.err ctx = Some Context.Deadline_exceeded);
@@ -67,9 +65,11 @@ let unit_background_never () =
   run
     (let p = Context.done_ Context.background in
      Lwt_unix.sleep 0.1 >>= fun () ->
-     Alcotest.(check bool) "background done_ still pending" true
+     Alcotest.(check bool)
+       "background done_ still pending" true
        (Lwt.state p = Lwt.Sleep);
-     Alcotest.(check bool) "background err is None" true
+     Alcotest.(check bool)
+       "background err is None" true
        (Context.err Context.background = None);
      Lwt.return_unit)
 
@@ -183,7 +183,8 @@ let optional_arg_timeout () =
     let slow_url = Printf.sprintf "http://127.0.0.1:%d/slow" port in
     let ctx, _cancel = Context.with_timeout Context.background 0.2 in
     Lwt.catch
-      (fun () -> Client.get ~context:ctx c slow_url >>= fun _ -> Lwt.return `No_error)
+      (fun () ->
+        Client.get ~context:ctx c slow_url >>= fun _ -> Lwt.return `No_error)
       (function
         | Context.Deadline_exceeded -> Lwt.return `Deadline
         | e -> Lwt.return (`Other (Printexc.to_string e)))
@@ -197,8 +198,10 @@ let optional_arg_timeout () =
   let with_ctx, status, body = with_server handler client in
   (match with_ctx with
   | `Deadline -> ()
-  | `No_error -> Alcotest.fail "expected Deadline_exceeded with ~context, got a response"
-  | `Other s -> Alcotest.failf "expected Deadline_exceeded with ~context, got %s" s);
+  | `No_error ->
+      Alcotest.fail "expected Deadline_exceeded with ~context, got a response"
+  | `Other s ->
+      Alcotest.failf "expected Deadline_exceeded with ~context, got %s" s);
   Alcotest.(check int) "no-context status 200" 200 status;
   Alcotest.(check string) "no-context body" "ok" body
 

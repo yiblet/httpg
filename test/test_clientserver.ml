@@ -85,8 +85,8 @@ let keepalive_reuse () =
   Alcotest.(check string) "resp1 body" "hello" b1;
   Alcotest.(check string) "resp2 body" "hello" b2;
   Alcotest.(check int) "first request dialed once" 1 dials_after_1;
-  Alcotest.(check int) "second request reused the connection (no new dial)" 1
-    dials_after_2
+  Alcotest.(check int)
+    "second request reused the connection (no new dial)" 1 dials_after_2
 
 let tests =
   [

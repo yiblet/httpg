@@ -19,13 +19,11 @@ let err_code_string_tests =
     ( "http11required",
       `Quick,
       check_string "HTTP_1_1_REQUIRED" "HTTP_1_1_REQUIRED"
-        (H2_error.err_code_string
-           (H2_error.err_code_of_int 0xd)) );
+        (H2_error.err_code_string (H2_error.err_code_of_int 0xd)) );
     ( "unknown",
       `Quick,
       check_string "unknown 0xf" "unknown error code 0xf"
-        (H2_error.err_code_string
-           (H2_error.err_code_of_int 0xf)) );
+        (H2_error.err_code_string (H2_error.err_code_of_int 0xf)) );
   ]
 
 (* Wire-value round trips for every known error code. *)
@@ -55,9 +53,8 @@ let err_code_roundtrip_tests =
         `Quick,
         fun () ->
           let v = H2_error.err_code_to_int c in
-          Alcotest.(check bool)
-            "roundtrip" true
-            (H2_error.err_code_of_int v = c) ))
+          Alcotest.(check bool) "roundtrip" true (H2_error.err_code_of_int v = c)
+      ))
     codes
 
 (* Explicit wire values from errors.go. *)
@@ -95,12 +92,8 @@ let preface_tests =
       `Quick,
       check_string "preface" "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         H2.client_preface );
-    ( "preface_len",
-      `Quick,
-      check_int "len" 24 H2.client_preface_len );
-    ( "next_proto_tls",
-      `Quick,
-      check_string "alpn" "h2" H2.next_proto_tls );
+    ("preface_len", `Quick, check_int "len" 24 H2.client_preface_len);
+    ("next_proto_tls", `Quick, check_string "alpn" "h2" H2.next_proto_tls);
   ]
 
 (* Frame type wire values (frame.go FrameType constants). *)
@@ -169,9 +162,7 @@ let setting_id_tests =
 (* Default constants (http2.go). *)
 let default_tests =
   [
-    ( "initial_window_size",
-      `Quick,
-      check_int "iws" 65535 H2.initial_window_size );
+    ("initial_window_size", `Quick, check_int "iws" 65535 H2.initial_window_size);
     ( "initial_max_frame_size",
       `Quick,
       check_int "imfs" 16384 H2.initial_max_frame_size );

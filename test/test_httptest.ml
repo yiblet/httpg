@@ -129,8 +129,7 @@ let content_length_header () =
   in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "Some body" (R.body_string rec_);
-  Alcotest.(check int64)
-    "content_length 9" 9L (R.result rec_).content_length
+  Alcotest.(check int64) "content_length 9" 9L (R.result rec_).content_length
 
 let tests =
   [

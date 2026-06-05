@@ -5,8 +5,7 @@ let epoch = Http_time.unix_of_utc 2006 1 2 15 4 5
 let rfc1123 = "Mon, 02 Jan 2006 15:04:05 GMT"
 
 let check_format () =
-  Alcotest.(check string)
-    "format_gmt" rfc1123 (Http_time.format_gmt epoch)
+  Alcotest.(check string) "format_gmt" rfc1123 (Http_time.format_gmt epoch)
 
 let check_parse name s =
   match Http_time.parse_http_time s with

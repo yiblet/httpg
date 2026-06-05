@@ -28,7 +28,8 @@ let exact_sig sig_ ct : sniff_sig =
 let masked_sig ?(skip_ws = false) ~mask ~pat ct : sniff_sig =
  fun ~data ~first_non_ws ->
   let data =
-    if skip_ws then String.sub data first_non_ws (String.length data - first_non_ws)
+    if skip_ws then
+      String.sub data first_non_ws (String.length data - first_non_ws)
     else data
   in
   if String.length pat <> String.length mask then ""
@@ -38,9 +39,7 @@ let masked_sig ?(skip_ws = false) ~mask ~pat ct : sniff_sig =
     let rec loop i =
       if i >= plen then ct
       else
-        let masked_data =
-          Char.code data.[i] land Char.code mask.[i]
-        in
+        let masked_data = Char.code data.[i] land Char.code mask.[i] in
         if masked_data <> Char.code pat.[i] then "" else loop (i + 1)
     in
     loop 0
@@ -49,17 +48,15 @@ let masked_sig ?(skip_ws = false) ~mask ~pat ct : sniff_sig =
 (* htmlSig: case-insensitive tag prefix followed by a tag-terminating byte. *)
 let html_sig h : sniff_sig =
  fun ~data ~first_non_ws ->
-  let data =
-    String.sub data first_non_ws (String.length data - first_non_ws)
-  in
+  let data = String.sub data first_non_ws (String.length data - first_non_ws) in
   let hlen = String.length h in
   if String.length data < hlen + 1 then ""
   else begin
     let rec loop i =
-      if i >= hlen then begin
+      if i >= hlen then
         (* Next byte must be a tag-terminating byte (0xTT). *)
-        if not (is_tt data.[hlen]) then "" else "text/html; charset=utf-8"
-      end
+        begin if not (is_tt data.[hlen]) then "" else "text/html; charset=utf-8"
+        end
       else begin
         let b = Char.code h.[i] in
         let db = Char.code data.[i] in
@@ -152,8 +149,7 @@ let sniff_signatures : sniff_sig list =
     exact_sig "BM" "image/bmp";
     exact_sig "GIF87a" "image/gif";
     exact_sig "GIF89a" "image/gif";
-    masked_sig
-      ~mask:"\xFF\xFF\xFF\xFF\x00\x00\x00\x00\xFF\xFF\xFF\xFF\xFF\xFF"
+    masked_sig ~mask:"\xFF\xFF\xFF\xFF\x00\x00\x00\x00\xFF\xFF\xFF\xFF\xFF\xFF"
       ~pat:"RIFF\x00\x00\x00\x00WEBPVP" "image/webp";
     exact_sig "\x89PNG\x0D\x0A\x1A\x0A" "image/png";
     exact_sig "\xFF\xD8\xFF" "image/jpeg";
@@ -173,8 +169,7 @@ let sniff_signatures : sniff_sig list =
     (* 6.2.0.3. video/webm *)
     exact_sig "\x1A\x45\xDF\xA3" "video/webm";
     (* Font types *)
-    masked_sig
-      (* 34 NULL bytes followed by the string "LP" *)
+    masked_sig (* 34 NULL bytes followed by the string "LP" *)
       ~pat:
         "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00LP"
         (* 34 NULL bytes followed by \xFF\xFF *)

@@ -1,7 +1,7 @@
 (* Port of go/src/net/http/method.go *)
 
-(** An HTTP method. Go models these as plain string constants. *)
 type t = string
+(** An HTTP method. Go models these as plain string constants. *)
 
 (* Common HTTP methods.
 

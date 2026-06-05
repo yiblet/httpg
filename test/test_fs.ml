@@ -8,7 +8,6 @@
 
 open Gohttp
 open Lwt.Infix
-
 module Ts = Httptest.Server
 
 (* ---- temp-dir helpers ---- *)
@@ -16,8 +15,7 @@ module Ts = Httptest.Server
 let mktempdir () =
   let base = Filename.get_temp_dir_name () in
   let name =
-    Printf.sprintf "gohttp_fs_%d_%d" (Unix.getpid ())
-      (Random.int 1_000_000_000)
+    Printf.sprintf "gohttp_fs_%d_%d" (Unix.getpid ()) (Random.int 1_000_000_000)
   in
   let dir = Filename.concat base name in
   Unix.mkdir dir 0o755;
@@ -28,9 +26,7 @@ let rec rm_rf path =
   | exception _ -> ()
   | st ->
       if st.Unix.st_kind = Unix.S_DIR then begin
-        Array.iter
-          (fun e -> rm_rf (Filename.concat path e))
-          (Sys.readdir path);
+        Array.iter (fun e -> rm_rf (Filename.concat path e)) (Sys.readdir path);
         Unix.rmdir path
       end
       else Unix.unlink path
@@ -43,7 +39,11 @@ let write_file path contents =
 (* Run [f tmpdir] with a fresh temp dir, cleaning up afterwards. *)
 let with_tmpdir f =
   let dir = mktempdir () in
-  Lwt.finalize (fun () -> f dir) (fun () -> rm_rf dir; Lwt.return_unit)
+  Lwt.finalize
+    (fun () -> f dir)
+    (fun () ->
+      rm_rf dir;
+      Lwt.return_unit)
 
 (* ---- Fs.serve_file (known file) ---- *)
 (* Go's TestServeFile (subset): GET a known file → 200 + exact bytes +
@@ -97,7 +97,10 @@ let dir_listing () =
   Alcotest.(check string) "content-type html" "text/html; charset=utf-8" ct;
   let contains sub =
     let re = Str.regexp_string sub in
-    try ignore (Str.search_forward re body 0); true with Not_found -> false
+    try
+      ignore (Str.search_forward re body 0);
+      true
+    with Not_found -> false
   in
   Alcotest.(check bool) "lists alpha.txt" true (contains "alpha.txt");
   Alcotest.(check bool) "lists beta.txt" true (contains "beta.txt")
@@ -117,7 +120,7 @@ let traversal_blocked () =
             (* a literal ../ escape attempt; path.Clean collapses it within the
                root, and Dir.Open rejects any residual "..". *)
             Client.get c (Ts.url s ^ "/../../../../etc/passwd") >>= fun resp ->
-            Body.drain resp.Response.body >>= fun () ->
+            Body.drain resp.Response.body >>= fun _ ->
             Lwt.return resp.Response.status_code)
           (fun () -> Ts.close s))
   in
@@ -136,7 +139,7 @@ let missing_file () =
           (fun () ->
             let c = Ts.client s in
             Client.get c (Ts.url s ^ "/nope.txt") >>= fun resp ->
-            Body.drain resp.Response.body >>= fun () ->
+            Body.drain resp.Response.body >>= fun _ ->
             Lwt.return resp.Response.status_code)
           (fun () -> Ts.close s))
   in
@@ -157,11 +160,9 @@ let dir_redirect () =
         Lwt.finalize
           (fun () ->
             let tr = Transport.create () in
-            let req =
-              Client.make_request "GET" (Ts.url s ^ "/sub")
-            in
+            let req = Client.make_request "GET" (Ts.url s ^ "/sub") in
             Transport.round_trip tr req >>= fun resp ->
-            Body.drain resp.Response.body >>= fun () ->
+            Body.drain resp.Response.body >>= fun _ ->
             let loc = Header.get resp.Response.header "Location" in
             Lwt.return (resp.Response.status_code, loc))
           (fun () -> Ts.close s))

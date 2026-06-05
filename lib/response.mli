@@ -2,8 +2,6 @@
    The IO halves (ReadResponse / Response.Write) live in {!Io}. The TLS field
    is intentionally omitted (deferred). *)
 
-(** A response mirroring Go's [Response] struct. The body field is parametric;
-    {!Io} instantiates ['body] to {!Body.t}. *)
 type 'body t = {
   mutable status : string;  (** e.g. "200 OK" *)
   mutable status_code : int;  (** e.g. 200 *)
@@ -19,13 +17,15 @@ type 'body t = {
   mutable trailer : Header.t option;
   mutable request : 'body Request.t option;
 }
+(** A response mirroring Go's [Response] struct. The body field is parametric;
+    {!Io} instantiates ['body] to {!Body.t}. *)
 
-(** [Response.Cookies]: cookies from the "Set-Cookie" headers. *)
 val cookies : 'a t -> Cookie.t list
+(** [Response.Cookies]: cookies from the "Set-Cookie" headers. *)
 
-(** [Response.ProtoAtLeast]. *)
 val proto_at_least : 'a t -> int -> int -> bool
+(** [Response.ProtoAtLeast]. *)
 
-(** [Response.Location]: the "Location" header resolved against the request
-    URL, or [None] (Go's [ErrNoLocation]) when absent. *)
 val location : 'a t -> Uri.t option
+(** [Response.Location]: the "Location" header resolved against the request URL,
+    or [None] (Go's [ErrNoLocation]) when absent. *)

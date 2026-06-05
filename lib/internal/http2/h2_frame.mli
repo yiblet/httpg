@@ -3,72 +3,72 @@
    pure functions over strings/bytes; thin Lwt wrappers read/write through
    [Lwt_io] channels. Composes {!H2}, {!H2_error} and {!Hpack}. *)
 
-(** The 9-byte header at the start of every HTTP/2 frame. Mirrors Go's
-    [FrameHeader]. [stream_id] always has the reserved high bit masked off. *)
 type frame_header = {
   length : int;  (** payload length, not including the 9-byte header *)
   typ : H2.frame_type;
   flags : int;
   stream_id : int;
 }
+(** The 9-byte header at the start of every HTTP/2 frame. Mirrors Go's
+    [FrameHeader]. [stream_id] always has the reserved high bit masked off. *)
 
-(** Stream prioritization parameters (RFC 7540). Mirrors the exported fields of
-    Go's [PriorityParam]. *)
 type priority_param = {
   stream_dep : int;
   exclusive : bool;
   weight : int;  (** zero-indexed weight *)
 }
+(** Stream prioritization parameters (RFC 7540). Mirrors the exported fields of
+    Go's [PriorityParam]. *)
 
+type data_frame = { data : string; end_stream : bool }
 (** A parsed/owned DATA frame. [data] excludes any pad-length byte and padding
     suffix. Mirrors Go's [DataFrame]. *)
-type data_frame = { data : string; end_stream : bool }
 
-(** A parsed HEADERS frame. [header_frag] is the header-block fragment with any
-    padding stripped. Mirrors Go's [HeadersFrame]. *)
 type headers_frame = {
   priority : priority_param option;  (** Some iff the PRIORITY flag is set *)
   header_frag : string;
   end_stream : bool;
   end_headers : bool;
 }
+(** A parsed HEADERS frame. [header_frag] is the header-block fragment with any
+    padding stripped. Mirrors Go's [HeadersFrame]. *)
 
-(** Mirrors Go's [PriorityFrame]. *)
 type priority_frame = { priority : priority_param }
+(** Mirrors Go's [PriorityFrame]. *)
 
-(** Mirrors Go's [RSTStreamFrame]. *)
 type rst_stream_frame = { error_code : H2_error.err_code }
+(** Mirrors Go's [RSTStreamFrame]. *)
 
+type settings_frame = { settings : H2.setting list; ack : bool }
 (** Mirrors Go's [SettingsFrame]. [ack] is true for an empty SETTINGS ACK; then
     [settings] is empty. *)
-type settings_frame = { settings : H2.setting list; ack : bool }
 
-(** Mirrors Go's [PushPromiseFrame] (parse path only). *)
 type push_promise_frame = {
   promise_id : int;
   header_frag : string;
   end_headers : bool;
 }
+(** Mirrors Go's [PushPromiseFrame] (parse path only). *)
 
-(** Mirrors Go's [PingFrame]. [data] is always exactly 8 bytes. *)
 type ping_frame = { data : string; ack : bool }
+(** Mirrors Go's [PingFrame]. [data] is always exactly 8 bytes. *)
 
-(** Mirrors Go's [GoAwayFrame]. *)
 type goaway_frame = {
   last_stream_id : int;
   error_code : H2_error.err_code;
   debug_data : string;
 }
+(** Mirrors Go's [GoAwayFrame]. *)
 
-(** Mirrors Go's [WindowUpdateFrame]. [increment] never has the high bit set. *)
 type window_update_frame = { increment : int }
+(** Mirrors Go's [WindowUpdateFrame]. [increment] never has the high bit set. *)
 
-(** Mirrors Go's [ContinuationFrame]. *)
 type continuation_frame = { header_frag : string; end_headers : bool }
+(** Mirrors Go's [ContinuationFrame]. *)
 
+type unknown_frame = { raw_type : int; payload : string }
 (** Mirrors Go's [UnknownFrame] (and any frame type with no specific parser,
     e.g. PRIORITY_UPDATE). [raw_type] is the wire type byte. *)
-type unknown_frame = { raw_type : int; payload : string }
 
 (** A decoded frame: the header plus a per-type payload. Mirrors Go's [Frame]
     interface and its concrete implementations. *)
@@ -85,66 +85,65 @@ type frame =
   | Continuation of frame_header * continuation_frame
   | Unknown of frame_header * unknown_frame
 
-(** Returns the {!frame_header} of any frame. Mirrors Go's [Frame.Header]. *)
 val header_of_frame : frame -> frame_header
+(** Returns the {!frame_header} of any frame. Mirrors Go's [Frame.Header]. *)
 
 (* ---- errors (mirrors frame.go) ---- *)
 
+exception Frame_too_large
 (** Raised by {!write_data}/{!write_headers}/… for a frame larger than the
     24-bit length field permits. Mirrors Go's [ErrFrameTooLarge]. On the
     {b read} path this is surfaced as {!H2_error.Frame_too_large} via
     {!read_frame}'s [result]; on the {b write} path (frame builders) it remains
     a raise (a programmer/usage error — building an over-large frame). *)
-exception Frame_too_large
 
-(** Raised by the writers when given an invalid (zero / high-bit-set) stream
-    ID without illegal writes enabled. Mirrors Go's [errStreamID]. A write-side
-    invariant (kept as a raise). *)
 exception Invalid_stream_id
+(** Raised by the writers when given an invalid (zero / high-bit-set) stream ID
+    without illegal writes enabled. Mirrors Go's [errStreamID]. A write-side
+    invariant (kept as a raise). *)
 
-(** Mirrors Go's [errDepStreamID]. A write-side invariant (kept as a raise). *)
 exception Invalid_dep_stream_id
+(** Mirrors Go's [errDepStreamID]. A write-side invariant (kept as a raise). *)
 
-(** Mirrors Go's [errPadLength]. A write-side invariant (kept as a raise). *)
 exception Pad_length_too_large
+(** Mirrors Go's [errPadLength]. A write-side invariant (kept as a raise). *)
 
 (* ---- pure header codec ---- *)
 
+val encode_frame_header : frame_header -> string
 (** [encode_frame_header h] renders the 9-byte frame header. Mirrors the header
     portion of Go's [startWrite]/[endWrite]. *)
-val encode_frame_header : frame_header -> string
 
-(** [decode_frame_header s] parses a 9-byte header from the first 9 bytes of
-    [s] (masking the reserved stream-id high bit). Mirrors Go's
-    [readFrameHeader]. *)
 val decode_frame_header : string -> frame_header
+(** [decode_frame_header s] parses a 9-byte header from the first 9 bytes of [s]
+    (masking the reserved stream-id high bit). Mirrors Go's [readFrameHeader].
+*)
 
 (* ---- reading ---- *)
 
-(** [read_frame ?max_size ic] reads the next frame from [ic]: the 9-byte
-    header, then the payload, validating the length against [max_size] (default
-    [H2.max_frame_size] = 2^24-1) and the per-type constraints. Returns
-    [Error] with the unified {!H2_error.t} faithfully to Go's parsers
-    (FRAME_SIZE_ERROR / PROTOCOL_ERROR on stream-id rules → [Connection _] /
-    [Stream _]; a declared length over [max_size] → [Frame_too_large]). Strips
-    padding for DATA/HEADERS. Mirrors Go's [Framer.ReadFrame]. A clean EOF
-    (connection closed before/between frames) propagates as [End_of_file],
-    mirroring Go's [io.EOF] return. *)
 val read_frame :
   ?max_size:int -> Lwt_io.input_channel -> (frame, H2_error.t) result Lwt.t
+(** [read_frame ?max_size ic] reads the next frame from [ic]: the 9-byte header,
+    then the payload, validating the length against [max_size] (default
+    [H2.max_frame_size] = 2^24-1) and the per-type constraints. Returns [Error]
+    with the unified {!H2_error.t} faithfully to Go's parsers (FRAME_SIZE_ERROR
+    / PROTOCOL_ERROR on stream-id rules → [Connection _] / [Stream _]; a
+    declared length over [max_size] → [Frame_too_large]). Strips padding for
+    DATA/HEADERS. Mirrors Go's [Framer.ReadFrame]. A clean EOF (connection
+    closed before/between frames) propagates as [End_of_file], mirroring Go's
+    [io.EOF] return. *)
 
-(** Maximum legal frame size (2^24 - 1). Mirrors Go's [maxFrameSize]. *)
 val max_frame_size : int
+(** Maximum legal frame size (2^24 - 1). Mirrors Go's [maxFrameSize]. *)
 
 (* ---- writers (each performs exactly one write to the channel) ---- *)
 
+val write_data :
+  ?pad:string -> Lwt_io.output_channel -> int -> bool -> string -> unit Lwt.t
 (** Mirrors Go's [WriteData]/[WriteDataPadded]. [pad], if given, is appended
     verbatim and its length must be <= 255; passing [Some ""] sets the PADDED
     bit with zero padding. *)
-val write_data :
-  ?pad:string -> Lwt_io.output_channel -> int -> bool -> string -> unit Lwt.t
 
-(** Mirrors Go's [WriteHeaders] / [HeadersFrameParam]. *)
 val write_headers :
   Lwt_io.output_channel ->
   stream_id:int ->
@@ -154,36 +153,36 @@ val write_headers :
   ?priority:priority_param ->
   string ->
   unit Lwt.t
+(** Mirrors Go's [WriteHeaders] / [HeadersFrameParam]. *)
 
-(** Mirrors Go's [WritePriority]. *)
 val write_priority :
   Lwt_io.output_channel -> int -> priority_param -> unit Lwt.t
+(** Mirrors Go's [WritePriority]. *)
 
-(** Mirrors Go's [WriteRSTStream]. *)
 val write_rst_stream :
   Lwt_io.output_channel -> int -> H2_error.err_code -> unit Lwt.t
+(** Mirrors Go's [WriteRSTStream]. *)
 
-(** Mirrors Go's [WriteSettings] (ACK bit clear). *)
 val write_settings : Lwt_io.output_channel -> H2.setting list -> unit Lwt.t
+(** Mirrors Go's [WriteSettings] (ACK bit clear). *)
 
-(** Mirrors Go's [WriteSettingsAck]. *)
 val write_settings_ack : Lwt_io.output_channel -> unit Lwt.t
+(** Mirrors Go's [WriteSettingsAck]. *)
 
-(** Mirrors Go's [WritePing]. [data] must be exactly 8 bytes. *)
 val write_ping : Lwt_io.output_channel -> bool -> string -> unit Lwt.t
+(** Mirrors Go's [WritePing]. [data] must be exactly 8 bytes. *)
 
-(** Mirrors Go's [WriteGoAway]. *)
 val write_goaway :
   Lwt_io.output_channel -> int -> H2_error.err_code -> string -> unit Lwt.t
+(** Mirrors Go's [WriteGoAway]. *)
 
-(** Mirrors Go's [WriteWindowUpdate]; [incr] must be in 1..2^31-1. *)
 val write_window_update : Lwt_io.output_channel -> int -> int -> unit Lwt.t
+(** Mirrors Go's [WriteWindowUpdate]; [incr] must be in 1..2^31-1. *)
 
-(** Mirrors Go's [WriteContinuation]. *)
 val write_continuation :
   Lwt_io.output_channel -> int -> bool -> string -> unit Lwt.t
+(** Mirrors Go's [WriteContinuation]. *)
 
-(** Mirrors Go's [WritePushPromise] / [PushPromiseParam]. *)
 val write_push_promise :
   Lwt_io.output_channel ->
   stream_id:int ->
@@ -192,22 +191,30 @@ val write_push_promise :
   ?pad_length:int ->
   string ->
   unit Lwt.t
+(** Mirrors Go's [WritePushPromise] / [PushPromiseParam]. *)
 
-(** Mirrors Go's [WriteRawFrame]: write an arbitrary frame type with the given
-    flags, stream id and payload, with no validation. *)
 val write_raw :
   Lwt_io.output_channel -> int -> int -> int -> string -> unit Lwt.t
+(** Mirrors Go's [WriteRawFrame]: write an arbitrary frame type with the given
+    flags, stream id and payload, with no validation. *)
 
 (* ---- meta headers (HEADERS + CONTINUATION assembly) ---- *)
 
-(** The result of {!read_meta_headers}: the merged HEADERS+CONTINUATION block
-    decoded into header fields. Mirrors Go's [MetaHeadersFrame]. *)
 type meta_headers_frame = {
   fh : frame_header;  (** the originating HEADERS frame's header *)
   fields : Hpack.header_field list;
   truncated : bool;  (** the MAX_HEADER_LIST_SIZE limit was hit *)
 }
+(** The result of {!read_meta_headers}: the merged HEADERS+CONTINUATION block
+    decoded into header fields. Mirrors Go's [MetaHeadersFrame]. *)
 
+val read_meta_headers :
+  ?max_size:int ->
+  ?max_header_list_size:int ->
+  Hpack.decoder ->
+  frame_header * headers_frame ->
+  Lwt_io.input_channel ->
+  (meta_headers_frame, H2_error.t) result Lwt.t
 (** [read_meta_headers ?max_size ?max_header_list_size dec hf ic] consumes the
     HEADERS frame [hf] (already read from [ic]) plus zero or more CONTINUATION
     frames until END_HEADERS, decoding the assembled block via [dec]
@@ -220,10 +227,3 @@ type meta_headers_frame = {
     [Framer.readMetaFrame]. [max_header_list_size] defaults to 16MB (Go's
     default). A clean EOF (a CONTINUATION never arriving) propagates as
     [End_of_file]. *)
-val read_meta_headers :
-  ?max_size:int ->
-  ?max_header_list_size:int ->
-  Hpack.decoder ->
-  frame_header * headers_frame ->
-  Lwt_io.input_channel ->
-  (meta_headers_frame, H2_error.t) result Lwt.t

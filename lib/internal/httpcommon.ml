@@ -55,7 +55,8 @@ let lower_header v =
   for i = 0 to Bytes.length b - 1 do
     let c = Bytes.get b i in
     if Char.code c >= 128 then ascii := false
-    else if c >= 'A' && c <= 'Z' then Bytes.set b i (Char.chr (Char.code c + 32))
+    else if c >= 'A' && c <= 'Z' then
+      Bytes.set b i (Char.chr (Char.code c + 32))
   done;
   (Bytes.to_string b, !ascii)
 
@@ -235,7 +236,8 @@ let encode_headers ~canonical param headerf =
           Ascii.equal_fold k "connection"
           || Ascii.equal_fold k "proxy-connection"
           || Ascii.equal_fold k "transfer-encoding"
-          || Ascii.equal_fold k "upgrade" || Ascii.equal_fold k "keep-alive"
+          || Ascii.equal_fold k "upgrade"
+          || Ascii.equal_fold k "keep-alive"
         then ()
         else if Ascii.equal_fold k "user-agent" then begin
           did_ua := true;
@@ -263,10 +265,7 @@ let encode_headers ~canonical param headerf =
   enumerate (fun name value ->
       let name, ascii = lower_header name in
       if ascii then headerf name value);
-  {
-    has_body = req.actual_content_length <> 0L;
-    has_trailers = trailers <> "";
-  }
+  { has_body = req.actual_content_length <> 0L; has_trailers = trailers <> "" }
 
 let header_values_contains_token vv token =
   List.exists
@@ -283,7 +282,8 @@ let new_server_request ~canonical param =
   in
   if needs_continue then Hashtbl.remove h "Expect";
   (match hget h "Cookie" with
-  | _ :: _ :: _ as cookies -> Hashtbl.replace h "Cookie" [ String.concat "; " cookies ]
+  | _ :: _ :: _ as cookies ->
+      Hashtbl.replace h "Cookie" [ String.concat "; " cookies ]
   | _ -> ());
   let trailer = ref None in
   List.iter

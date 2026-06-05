@@ -16,7 +16,9 @@ let run = Lwt_main.run
    it), Content-Type header and urlencoded/multipart body string. *)
 let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
   let header = Header.create () in
-  (match content_type with Some ct -> Header.set header "Content-Type" ct | None -> ());
+  (match content_type with
+  | Some ct -> Header.set header "Content-Type" ct
+  | None -> ());
   {
     Request.meth;
     url = Uri.of_string url;
@@ -48,7 +50,8 @@ let values_find r_field key =
 let parse_urlencoded () =
   let r =
     make_req ~meth:"POST"
-      ~url:"http://www.google.com/search?q=foo&q=bar&both=x&prio=1&orphan=nope&empty=not"
+      ~url:
+        "http://www.google.com/search?q=foo&q=bar&both=x&prio=1&orphan=nope&empty=not"
       ~content_type:"application/x-www-form-urlencoded; param=value"
       ~body:"z=post&both=y&prio=2&=nokey&orphan&empty=&" ()
   in
@@ -57,17 +60,29 @@ let parse_urlencoded () =
   let z = run (Form.form_value r "z") in
   Alcotest.(check string) "FormValue z" "post" z;
   (* PostForm has no "q" (it was only in the query). *)
-  Alcotest.(check (list string)) "PostForm q empty" [] (values_find r.Request.post_form "q");
+  Alcotest.(check (list string))
+    "PostForm q empty" []
+    (values_find r.Request.post_form "q");
   let bz = run (Form.post_form_value r "z") in
   Alcotest.(check string) "PostFormValue z" "post" bz;
   (* Form["q"] = ["foo"; "bar"] (query values, in order). *)
-  Alcotest.(check (list string)) "Form q" [ "foo"; "bar" ] (values_find r.Request.form "q");
+  Alcotest.(check (list string))
+    "Form q" [ "foo"; "bar" ]
+    (values_find r.Request.form "q");
   (* Form["both"] = ["y"; "x"] (body value first, then query). *)
-  Alcotest.(check (list string)) "Form both" [ "y"; "x" ] (values_find r.Request.form "both");
+  Alcotest.(check (list string))
+    "Form both" [ "y"; "x" ]
+    (values_find r.Request.form "both");
   Alcotest.(check string) "FormValue prio" "2" (run (Form.form_value r "prio"));
-  Alcotest.(check (list string)) "Form orphan" [ ""; "nope" ] (values_find r.Request.form "orphan");
-  Alcotest.(check (list string)) "Form empty" [ ""; "not" ] (values_find r.Request.form "empty");
-  Alcotest.(check (list string)) "Form nokey" [ "nokey" ] (values_find r.Request.form "")
+  Alcotest.(check (list string))
+    "Form orphan" [ ""; "nope" ]
+    (values_find r.Request.form "orphan");
+  Alcotest.(check (list string))
+    "Form empty" [ ""; "not" ]
+    (values_find r.Request.form "empty");
+  Alcotest.(check (list string))
+    "Form nokey" [ "nokey" ]
+    (values_find r.Request.form "")
 
 (* ---- TestParseFormQueryMethods: only POST/PUT/PATCH read the body. *)
 let parse_form_query_methods () =
@@ -75,11 +90,14 @@ let parse_form_query_methods () =
     (fun meth ->
       let r =
         make_req ~meth ~url:"http://www.google.com/search"
-          ~content_type:"application/x-www-form-urlencoded; param=value" ~body:"foo=bar" ()
+          ~content_type:"application/x-www-form-urlencoded; param=value"
+          ~body:"foo=bar" ()
       in
       let want = if meth = "FOO" then "" else "bar" in
       let got = run (Form.form_value r "foo") in
-      Alcotest.(check string) (Printf.sprintf "method %s FormValue foo" meth) want got)
+      Alcotest.(check string)
+        (Printf.sprintf "method %s FormValue foo" meth)
+        want got)
     [ "POST"; "PATCH"; "PUT"; "FOO" ]
 
 (* ---- TestParseFormSemicolonSeparator: a non-encoded ';' in the query is an
@@ -88,7 +106,8 @@ let parse_form_semicolon () =
   List.iter
     (fun meth ->
       let r =
-        make_req ~meth ~url:"http://www.google.com/search?q=foo;q=bar&a=1" ~body:"q" ()
+        make_req ~meth ~url:"http://www.google.com/search?q=foo;q=bar&a=1"
+          ~body:"q" ()
       in
       let res = run (Form.parse_form r) in
       (match res with
@@ -96,7 +115,8 @@ let parse_form_semicolon () =
       | Error _ -> ());
       Alcotest.(check (list string))
         (Printf.sprintf "method %s Form a" meth)
-        [ "1" ] (values_find r.Request.form "a"))
+        [ "1" ]
+        (values_find r.Request.form "a"))
     [ "POST"; "PATCH"; "PUT"; "GET" ]
 
 (* small substring helper (no Astring dep). *)
@@ -105,7 +125,9 @@ let str_contains haystack needle =
   if nl = 0 then true
   else
     let rec go i =
-      if i + nl > hl then false else if String.sub haystack i nl = needle then true else go (i + 1)
+      if i + nl > hl then false
+      else if String.sub haystack i nl = needle then true
+      else go (i + 1)
     in
     go 0
 
@@ -114,7 +136,9 @@ let parse_form_unknown_content_type () =
   let check name ?content_type want_err =
     let r =
       let header = Header.create () in
-      (match content_type with Some ct -> Header.set header "Content-Type" ct | None -> ());
+      (match content_type with
+      | Some ct -> Header.set header "Content-Type" ct
+      | None -> ());
       {
         Request.meth = "POST";
         url = Uri.of_string "http://x/";
@@ -140,15 +164,18 @@ let parse_form_unknown_content_type () =
     match (res, want_err) with
     | Ok (), None -> ()
     | Error e, Some sub ->
-        Alcotest.(check bool) (name ^ " err substr") true
+        Alcotest.(check bool)
+          (name ^ " err substr") true
           (str_contains (Form.error_to_string e) sub)
     | Ok (), Some w -> Alcotest.failf "%s: want error %S, got success" name w
     | Error e, None ->
-        Alcotest.failf "%s: want success, got error %S" name (Form.error_to_string e)
+        Alcotest.failf "%s: want success, got error %S" name
+          (Form.error_to_string e)
   in
   check "text" ~content_type:"text/plain" None;
   check "empty" None;
-  check "boundary" ~content_type:"text/plain; boundary=" (Some "invalid media parameter");
+  check "boundary" ~content_type:"text/plain; boundary="
+    (Some "invalid media parameter");
   check "unknown" ~content_type:"application/unknown" None
 
 let multipart_boundary = "foo123"
@@ -173,25 +200,35 @@ let multipart_body () =
 let multipart () =
   let r =
     make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:(Printf.sprintf {|multipart/form-data; boundary="%s"|} multipart_boundary)
+      ~content_type:
+        (Printf.sprintf {|multipart/form-data; boundary="%s"|}
+           multipart_boundary)
       ~body:(multipart_body ()) ()
   in
   (match run (Form.parse_multipart_form r ~max_memory:10000L) with
   | Ok () -> ()
-  | Error e -> Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
+  | Error e ->
+      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
   (* text field merged into Form and PostForm. *)
-  Alcotest.(check string) "field1 in Form" "value1" (values_get r.Request.form "field1");
-  Alcotest.(check string) "field1 in PostForm" "value1" (values_get r.Request.post_form "field1");
+  Alcotest.(check string)
+    "field1 in Form" "value1"
+    (values_get r.Request.form "field1");
+  Alcotest.(check string)
+    "field1 in PostForm" "value1"
+    (values_get r.Request.post_form "field1");
   (* multipart_form.value also holds it. *)
   (match r.Request.multipart_form with
   | None -> Alcotest.fail "multipart_form is None"
-  | Some mf -> Alcotest.(check string) "field1 in mf.value" "value1" (Values.get mf.Request.value "field1"));
+  | Some mf ->
+      Alcotest.(check string)
+        "field1 in mf.value" "value1"
+        (Values.get mf.Request.value "field1"));
   (* file part. *)
   match run (Form.form_file r "file") with
   | None -> Alcotest.fail "FormFile file is None"
   | Some (fn, content) ->
-    Alcotest.(check string) "filename" "hello.txt" fn;
-    Alcotest.(check string) "file content" "file-contents-here" content
+      Alcotest.(check string) "filename" "hello.txt" fn;
+      Alcotest.(check string) "file content" "file-contents-here" content
 
 (* ---- TestParseMultipartFormFilename (Issue 45789): strip directory path. *)
 let multipart_filename () =
@@ -208,7 +245,8 @@ let multipart_filename () =
       ]
   in
   let r =
-    make_req ~meth:"POST" ~url:"http://x/" ~content_type:"multipart/form-data; boundary=xxx" ~body ()
+    make_req ~meth:"POST" ~url:"http://x/"
+      ~content_type:"multipart/form-data; boundary=xxx" ~body ()
   in
   match run (Form.form_file r "file") with
   | None -> Alcotest.fail "FormFile file is None"
@@ -219,10 +257,18 @@ let multipart_filename () =
 let form_value_lazy () =
   let body =
     String.concat "\r\n"
-      [ "--bnd"; {|Content-Disposition: form-data; name="key"|}; ""; "val"; "--bnd--"; "" ]
+      [
+        "--bnd";
+        {|Content-Disposition: form-data; name="key"|};
+        "";
+        "val";
+        "--bnd--";
+        "";
+      ]
   in
   let r =
-    make_req ~meth:"POST" ~url:"http://x/" ~content_type:"multipart/form-data; boundary=bnd" ~body ()
+    make_req ~meth:"POST" ~url:"http://x/"
+      ~content_type:"multipart/form-data; boundary=bnd" ~body ()
   in
   (* form is None until FormValue forces parsing. *)
   Alcotest.(check bool) "form unparsed before" true (r.Request.form = None);
@@ -237,7 +283,8 @@ let values_encode () =
   Values.add v "bar" "baz";
   Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Values.encode v);
   Values.set v "foo" "x y";
-  Alcotest.(check string) "encode space->plus" "bar=baz&foo=x+y" (Values.encode v)
+  Alcotest.(check string)
+    "encode space->plus" "bar=baz&foo=x+y" (Values.encode v)
 
 (* Result migration T6: ParseMultipartForm on a non-multipart request returns
    [Error Not_multipart] (was a raised [Not_multipart]). *)
@@ -248,7 +295,8 @@ let parse_non_multipart () =
   in
   (match run (Form.parse_multipart_form r ~max_memory:10000L) with
   | Error Form.Not_multipart -> ()
-  | Error (Form.Form m) -> Alcotest.failf "expected Not_multipart, got Form %S" m
+  | Error (Form.Form m) ->
+      Alcotest.failf "expected Not_multipart, got Form %S" m
   | Ok () -> Alcotest.fail "expected Error Not_multipart, got Ok");
   (* No Content-Type at all is also Not_multipart. *)
   let r2 = make_req ~meth:"POST" ~url:"http://x/" ~body:"a=b" () in
@@ -259,9 +307,11 @@ let parse_non_multipart () =
 let tests =
   [
     Alcotest.test_case "parse_urlencoded" `Quick parse_urlencoded;
-    Alcotest.test_case "parse_form_query_methods" `Quick parse_form_query_methods;
+    Alcotest.test_case "parse_form_query_methods" `Quick
+      parse_form_query_methods;
     Alcotest.test_case "parse_form_semicolon" `Quick parse_form_semicolon;
-    Alcotest.test_case "parse_form_unknown_content_type" `Quick parse_form_unknown_content_type;
+    Alcotest.test_case "parse_form_unknown_content_type" `Quick
+      parse_form_unknown_content_type;
     Alcotest.test_case "parse_non_multipart" `Quick parse_non_multipart;
     Alcotest.test_case "multipart" `Quick multipart;
     Alcotest.test_case "multipart_filename" `Quick multipart_filename;

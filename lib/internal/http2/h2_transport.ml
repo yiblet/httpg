@@ -1,7 +1,6 @@
 (* Port of the client subset of go/src/net/http/internal/http2/transport.go and
    client_conn_pool.go. See h2_transport.mli for the goroutine -> Lwt mapping. *)
 
-
 let ( let* ) = Lwt.bind
 
 module F = H2_frame
@@ -23,19 +22,19 @@ type client_stream = {
   (* per-stream outbound + inbound flow control (Go cs.flow / cs.inflow). *)
   flow : H2_flow.outflow;
   inflow : H2_flow.inflow;
-  mutable bytes_remain : int;  (* -1 means unknown; declared Content-Length. *)
+  mutable bytes_remain : int; (* -1 means unknown; declared Content-Length. *)
   (* response: set when headers received, resolves resp_recv. *)
   mutable res : Api.client_response option;
-  resp_recv : unit Lwt_condition.t;  (* broadcast when [res] is set *)
+  resp_recv : unit Lwt_condition.t; (* broadcast when [res] is set *)
   mutable resp_recv_done : bool;
-  peer_closed : unit Lwt_condition.t;  (* broadcast on END_STREAM *)
+  peer_closed : unit Lwt_condition.t; (* broadcast on END_STREAM *)
   mutable peer_closed_done : bool;
   (* abort: set + broadcast on stream error / RST / GOAWAY. *)
   mutable abort_err : exn option;
   abort : unit Lwt_condition.t;
-  mutable past_headers : bool;  (* got the first MetaHeadersFrame *)
-  mutable read_closed : bool;  (* peer sent END_STREAM *)
-  mutable read_aborted : bool;  (* read loop reset the stream *)
+  mutable past_headers : bool; (* got the first MetaHeadersFrame *)
+  mutable read_closed : bool; (* peer sent END_STREAM *)
+  mutable read_aborted : bool; (* read loop reset the stream *)
   mutable is_head : bool;
 }
 
@@ -59,8 +58,9 @@ type client_conn = {
   mutable next_stream_id : int;
   mutable max_frame_size : int;
   mutable max_concurrent_streams : int;
-  mutable initial_window_size : int;  (* peer's SETTINGS_INITIAL_WINDOW_SIZE *)
-  mutable initial_stream_recv_window : int;  (* our advertised per-stream window *)
+  mutable initial_window_size : int; (* peer's SETTINGS_INITIAL_WINDOW_SIZE *)
+  mutable initial_stream_recv_window : int;
+      (* our advertised per-stream window *)
   mutable closed : bool;
   mutable closing : bool;
   mutable goaway : F.goaway_frame option;
@@ -281,13 +281,13 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
   let status_code =
     match int_of_string_opt !status with
     | Some n -> n
-    | None -> raise (Malformed_response "malformed non-numeric status pseudo header")
+    | None ->
+        raise (Malformed_response "malformed non-numeric status pseudo header")
   in
   (* Content-Length. *)
   let content_length =
     match Header.values header "Content-Length" with
-    | [ cl ] -> (
-        match Int64.of_string_opt cl with Some n -> n | None -> -1L)
+    | [ cl ] -> ( match Int64.of_string_opt cl with Some n -> n | None -> -1L)
     | [] -> if stream_ended && not cs.is_head then 0L else -1L
     | _ -> -1L
   in
@@ -303,9 +303,7 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
             (fun () ->
               let* s = H2_pipe.read cs.buf_pipe 4096 in
               if s = "" then Lwt.return None else Lwt.return (Some s))
-            (function
-              | End_of_file -> Lwt.return None
-              | e -> Lwt.fail e))
+            (function End_of_file -> Lwt.return None | e -> Lwt.fail e))
     end
   in
   (* Api.client_response: the status text, proto, and request back-pointer are
@@ -356,7 +354,8 @@ let process_headers cc (mf : F.meta_headers_frame) : unit Lwt.t =
           (Stream_aborted (Failure "headers after END_STREAM"));
         Lwt.return_unit)
       else if mf.truncated then (
-        end_stream_error cc cs (Stream_aborted (Failure "response header list too large"));
+        end_stream_error cc cs
+          (Stream_aborted (Failure "response header list too large"));
         Lwt.return_unit)
       else if cs.past_headers then
         (* trailers: just end the stream (we don't surface trailers here). *)
@@ -373,8 +372,7 @@ let process_headers cc (mf : F.meta_headers_frame) : unit Lwt.t =
            the original HEADERS flags in mf.fh; END_STREAM is flag 0x1. *)
         let stream_ended = mf.fh.flags land H2.flag_end_stream <> 0 in
         match
-          try Ok (build_response cc cs mf ~stream_ended)
-          with e -> Error e
+          try Ok (build_response cc cs mf ~stream_ended) with e -> Error e
         with
         | Error e ->
             end_stream_error cc cs (Stream_aborted e);
@@ -399,18 +397,21 @@ let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit Lwt.t =
   let length = fh.length in
   match stream_by_id cc id with
   | None ->
-      if id >= cc.next_stream_id then Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
+      if id >= cc.next_stream_id then
+        Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
       else if length > 0 then begin
         (* return flow control for a canceled stream. *)
         let ok = H2_flow.inflow_take cc.conn_inflow length in
         let conn_add = H2_flow.inflow_add cc.conn_inflow length in
-        if not ok then Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
+        if not ok then
+          Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
         else send_window_update cc ~stream_id:0 ~incr:(Int32.to_int conn_add)
       end
       else Lwt.return_unit
   | Some cs ->
       if cs.read_closed then (
-        end_stream_error cc cs (Stream_aborted (Failure "DATA after END_STREAM"));
+        end_stream_error cc cs
+          (Stream_aborted (Failure "DATA after END_STREAM"));
         Lwt.return_unit)
       else if not cs.past_headers then (
         end_stream_error cc cs (Stream_aborted (Failure "DATA before HEADERS"));
@@ -418,18 +419,18 @@ let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit Lwt.t =
       else begin
         let data = df.data in
         let* () =
-          if length > 0 then begin
-            if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length) then
-              Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
+          if length > 0 then
+            begin if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length)
+            then Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
             else begin
               (* padding refund: length includes padding stripped from [data]. *)
               let refund = ref (length - String.length data) in
               let did_reset = ref false in
-              (if String.length data > 0 then
-                 try ignore (H2_pipe.write cs.buf_pipe data)
-                 with _ ->
-                   did_reset := true;
-                   refund := !refund + String.length data);
+              if String.length data > 0 then (
+                try ignore (H2_pipe.write cs.buf_pipe data)
+                with _ ->
+                  did_reset := true;
+                  refund := !refund + String.length data);
               let send_conn =
                 Int32.to_int (H2_flow.inflow_add cc.conn_inflow !refund)
               in
@@ -440,7 +441,7 @@ let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit Lwt.t =
               let* () = send_window_update cc ~stream_id:0 ~incr:send_conn in
               send_window_update cc ~stream_id:id ~incr:send_stream
             end
-          end
+            end
           else Lwt.return_unit
         in
         if df.end_stream then end_stream cc cs;
@@ -448,10 +449,12 @@ let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit Lwt.t =
       end
 
 let process_settings cc (sf : F.settings_frame) : unit Lwt.t =
-  if sf.ack then begin
-    if cc.want_settings_ack then (cc.want_settings_ack <- false; Lwt.return_unit)
+  if sf.ack then
+    begin if cc.want_settings_ack then (
+      cc.want_settings_ack <- false;
+      Lwt.return_unit)
     else Lwt.fail (H2_error.Connection_error H2_error.ProtocolError)
-  end
+    end
   else begin
     let seen_mcs = ref false in
     List.iter
@@ -488,11 +491,13 @@ let process_settings cc (sf : F.settings_frame) : unit Lwt.t =
 let process_window_update cc (fh : F.frame_header) (wf : F.window_update_frame)
     : unit Lwt.t =
   let id = fh.stream_id in
-  if id = 0 then begin
-    if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
+  if id = 0 then
+    begin if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
       Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
-    else (Lwt_condition.broadcast cc.cond (); Lwt.return_unit)
-  end
+    else (
+      Lwt_condition.broadcast cc.cond ();
+      Lwt.return_unit)
+    end
   else
     match stream_by_id cc id with
     | None -> Lwt.return_unit
@@ -500,7 +505,9 @@ let process_window_update cc (fh : F.frame_header) (wf : F.window_update_frame)
         if not (H2_flow.add cs.flow (Int32.of_int wf.increment)) then (
           end_stream_error cc cs (Stream_aborted (Failure "flow control"));
           Lwt.return_unit)
-        else (Lwt_condition.broadcast cc.cond (); Lwt.return_unit)
+        else (
+          Lwt_condition.broadcast cc.cond ();
+          Lwt.return_unit)
 
 let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
     unit Lwt.t =
@@ -508,7 +515,9 @@ let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
   | None -> Lwt.return_unit
   | Some cs ->
       let serr =
-        Stream_aborted (H2_error.Stream_error (H2_error.stream_error fh.stream_id rf.error_code))
+        Stream_aborted
+          (H2_error.Stream_error
+             (H2_error.stream_error fh.stream_id rf.error_code))
       in
       abort_stream cc cs serr;
       cs.read_aborted <- true;
@@ -584,7 +593,8 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
       (* enforce: first frame must be SETTINGS. *)
       let is_settings = match f with F.Settings _ -> true | _ -> false in
       if (not got_settings) && not is_settings then (
-        signal_reader_done cc (Some (H2_error.Connection_error H2_error.ProtocolError));
+        signal_reader_done cc
+          (Some (H2_error.Connection_error H2_error.ProtocolError));
         Lwt.return_unit)
       else
         let got_settings = got_settings || is_settings in
@@ -604,7 +614,9 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
                         (F.read_meta_headers cc.hdec (fh, hf) cc.ic)
                     in
                     (* preserve END_STREAM flag from the HEADERS frame. *)
-                    let mf = { mf with F.fh = { mf.F.fh with flags = fh.flags } } in
+                    let mf =
+                      { mf with F.fh = { mf.F.fh with flags = fh.flags } }
+                    in
                     process_headers cc mf
                 | F.Data (fh, df) -> process_data cc fh df
                 | F.Settings (_, sf) -> process_settings cc sf
@@ -632,8 +644,14 @@ let rec read_loop cc ~got_settings : unit Lwt.t =
 (* ---- new_client_conn ---- *)
 
 let new_client_conn ic oc : client_conn Lwt.t =
-  let initial_stream_recv_window = 4 lsl 20 (* 4 MiB, Go default per-stream *) in
-  let conn_recv_window = 1 lsl 30 (* 1 GiB, Go MaxReceiveBufferPerConnection *) in
+  let initial_stream_recv_window =
+    4 lsl 20
+    (* 4 MiB, Go default per-stream *)
+  in
+  let conn_recv_window =
+    1 lsl 30
+    (* 1 GiB, Go MaxReceiveBufferPerConnection *)
+  in
   let henc = Hpack.new_encoder () in
   (* response decoder: emit is replaced by read_meta_headers per call. *)
   let hdec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
@@ -674,7 +692,10 @@ let new_client_conn ic oc : client_conn Lwt.t =
   let initial_settings =
     [
       { H2.id = H2.Enable_push; value = 0l };
-      { H2.id = H2.Initial_window_size; value = Int32.of_int initial_stream_recv_window };
+      {
+        H2.id = H2.Initial_window_size;
+        value = Int32.of_int initial_stream_recv_window;
+      };
       { H2.id = H2.Max_frame_size; value = Int32.of_int (1 lsl 20) };
     ]
   in
@@ -693,7 +714,8 @@ let new_client_conn ic oc : client_conn Lwt.t =
   let rec wait_seen () =
     if cc.seen_settings then Lwt.return_unit
     else if cc.closed then
-      Lwt.fail (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
+      Lwt.fail
+        (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
     else
       let p1 = Lwt_condition.wait cc.seen_settings_cond in
       let p2 = Lwt_condition.wait cc.reader_done in
@@ -739,7 +761,10 @@ let await_response cc cs : Api.client_response Lwt.t =
         | Some e -> Lwt.fail e
         | None ->
             if cc.closed then
-              Lwt.fail (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
+              Lwt.fail
+                (match cc.reader_err with
+                | Some e -> e
+                | None -> Client_conn_closed)
             else
               let* () =
                 Lwt.choose
@@ -755,7 +780,8 @@ let await_response cc cs : Api.client_response Lwt.t =
 
 let round_trip cc (req : Api.client_request) : Api.client_response Lwt.t =
   if cc.closed || cc.closing then
-    Lwt.fail (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
+    Lwt.fail
+      (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
   else begin
     let is_head = req.creq_meth = "HEAD" in
     let acl = actual_content_length req in
@@ -816,8 +842,7 @@ let authority_of (req : Api.client_request) =
 let get_usable t authority =
   match Hashtbl.find_opt t.conns authority with
   | None -> None
-  | Some conns ->
-      List.find_opt (fun cc -> not (cc.closed || cc.closing)) conns
+  | Some conns -> List.find_opt (fun cc -> not (cc.closed || cc.closing)) conns
 
 let round_trip_pooled t ~connect (req : Api.client_request) :
     Api.client_response Lwt.t =
@@ -829,7 +854,9 @@ let round_trip_pooled t ~connect (req : Api.client_request) :
         let* ic, oc = connect authority in
         let* cc = new_client_conn ic oc in
         let existing =
-          match Hashtbl.find_opt t.conns authority with Some l -> l | None -> []
+          match Hashtbl.find_opt t.conns authority with
+          | Some l -> l
+          | None -> []
         in
         Hashtbl.replace t.conns authority (cc :: existing);
         Lwt.return cc

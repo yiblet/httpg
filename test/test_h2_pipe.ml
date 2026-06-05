@@ -26,7 +26,10 @@ let read_all (p : Pipe.t) : (string * exn) Lwt.t =
   let buf = Buffer.create 16 in
   let rec loop () =
     Lwt.catch
-      (fun () -> Lwt.bind (Pipe.read p 4096) (fun s -> Buffer.add_string buf s; loop ()))
+      (fun () ->
+        Lwt.bind (Pipe.read p 4096) (fun s ->
+            Buffer.add_string buf s;
+            loop ()))
       (fun e -> Lwt.return (Buffer.contents buf, e))
   in
   loop ()
@@ -38,7 +41,8 @@ let test_pipe_close () =
      Pipe.close_with_error p Err_a;
      Pipe.close_with_error p Err_b;
      Lwt.catch
-       (fun () -> Lwt.bind (Pipe.read p 1) (fun _ -> Alcotest.fail "expected error"))
+       (fun () ->
+         Lwt.bind (Pipe.read p 1) (fun _ -> Alcotest.fail "expected error"))
        (fun e ->
          Alcotest.(check bool) "err = a" true (e == Err_a);
          Lwt.return_unit))
@@ -142,8 +146,7 @@ let test_blocked_read_unblocked_by_close () =
      Alcotest.(check bool) "read is blocked" true (Lwt.is_sleeping r);
      Pipe.close_with_error p Test_error;
      Lwt.catch
-       (fun () ->
-         Lwt.bind r (fun _ -> Alcotest.fail "expected close error"))
+       (fun () -> Lwt.bind r (fun _ -> Alcotest.fail "expected close error"))
        (fun e ->
          Alcotest.(check bool) "err = test error" true (e == Test_error);
          Lwt.return_unit))
@@ -154,9 +157,15 @@ let tests =
     ("pipe_done_chan", `Quick, test_pipe_done_chan);
     ("pipe_done_chan_err_first", `Quick, test_pipe_done_chan_err_first);
     ("pipe_done_chan_break", `Quick, test_pipe_done_chan_break);
-    ("pipe_done_chan_break_err_first", `Quick, test_pipe_done_chan_break_err_first);
+    ( "pipe_done_chan_break_err_first",
+      `Quick,
+      test_pipe_done_chan_break_err_first );
     ("pipe_close_with_error", `Quick, test_pipe_close_with_error);
     ("pipe_break_with_error", `Quick, test_pipe_break_with_error);
-    ("blocked_read_unblocked_by_write", `Quick, test_blocked_read_unblocked_by_write);
-    ("blocked_read_unblocked_by_close", `Quick, test_blocked_read_unblocked_by_close);
+    ( "blocked_read_unblocked_by_write",
+      `Quick,
+      test_blocked_read_unblocked_by_write );
+    ( "blocked_read_unblocked_by_close",
+      `Quick,
+      test_blocked_read_unblocked_by_close );
   ]

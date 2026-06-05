@@ -20,10 +20,7 @@ end
 
 (* The http2 body abstraction (Go's io.ReadCloser body). *)
 module Body : sig
-  type t =
-    | Empty
-    | String of string
-    | Stream of (unit -> string option Lwt.t)
+  type t = Empty | String of string | Stream of (unit -> string option Lwt.t)
 
   val empty : t
   val of_string : string -> t

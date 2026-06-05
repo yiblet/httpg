@@ -20,7 +20,9 @@ let make_write_rst_stream stream_id : WS.frame_write_request =
 (* A DATA write request on stream [st] of [size] bytes, endStream true. *)
 let make_data_request (st : WS.stream) size : WS.frame_write_request =
   {
-    write = W.Write_data { stream_id = st.id; data = String.make size '\000'; end_stream = true };
+    write =
+      W.Write_data
+        { stream_id = st.id; data = String.make size '\000'; end_stream = true };
     stream = Some st;
   }
 
@@ -100,7 +102,11 @@ let test_data_split () =
     {
       write =
         W.Write_data
-          { stream_id = st.id; data = String.make (size - 16) '\000'; end_stream = true };
+          {
+            stream_id = st.id;
+            data = String.make (size - 16) '\000';
+            end_stream = true;
+          };
       stream = Some st;
     }
   in
@@ -135,7 +141,9 @@ let test_data_split () =
 let test_round_robin () =
   let max_frame_size = 16 in
   let ws = WS.create () in
-  let streams = Array.init 4 (fun i -> WS.make_stream ~max_frame_size (i + 1)) in
+  let streams =
+    Array.init 4 (fun i -> WS.make_stream ~max_frame_size (i + 1))
+  in
   Array.iteri
     (fun i st ->
       ignore (H2_flow.add st.WS.flow (Int32.of_int (1 lsl 20)));
@@ -172,8 +180,8 @@ let test_round_robin () =
     match WS.pop ws with
     | None -> ()
     | Some wr ->
-        Alcotest.(check int) "data size = maxFrameSize" max_frame_size
-          (WS.data_size wr);
+        Alcotest.(check int)
+          "data size = maxFrameSize" max_frame_size (WS.data_size wr);
         got := WS.stream_id wr :: !got;
         drain ()
   in
@@ -191,7 +199,8 @@ let test_flow_control_skip () =
   WS.push ws
     {
       write =
-        W.Write_data { stream_id = 1; data = String.make 10 'x'; end_stream = true };
+        W.Write_data
+          { stream_id = 1; data = String.make 10 'x'; end_stream = true };
       stream = Some s1;
     };
   (* Stream 3: has flow window. *)
@@ -201,12 +210,14 @@ let test_flow_control_skip () =
   WS.push ws
     {
       write =
-        W.Write_data { stream_id = 3; data = String.make 5 'y'; end_stream = true };
+        W.Write_data
+          { stream_id = 3; data = String.make 5 'y'; end_stream = true };
       stream = Some s3;
     };
   (* pop: stream 1 is blocked (no window), stream 3 delivers. *)
   (match WS.pop ws with
-  | Some wr -> Alcotest.(check int) "skipped blocked, got stream 3" 3 (WS.stream_id wr)
+  | Some wr ->
+      Alcotest.(check int) "skipped blocked, got stream 3" 3 (WS.stream_id wr)
   | None -> Alcotest.fail "expected stream 3 data");
   (* Now only stream 1 (blocked) remains -> nothing poppable. *)
   (match WS.pop ws with
@@ -229,14 +240,16 @@ let test_close_stream_drops () =
   WS.push ws
     {
       write =
-        W.Write_data { stream_id = 1; data = String.make 5 'z'; end_stream = true };
+        W.Write_data
+          { stream_id = 1; data = String.make 5 'z'; end_stream = true };
       stream = Some s1;
     };
   WS.close_stream ws 1;
   match WS.pop ws with
   | None -> ()
   | Some wr ->
-      Alcotest.failf "expected None after close, got stream %d" (WS.stream_id wr)
+      Alcotest.failf "expected None after close, got stream %d"
+        (WS.stream_id wr)
 
 let tests =
   [

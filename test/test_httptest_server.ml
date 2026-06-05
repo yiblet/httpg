@@ -9,7 +9,6 @@
 
 open Gohttp
 open Lwt.Infix
-
 module Ts = Httptest.Server
 
 (* ---- HttptestServer.server_get ---- *)
@@ -17,8 +16,7 @@ module Ts = Httptest.Server
    returns 200 and body "/foo". *)
 let server_get () =
   let handler =
-    Server.handler_func (fun w r ->
-        w.Server.write (Uri.path r.Request.url))
+    Server.handler_func (fun w r -> w.Server.write (Uri.path r.Request.url))
   in
   let run () =
     Ts.new_server handler >>= fun s ->
@@ -51,7 +49,8 @@ let server_tls () =
       (fun () -> Ts.close s)
   in
   let status, body, url = Lwt_main.run (Net.with_timeout 15. (run ())) in
-  Alcotest.(check bool) "url is https" true
+  Alcotest.(check bool)
+    "url is https" true
     (String.length url >= 8 && String.sub url 0 8 = "https://");
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "body" "hello" body
@@ -70,7 +69,7 @@ let server_close () =
     (* Sanity: it serves before close. *)
     let c = Ts.client s in
     Client.get c (Ts.url s) >>= fun resp ->
-    Body.drain resp.Response.body >>= fun () ->
+    Body.drain resp.Response.body >>= fun _ ->
     Ts.close s >>= fun () ->
     (* A fresh connect to the now-closed port must fail (refused). *)
     Lwt.catch
@@ -81,9 +80,7 @@ let server_close () =
         Lwt.return (resp.Response.status_code, false))
       (fun _ -> Lwt.return (resp.Response.status_code, true))
   in
-  let pre_status, refused =
-    Lwt_main.run (Net.with_timeout 10. (run ()))
-  in
+  let pre_status, refused = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "served 200 before close" 200 pre_status;
   Alcotest.(check bool) "connect refused after close" true refused
 

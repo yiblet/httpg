@@ -75,7 +75,9 @@ let test_post_echo () =
     rw.rw_flush ()
   in
   let client cc =
-    let req = mk_request ~meth:"POST" ~path:"/echo" ~body:(Api.Body.String "ping") () in
+    let req =
+      mk_request ~meth:"POST" ~path:"/echo" ~body:(Api.Body.String "ping") ()
+    in
     let* resp = H2_transport.round_trip cc req in
     let* body = Api.Body.read_all resp.cres_body in
     Lwt.return (resp.cres_status_code, body)

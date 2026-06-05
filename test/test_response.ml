@@ -9,7 +9,8 @@ let read_ok ?request ic =
 
 let read ?request s = Lwt_main.run (read_ok ?request (ic_of_string s))
 
-let body_of (r : Gohttp.Body.t Gohttp.Response.t) = Lwt_main.run (Gohttp.Body.read_all r.body)
+let body_of (r : Gohttp.Body.t Gohttp.Response.t) =
+  Lwt_main.run (Gohttp.Body.read_all r.body)
 
 let i64 = Int64.to_string
 
@@ -43,18 +44,26 @@ let no_content () =
 
 (* Unchunked with Content-Length. *)
 let content_length () =
-  let raw = "HTTP/1.0 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nBody here\n" in
+  let raw =
+    "HTTP/1.0 200 OK\r\n\
+     Content-Length: 10\r\n\
+     Connection: close\r\n\
+     \r\n\
+     Body here\n"
+  in
   let r = read raw in
   Alcotest.(check string) "content_length" "10" (i64 r.content_length);
   Alcotest.(check bool) "close" true r.close;
-  Alcotest.(check string) "cl header" "10" (Gohttp.Header.get r.header "Content-Length");
+  Alcotest.(check string)
+    "cl header" "10"
+    (Gohttp.Header.get r.header "Content-Length");
   Alcotest.(check string) "body" "Body here\n" (body_of r)
 
 (* Chunked, multiple chunks. *)
 let chunked () =
   let raw =
-    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ^ "0a\r\nBody here\n\r\n"
-    ^ "09\r\ncontinued\r\n" ^ "0\r\n\r\n"
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    ^ "0a\r\nBody here\n\r\n" ^ "09\r\ncontinued\r\n" ^ "0\r\n\r\n"
   in
   let r = read raw in
   Alcotest.(check (list string)) "te" [ "chunked" ] r.transfer_encoding;
@@ -85,10 +94,14 @@ let location () =
       ctx = Gohttp.Context.background;
     }
   in
-  let raw = "HTTP/1.1 302 Found\r\nLocation: /to\r\nContent-Length: 0\r\n\r\n" in
+  let raw =
+    "HTTP/1.1 302 Found\r\nLocation: /to\r\nContent-Length: 0\r\n\r\n"
+  in
   let r = read ~request raw in
   (match Gohttp.Response.location r with
-  | Some u -> Alcotest.(check string) "location" "http://example.com/to" (Uri.to_string u)
+  | Some u ->
+      Alcotest.(check string)
+        "location" "http://example.com/to" (Uri.to_string u)
   | None -> Alcotest.fail "expected location");
   let raw2 = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" in
   let r2 = read raw2 in

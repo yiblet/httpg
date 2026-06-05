@@ -14,7 +14,8 @@ let test_parse_query_typed () =
   let m, res = Values.parse_query "a=1&b=2" in
   (match res with
   | Ok () -> ()
-  | Error e -> Alcotest.failf "valid query returned Error %s" (Values.error_to_string e));
+  | Error e ->
+      Alcotest.failf "valid query returned Error %s" (Values.error_to_string e));
   Alcotest.(check string) "a" "1" (Values.get m "a");
   Alcotest.(check string) "b" "2" (Values.get m "b")
 

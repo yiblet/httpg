@@ -9,7 +9,8 @@ let multi name = { Pattern.s = name; wild = true; multi = true }
 let must_parse s =
   match Pattern.parse s with
   | Ok p -> p
-  | Error e -> Alcotest.failf "parse %S failed: %s" s (Pattern.error_to_string e)
+  | Error e ->
+      Alcotest.failf "parse %S failed: %s" s (Pattern.error_to_string e)
 
 (* equal: same as Go's pattern.equal — method, host, segments. *)
 let pat_equal (p1 : Pattern.t) (p2 : Pattern.t) =
@@ -17,65 +18,152 @@ let pat_equal (p1 : Pattern.t) (p2 : Pattern.t) =
 
 let segs_str segs =
   String.concat ";"
-    (List.map (fun s -> Printf.sprintf "{%S w=%b m=%b}" s.Pattern.s s.wild s.multi) segs)
+    (List.map
+       (fun s -> Printf.sprintf "{%S w=%b m=%b}" s.Pattern.s s.wild s.multi)
+       segs)
 
 (* TestParsePattern. *)
 let test_parse_pattern () =
   let cases =
     [
-      ("/", { Pattern.str = ""; method_ = ""; host = ""; segments = [ multi "" ] });
-      ("/a", { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "a" ] });
-      ("/a/", { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "a"; multi "" ] });
+      ( "/",
+        { Pattern.str = ""; method_ = ""; host = ""; segments = [ multi "" ] }
+      );
+      ( "/a",
+        { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "a" ] } );
+      ( "/a/",
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit "a"; multi "" ];
+        } );
       ( "/path/to/something",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ lit "path"; lit "to"; lit "something" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit "path"; lit "to"; lit "something" ];
+        } );
       ( "/{w1}/lit/{w2}",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ wild "w1"; lit "lit"; wild "w2" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ wild "w1"; lit "lit"; wild "w2" ];
+        } );
       ( "/{w1}/lit/{w2}/",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ wild "w1"; lit "lit"; wild "w2"; multi "" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ wild "w1"; lit "lit"; wild "w2"; multi "" ];
+        } );
       ( "example.com/",
-        { Pattern.str = ""; method_ = ""; host = "example.com"; segments = [ multi "" ] } );
-      ("GET /", { Pattern.str = ""; method_ = "GET"; host = ""; segments = [ multi "" ] });
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "example.com";
+          segments = [ multi "" ];
+        } );
+      ( "GET /",
+        {
+          Pattern.str = "";
+          method_ = "GET";
+          host = "";
+          segments = [ multi "" ];
+        } );
       ( "POST example.com/foo/{w}",
-        { Pattern.str = ""; method_ = "POST"; host = "example.com";
-          segments = [ lit "foo"; wild "w" ] } );
-      ("/{$}", { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "/" ] });
+        {
+          Pattern.str = "";
+          method_ = "POST";
+          host = "example.com";
+          segments = [ lit "foo"; wild "w" ];
+        } );
+      ( "/{$}",
+        { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "/" ] } );
       ( "DELETE example.com/a/{foo12}/{$}",
-        { Pattern.str = ""; method_ = "DELETE"; host = "example.com";
-          segments = [ lit "a"; wild "foo12"; lit "/" ] } );
+        {
+          Pattern.str = "";
+          method_ = "DELETE";
+          host = "example.com";
+          segments = [ lit "a"; wild "foo12"; lit "/" ];
+        } );
       ( "/foo/{$}",
-        { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "foo"; lit "/" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit "foo"; lit "/" ];
+        } );
       ( "/{a}/foo/{rest...}",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ wild "a"; lit "foo"; multi "rest" ] } );
-      ("//", { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit ""; multi "" ] });
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ wild "a"; lit "foo"; multi "rest" ];
+        } );
+      ( "//",
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit ""; multi "" ];
+        } );
       ( "/foo///./../bar",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ lit "foo"; lit ""; lit ""; lit "."; lit ".."; lit "bar" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit "foo"; lit ""; lit ""; lit "."; lit ".."; lit "bar" ];
+        } );
       ( "a.com/foo//",
-        { Pattern.str = ""; method_ = ""; host = "a.com";
-          segments = [ lit "foo"; lit ""; multi "" ] } );
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "a.com";
+          segments = [ lit "foo"; lit ""; multi "" ];
+        } );
       ( "/%61%62/%7b/%",
-        { Pattern.str = ""; method_ = ""; host = "";
-          segments = [ lit "ab"; lit "{"; lit "%" ] } );
-      ("GET\t  /", { Pattern.str = ""; method_ = "GET"; host = ""; segments = [ multi "" ] });
+        {
+          Pattern.str = "";
+          method_ = "";
+          host = "";
+          segments = [ lit "ab"; lit "{"; lit "%" ];
+        } );
+      ( "GET\t  /",
+        {
+          Pattern.str = "";
+          method_ = "GET";
+          host = "";
+          segments = [ multi "" ];
+        } );
       ( "POST \t  example.com/foo/{w}",
-        { Pattern.str = ""; method_ = "POST"; host = "example.com";
-          segments = [ lit "foo"; wild "w" ] } );
+        {
+          Pattern.str = "";
+          method_ = "POST";
+          host = "example.com";
+          segments = [ lit "foo"; wild "w" ];
+        } );
       ( "DELETE    \texample.com/a/{foo12}/{$}",
-        { Pattern.str = ""; method_ = "DELETE"; host = "example.com";
-          segments = [ lit "a"; wild "foo12"; lit "/" ] } );
+        {
+          Pattern.str = "";
+          method_ = "DELETE";
+          host = "example.com";
+          segments = [ lit "a"; wild "foo12"; lit "/" ];
+        } );
     ]
   in
   List.iter
     (fun (in_, want) ->
       let got = must_parse in_ in
       if not (pat_equal got want) then
-        Alcotest.failf "%S:\n got  method=%S host=%S segs=%s\n want method=%S host=%S segs=%s"
-          in_ got.method_ got.host (segs_str got.segments) want.Pattern.method_ want.host
-          (segs_str want.segments))
+        Alcotest.failf
+          "%S:\n\
+          \ got  method=%S host=%S segs=%s\n\
+          \ want method=%S host=%S segs=%s"
+          in_ got.method_ got.host (segs_str got.segments) want.Pattern.method_
+          want.host (segs_str want.segments))
     cases
 
 (* TestParsePatternError. *)
@@ -107,17 +195,22 @@ let test_parse_pattern_error () =
   in
   let contains haystack needle =
     let nl = String.length needle and hl = String.length haystack in
-    let rec loop i = if i + nl > hl then false else if String.sub haystack i nl = needle then true else loop (i + 1) in
+    let rec loop i =
+      if i + nl > hl then false
+      else if String.sub haystack i nl = needle then true
+      else loop (i + 1)
+    in
     loop 0
   in
   List.iter
     (fun (in_, want) ->
       match Pattern.parse in_ with
-      | Ok _ -> Alcotest.failf "%S: expected error containing %S, got Ok" in_ want
+      | Ok _ ->
+          Alcotest.failf "%S: expected error containing %S, got Ok" in_ want
       | Error e ->
-        let e = Pattern.error_to_string e in
-        if not (contains e want) then
-          Alcotest.failf "%S: got error %S, want containing %S" in_ e want)
+          let e = Pattern.error_to_string e in
+          if not (contains e want) then
+            Alcotest.failf "%S: got error %S, want containing %S" in_ e want)
     cases
 
 (* Representative bad patterns map to the right typed [Pattern.error] arm; a
@@ -128,22 +221,41 @@ let test_parse_errors_typed () =
     | Ok _ -> Alcotest.failf "%s: %S parsed Ok, expected Error" name in_
     | Error e ->
         if not (pred e) then
-          Alcotest.failf "%s: %S got %s, wrong arm" name in_ (Pattern.error_to_string e)
+          Alcotest.failf "%s: %S got %s, wrong arm" name in_
+            (Pattern.error_to_string e)
   in
   check "empty" "" (function Pattern.Empty_pattern -> true | _ -> false);
-  check "method" "A=B /" (function Pattern.Invalid_method _ -> true | _ -> false);
-  check "missing_path" " " (function Pattern.Missing_path _ -> true | _ -> false);
-  check "host_brace" "{a}/b" (function Pattern.Host_has_brace _ -> true | _ -> false);
-  check "unclean" "GET //" (function Pattern.Unclean_path _ -> true | _ -> false);
-  check "bad_wildcard" "/x{w}" (function Pattern.Bad_wildcard _ -> true | _ -> false);
-  check "empty_wildcard" "/{}" (function Pattern.Bad_wildcard _ -> true | _ -> false);
-  check "dup_wildcard" "/a/{x}/b/{x...}"
-    (function Pattern.Duplicate_wildcard (_, "x") -> true | _ -> false);
+  check "method" "A=B /" (function
+    | Pattern.Invalid_method _ -> true
+    | _ -> false);
+  check "missing_path" " " (function
+    | Pattern.Missing_path _ -> true
+    | _ -> false);
+  check "host_brace" "{a}/b" (function
+    | Pattern.Host_has_brace _ -> true
+    | _ -> false);
+  check "unclean" "GET //" (function
+    | Pattern.Unclean_path _ -> true
+    | _ -> false);
+  check "bad_wildcard" "/x{w}" (function
+    | Pattern.Bad_wildcard _ -> true
+    | _ -> false);
+  check "empty_wildcard" "/{}" (function
+    | Pattern.Bad_wildcard _ -> true
+    | _ -> false);
+  check "dup_wildcard" "/a/{x}/b/{x...}" (function
+    | Pattern.Duplicate_wildcard (_, "x") -> true
+    | _ -> false);
   match Pattern.parse "GET /a/{id}" with
   | Ok _ -> ()
-  | Error e -> Alcotest.failf "valid pattern returned Error %s" (Pattern.error_to_string e)
+  | Error e ->
+      Alcotest.failf "valid pattern returned Error %s"
+        (Pattern.error_to_string e)
 
-let rel_testable = Alcotest.testable (fun fmt r -> Format.pp_print_string fmt (Pattern.relationship_to_string r)) ( = )
+let rel_testable =
+  Alcotest.testable
+    (fun fmt r -> Format.pp_print_string fmt (Pattern.relationship_to_string r))
+    ( = )
 
 (* TestCompareMethods (with commutative inverse check). *)
 let test_compare_methods () =
@@ -162,10 +274,14 @@ let test_compare_methods () =
   List.iter
     (fun (p1s, p2s, want) ->
       let p1 = must_parse p1s and p2 = must_parse p2s in
-      Alcotest.check rel_testable (Printf.sprintf "%s vs %s" p1s p2s) want
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s vs %s" p1s p2s)
+        want
         (Pattern.compare_methods p1 p2);
-      Alcotest.check rel_testable (Printf.sprintf "%s vs %s (inv)" p2s p1s)
-        (Pattern.inverse_relationship want) (Pattern.compare_methods p2 p1))
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s vs %s (inv)" p2s p1s)
+        (Pattern.inverse_relationship want)
+        (Pattern.compare_methods p2 p1))
     cases
 
 (* TestComparePaths (subset of representative + edge rows, with inverse + self checks). *)
@@ -205,14 +321,22 @@ let test_compare_paths () =
   List.iter
     (fun (p1s, p2s, want) ->
       let p1 = must_parse p1s and p2 = must_parse p2s in
-      Alcotest.check rel_testable (Printf.sprintf "%s self" p1s) Pattern.Equivalent
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s self" p1s)
+        Pattern.Equivalent
         (Pattern.compare_paths p1 p1);
-      Alcotest.check rel_testable (Printf.sprintf "%s self" p2s) Pattern.Equivalent
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s self" p2s)
+        Pattern.Equivalent
         (Pattern.compare_paths p2 p2);
-      Alcotest.check rel_testable (Printf.sprintf "%s vs %s" p1s p2s) want
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s vs %s" p1s p2s)
+        want
         (Pattern.compare_paths p1 p2);
-      Alcotest.check rel_testable (Printf.sprintf "%s vs %s (inv)" p2s p1s)
-        (Pattern.inverse_relationship want) (Pattern.compare_paths p2 p1))
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s vs %s (inv)" p2s p1s)
+        (Pattern.inverse_relationship want)
+        (Pattern.compare_paths p2 p1))
     cases
 
 (* TestConflictsWith (with commutativity). *)
@@ -245,8 +369,13 @@ let test_conflicts_with () =
   List.iter
     (fun (p1s, p2s, want) ->
       let p1 = must_parse p1s and p2 = must_parse p2s in
-      Alcotest.(check bool) (Printf.sprintf "%s cw %s" p1s p2s) want (Pattern.conflicts_with p1 p2);
-      Alcotest.(check bool) (Printf.sprintf "%s cw %s (comm)" p2s p1s) want
+      Alcotest.(check bool)
+        (Printf.sprintf "%s cw %s" p1s p2s)
+        want
+        (Pattern.conflicts_with p1 p2);
+      Alcotest.(check bool)
+        (Printf.sprintf "%s cw %s (comm)" p2s p1s)
+        want
         (Pattern.conflicts_with p2 p1))
     cases
 
@@ -257,21 +386,34 @@ let test_describe_conflict () =
       ("/a/{x}", "/a/{y}", "the same requests");
       ("/", "/{m...}", "the same requests");
       ("/a/{x}", "/{y}/b", "both match some paths");
-      ("/a", "GET /{x}", "matches more methods than GET /{x}, but has a more specific path pattern");
-      ("GET /a", "HEAD /", "matches more methods than HEAD /, but has a more specific path pattern");
-      ("POST /", "/a", "matches fewer methods than /a, but has a more general path pattern");
+      ( "/a",
+        "GET /{x}",
+        "matches more methods than GET /{x}, but has a more specific path \
+         pattern" );
+      ( "GET /a",
+        "HEAD /",
+        "matches more methods than HEAD /, but has a more specific path pattern"
+      );
+      ( "POST /",
+        "/a",
+        "matches fewer methods than /a, but has a more general path pattern" );
     ]
   in
   let contains haystack needle =
     let nl = String.length needle and hl = String.length haystack in
-    let rec loop i = if i + nl > hl then false else if String.sub haystack i nl = needle then true else loop (i + 1) in
+    let rec loop i =
+      if i + nl > hl then false
+      else if String.sub haystack i nl = needle then true
+      else loop (i + 1)
+    in
     loop 0
   in
   List.iter
     (fun (p1s, p2s, want) ->
       let got = Pattern.describe_conflict (must_parse p1s) (must_parse p2s) in
       if not (contains got want) then
-        Alcotest.failf "%s vs %s:\ngot:\n%s\nwhich does not contain %S" p1s p2s got want)
+        Alcotest.failf "%s vs %s:\ngot:\n%s\nwhich does not contain %S" p1s p2s
+          got want)
     cases
 
 (* TestCommonPath. *)
@@ -293,9 +435,13 @@ let test_common_path () =
   List.iter
     (fun (p1s, p2s, want) ->
       let p1 = must_parse p1s and p2 = must_parse p2s in
-      Alcotest.check rel_testable (Printf.sprintf "%s overlaps %s" p1s p2s) Pattern.Overlaps
+      Alcotest.check rel_testable
+        (Printf.sprintf "%s overlaps %s" p1s p2s)
+        Pattern.Overlaps
         (Pattern.compare_paths p1 p2);
-      Alcotest.(check string) (Printf.sprintf "common %s %s" p1s p2s) want
+      Alcotest.(check string)
+        (Printf.sprintf "common %s %s" p1s p2s)
+        want
         (Pattern.common_path p1 p2))
     cases
 
@@ -337,7 +483,9 @@ let test_difference_path () =
       if rel <> Pattern.Overlaps && rel <> Pattern.More_general then
         Alcotest.failf "%s vs %s are %s, need overlaps or moreGeneral" p1s p2s
           (Pattern.relationship_to_string rel);
-      Alcotest.(check string) (Printf.sprintf "diff %s %s" p1s p2s) want
+      Alcotest.(check string)
+        (Printf.sprintf "diff %s %s" p1s p2s)
+        want
         (Pattern.difference_path p1 p2))
     cases
 

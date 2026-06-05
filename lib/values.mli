@@ -1,58 +1,56 @@
 (* Port of go/src/net/url/url.go [Values] (= map[string][]string) and
    ParseQuery. Mirrors Go's map with a Hashtbl per the project rule. *)
 
-(** Go's [url.Values]: a map from key to an ordered list of values. *)
 type t = (string, string list) Hashtbl.t
+(** Go's [url.Values]: a map from key to an ordered list of values. *)
 
-(** A fresh, empty [Values]. *)
 val create : unit -> t
+(** A fresh, empty [Values]. *)
 
-(** [Values.Get]: the first value for the key, or "". *)
 val get : t -> string -> string
+(** [Values.Get]: the first value for the key, or "". *)
 
-(** [Values.Set]: replace any existing values for the key. *)
 val set : t -> string -> string -> unit
+(** [Values.Set]: replace any existing values for the key. *)
 
-(** [Values.Add]: append a value to the key's list. *)
 val add : t -> string -> string -> unit
+(** [Values.Add]: append a value to the key's list. *)
 
-(** [Values.Del]: delete the key. *)
 val del : t -> string -> unit
+(** [Values.Del]: delete the key. *)
 
-(** [Values.Has]: whether the key is present. *)
 val has : t -> string -> bool
+(** [Values.Has]: whether the key is present. *)
 
-(** All values for the key (Go's [v[key]]); [] when absent. *)
 val find : t -> string -> string list
+(** All values for the key (Go's [v[key]]); [] when absent. *)
 
-(** Number of distinct keys ([len(v)]). *)
 val length : t -> int
+(** Number of distinct keys ([len(v)]). *)
 
-(** [copyValues ~dst ~src] (request.go): append each src value to dst. *)
 val copy_values : dst:t -> src:t -> unit
+(** [copyValues ~dst ~src] (request.go): append each src value to dst. *)
 
-(** [QueryUnescape]: percent-decode a query component ('+' -> space). *)
 val query_unescape : string -> string
+(** [QueryUnescape]: percent-decode a query component ('+' -> space). *)
 
-(** [QueryEscape]: percent-encode a query component (space -> '+'). *)
 val query_escape : string -> string
+(** [QueryEscape]: percent-encode a query component (space -> '+'). *)
 
 (** A query-parse failure (Go's [ParseQuery] error cases). [Invalid_escape]
-    carries the offending escape fragment; it is declared for fidelity with
-    Go's [QueryUnescape] error, though this port's [query_unescape] (via the
-    [uri] lib) does not currently surface bad-escape errors. *)
-type error =
-  | Invalid_semicolon_separator
-  | Invalid_escape of string
+    carries the offending escape fragment; it is declared for fidelity with Go's
+    [QueryUnescape] error, though this port's [query_unescape] (via the [uri]
+    lib) does not currently surface bad-escape errors. *)
+type error = Invalid_semicolon_separator | Invalid_escape of string
 
-(** Render [error] as Go's faithful message. *)
 val error_to_string : error -> string
+(** Render [error] as Go's faithful message. *)
 
-(** [ParseQuery query]: a non-nil map plus the first decode error, if any. *)
 val parse_query : string -> t * (unit, error) result
+(** [ParseQuery query]: a non-nil map plus the first decode error, if any. *)
 
-(** [parseQuery m query]: parse into an existing map (Go's internal helper). *)
 val parse_query_into : t -> string -> (unit, error) result
+(** [parseQuery m query]: parse into an existing map (Go's internal helper). *)
 
-(** [Values.Encode]: "k=v&..." sorted by key. *)
 val encode : t -> string
+(** [Values.Encode]: "k=v&..." sorted by key. *)

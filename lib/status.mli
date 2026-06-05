@@ -66,6 +66,6 @@ val status_loop_detected : int
 val status_not_extended : int
 val status_network_authentication_required : int
 
+val status_text : int -> string
 (** [status_text code] returns a text for the HTTP status code. It returns the
     empty string if the code is unknown. *)
-val status_text : int -> string

@@ -10,9 +10,11 @@ let capture (f : Lwt_io.output_channel -> unit Lwt.t) : string =
            Buffer.add_bytes buf b;
            Lwt.return len)
      in
-     Lwt.bind (f oc) (fun () -> Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
+     Lwt.bind (f oc) (fun () ->
+         Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
 
-let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Gohttp.Body.t Gohttp.Request.t =
+let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
+    Gohttp.Body.t Gohttp.Request.t =
   {
     Gohttp.Request.meth;
     url = Uri.of_string "/";
@@ -40,8 +42,9 @@ let header pairs =
   h
 
 let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Gohttp.Header.create ()) ?(body = Gohttp.Body.Empty) ?(content_length = 0L)
-    ?(transfer_encoding = []) ?(close = false) ?request () : Gohttp.Body.t Gohttp.Response.t =
+    ?(header = Gohttp.Header.create ()) ?(body = Gohttp.Body.Empty)
+    ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?request
+    () : Gohttp.Body.t Gohttp.Response.t =
   {
     Gohttp.Response.status;
     status_code;
@@ -59,69 +62,107 @@ let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
   }
 
 let write r = capture (fun oc -> Gohttp.Io.write_response oc r)
-
 let body s = Gohttp.Body.of_string s
 
 let http10_identity () =
   let r =
-    resp ~status_code:503 ~proto_minor:0 ~request:(dummy_req ()) ~body:(body "abcdef")
-      ~content_length:6L ()
+    resp ~status_code:503 ~proto_minor:0 ~request:(dummy_req ())
+      ~body:(body "abcdef") ~content_length:6L ()
   in
-  Alcotest.(check string) "503" "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 6\r\n\r\nabcdef" (write r)
+  Alcotest.(check string)
+    "503" "HTTP/1.0 503 Service Unavailable\r\nContent-Length: 6\r\n\r\nabcdef"
+    (write r)
 
 let http10_no_length () =
-  let r = resp ~status_code:200 ~proto_minor:0 ~request:(dummy_req ()) ~body:(body "abcdef") ~content_length:(-1L) () in
+  let r =
+    resp ~status_code:200 ~proto_minor:0 ~request:(dummy_req ())
+      ~body:(body "abcdef") ~content_length:(-1L) ()
+  in
   Alcotest.(check string) "1.0 no len" "HTTP/1.0 200 OK\r\n\r\nabcdef" (write r)
 
 let http11_unknown_close () =
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~body:(body "abcdef")
-      ~content_length:(-1L) ~close:true ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~body:(body "abcdef") ~content_length:(-1L) ~close:true ()
   in
-  Alcotest.(check string) "1.1 close" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
+  Alcotest.(check string)
+    "1.1 close" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
 
 let http11_unknown_no_close () =
   (* Go forces Connection: close for HTTP/1.1 unknown length. *)
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~body:(body "abcdef")
-      ~content_length:(-1L) ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~body:(body "abcdef") ~content_length:(-1L) ()
   in
-  Alcotest.(check string) "1.1 forced close" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
+  Alcotest.(check string)
+    "1.1 forced close" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef"
+    (write r)
 
 let http11_chunked () =
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~body:(body "abcdef")
-      ~content_length:(-1L) ~transfer_encoding:[ "chunked" ] ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~body:(body "abcdef") ~content_length:(-1L)
+      ~transfer_encoding:[ "chunked" ] ()
   in
-  Alcotest.(check string) "1.1 chunked"
-    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n" (write r)
+  Alcotest.(check string)
+    "1.1 chunked"
+    "HTTP/1.1 200 OK\r\n\
+     Transfer-Encoding: chunked\r\n\
+     \r\n\
+     6\r\n\
+     abcdef\r\n\
+     0\r\n\
+     \r\n"
+    (write r)
 
 let http11_zero_len_nil_body () =
-  let r = resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~content_length:0L () in
-  Alcotest.(check string) "1.1 zero nil" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
+  let r =
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~content_length:0L ()
+  in
+  Alcotest.(check string)
+    "1.1 zero nil" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
 
 let http11_zero_len_empty_body () =
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~body:(body "")
-      ~content_length:0L ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~body:(body "") ~content_length:0L ()
   in
-  Alcotest.(check string) "1.1 zero empty" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
+  Alcotest.(check string)
+    "1.1 zero empty" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
 
 let http11_zero_len_nonempty_body () =
   (* ContentLength 0 with a non-empty body: probe finds bytes, becomes unknown + close. *)
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~proto_minor:1 ()) ~body:(body "foo")
-      ~content_length:0L ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~proto_minor:1 ())
+      ~body:(body "foo") ~content_length:0L ()
   in
-  Alcotest.(check string) "1.1 zero nonempty" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nfoo" (write r)
+  Alcotest.(check string)
+    "1.1 zero nonempty" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nfoo"
+    (write r)
 
 let http11_chunked_close () =
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ()) ~body:(body "abcdef")
-      ~content_length:6L ~transfer_encoding:[ "chunked" ] ~close:true ()
+    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ())
+      ~body:(body "abcdef") ~content_length:6L ~transfer_encoding:[ "chunked" ]
+      ~close:true ()
   in
-  Alcotest.(check string) "1.1 chunked close"
-    "HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabcdef\r\n0\r\n\r\n"
+  Alcotest.(check string)
+    "1.1 chunked close"
+    "HTTP/1.1 200 OK\r\n\
+     Connection: close\r\n\
+     Transfer-Encoding: chunked\r\n\
+     \r\n\
+     6\r\n\
+     abcdef\r\n\
+     0\r\n\
+     \r\n"
     (write r)
 
 let header_newline () =
@@ -130,31 +171,54 @@ let header_newline () =
       ~header:(header [ ("Foo", " Bar\nBaz ") ])
       ~content_length:0L ~transfer_encoding:[ "chunked" ] ~close:true ()
   in
-  Alcotest.(check string) "newline"
-    "HTTP/1.1 204 No Content\r\nConnection: close\r\nFoo: Bar Baz\r\n\r\n" (write r)
+  Alcotest.(check string)
+    "newline"
+    "HTTP/1.1 204 No Content\r\nConnection: close\r\nFoo: Bar Baz\r\n\r\n"
+    (write r)
 
 let post_single_content_length () =
-  let r = resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~meth:"POST" ()) ~content_length:0L () in
-  Alcotest.(check string) "post single CL" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
+  let r =
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~meth:"POST" ())
+      ~content_length:0L ()
+  in
+  Alcotest.(check string)
+    "post single CL" "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" (write r)
 
 let post_negative_content_length () =
   let r =
-    resp ~status_code:200 ~proto_minor:1 ~request:(dummy_req ~meth:"POST" ()) ~body:(body "abcdef")
-      ~content_length:(-1L) ()
+    resp ~status_code:200 ~proto_minor:1
+      ~request:(dummy_req ~meth:"POST" ())
+      ~body:(body "abcdef") ~content_length:(-1L) ()
   in
-  Alcotest.(check string) "post -1 CL" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
+  Alcotest.(check string)
+    "post -1 CL" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
 
 let status_zero_pad () =
-  let r = resp ~status_code:7 ~status:"license to violate specs" ~proto_minor:0 ~request:(dummy_req ()) () in
-  Alcotest.(check string) "zero pad" "HTTP/1.0 007 license to violate specs\r\nContent-Length: 0\r\n\r\n" (write r)
+  let r =
+    resp ~status_code:7 ~status:"license to violate specs" ~proto_minor:0
+      ~request:(dummy_req ()) ()
+  in
+  Alcotest.(check string)
+    "zero pad"
+    "HTTP/1.0 007 license to violate specs\r\nContent-Length: 0\r\n\r\n"
+    (write r)
 
 let status_1xx_no_length () =
-  let r = resp ~status_code:123 ~status:"123 Sesame Street" ~proto_minor:0 ~request:(dummy_req ()) () in
-  Alcotest.(check string) "1xx no len" "HTTP/1.0 123 Sesame Street\r\n\r\n" (write r)
+  let r =
+    resp ~status_code:123 ~status:"123 Sesame Street" ~proto_minor:0
+      ~request:(dummy_req ()) ()
+  in
+  Alcotest.(check string)
+    "1xx no len" "HTTP/1.0 123 Sesame Street\r\n\r\n" (write r)
 
 let status_204_no_length () =
-  let r = resp ~status_code:204 ~status:"No Content" ~proto_minor:0 ~request:(dummy_req ()) () in
-  Alcotest.(check string) "204 no len" "HTTP/1.0 204 No Content\r\n\r\n" (write r)
+  let r =
+    resp ~status_code:204 ~status:"No Content" ~proto_minor:0
+      ~request:(dummy_req ()) ()
+  in
+  Alcotest.(check string)
+    "204 no len" "HTTP/1.0 204 No Content\r\n\r\n" (write r)
 
 let tests =
   [

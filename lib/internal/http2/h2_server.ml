@@ -34,7 +34,8 @@ type stream_state =
    is the {!H2_writesched.stream} shared by reference with the scheduler. *)
 type stream = {
   st_id : int;
-  sched : H2_writesched.stream; (* carries id + outbound flow + max_frame_size *)
+  sched : H2_writesched.stream;
+      (* carries id + outbound flow + max_frame_size *)
   mutable body : H2_pipe.t option; (* non-nil if expecting DATA *)
   mutable inflow : H2_flow.inflow; (* what the client may POST to us *)
   mutable body_bytes : int64;
@@ -96,7 +97,8 @@ type server_conn = {
   mutable max_client_stream_id : int;
   mutable initial_stream_send_window : int;
   mutable initial_stream_recv_window : int;
-  mutable max_frame_size : int; (* peer's SETTINGS_MAX_FRAME_SIZE for our writes *)
+  mutable max_frame_size : int;
+  (* peer's SETTINGS_MAX_FRAME_SIZE for our writes *)
   (* GOAWAY / shutdown bookkeeping *)
   mutable in_goaway : bool;
   mutable need_to_send_goaway : bool;
@@ -156,8 +158,8 @@ let rec write_frame sc (req : frame_write_req) =
     match (wr.write, wr.stream) with
     | H2_write.Write_res_headers _, Some _ ->
         (match Hashtbl.find_opt sc.streams sid with
-         | Some st -> st.wrote_headers <- true
-         | None -> ());
+        | Some st -> st.wrote_headers <- true
+        | None -> ());
         ignore_write
     | H2_write.Write_100_continue _, _ -> (
         match Hashtbl.find_opt sc.streams sid with
@@ -168,8 +170,8 @@ let rec write_frame sc (req : frame_write_req) =
   if ignore_write then (
     (* Notify the waiter so it doesn't hang. *)
     (match req.reply with
-     | Some c -> Lwt_condition.broadcast c (Error End_of_file)
-     | None -> ());
+    | Some c -> Lwt_condition.broadcast c (Error End_of_file)
+    | None -> ());
     Lwt.return_unit)
   else begin
     if H2_writesched.is_control wr then begin
@@ -179,14 +181,15 @@ let rec write_frame sc (req : frame_write_req) =
     (* remember the reply for this writer, keyed by physical identity (writer
        values are freshly allocated per request, so [==] is reliable). *)
     (match req.reply with
-     | Some c -> pending_replies := (wr.write, c) :: !pending_replies
-     | None -> ());
+    | Some c -> pending_replies := (wr.write, c) :: !pending_replies
+    | None -> ());
     schedule_frame_write sc
   end
 
 (* Associates a queued writer (by physical identity) with the handler's reply
    condition, so wroteFrame can unblock the handler. Mirrors Go's wr.done. *)
-and pending_replies : (H2_write.write_framer * write_result Lwt_condition.t) list ref =
+and pending_replies :
+    (H2_write.write_framer * write_result Lwt_condition.t) list ref =
   ref []
 
 and reply_to_writer (w : H2_write.write_framer) (r : write_result) =
@@ -259,7 +262,9 @@ and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit Lwt.t =
                  reset_stream sc st H2_error.NoError
              | State_half_closed_remote ->
                  close_stream sc st
-                   (Some (H2_error.Stream_error (H2_error.stream_error st.st_id H2_error.NoError)))
+                   (Some
+                      (H2_error.Stream_error
+                         (H2_error.stream_error st.st_id H2_error.NoError)))
              | _ -> ())
          | None -> ())
      | None -> ()
@@ -280,8 +285,10 @@ and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit Lwt.t =
 (* resetStream: queue a RST_STREAM (Go's serverConn.resetStream). *)
 and reset_stream sc (st : stream) (code : H2_error.err_code) =
   let wr : H2_writesched.frame_write_request =
-    { write = H2_write.Write_rst_stream { stream_id = st.st_id; code };
-      stream = None }
+    {
+      write = H2_write.Write_rst_stream { stream_id = st.st_id; code };
+      stream = None;
+    }
   in
   H2_writesched.push sc.write_sched wr;
   sc.queued_control_frames <- sc.queued_control_frames + 1;
@@ -293,13 +300,13 @@ and close_stream sc (st : stream) (err : exn option) =
   if st.st_id mod 2 = 1 then sc.cur_client_streams <- sc.cur_client_streams - 1;
   Hashtbl.remove sc.streams st.st_id;
   (match st.body with
-   | Some p ->
-       (* return buffered unread conn-level flow control *)
-       let n = H2_pipe.len p in
-       if n > 0 then send_window_update_conn sc n;
-       let e = match err with Some e -> e | None -> End_of_file in
-       H2_pipe.close_with_error p e
-   | None -> ());
+  | Some p ->
+      (* return buffered unread conn-level flow control *)
+      let n = H2_pipe.len p in
+      if n > 0 then send_window_update_conn sc n;
+      let e = match err with Some e -> e | None -> End_of_file in
+      H2_pipe.close_with_error p e
+  | None -> ());
   st.close_err <- err;
   if not st.cw_closed then begin
     st.cw_closed <- true;
@@ -312,8 +319,11 @@ and send_window_update_conn sc n =
   let send = H2_flow.inflow_add sc.conn_inflow n in
   if Int32.compare send 0l <> 0 then begin
     let wr : H2_writesched.frame_write_request =
-      { write = H2_write.Write_window_update { stream_id = 0; n = Int32.to_int send };
-        stream = None }
+      {
+        write =
+          H2_write.Write_window_update { stream_id = 0; n = Int32.to_int send };
+        stream = None;
+      }
     in
     H2_writesched.push sc.write_sched wr;
     sc.queued_control_frames <- sc.queued_control_frames + 1
@@ -324,8 +334,12 @@ let send_window_update_stream sc (st : stream) n =
   let send = H2_flow.inflow_add st.inflow n in
   if Int32.compare send 0l <> 0 then begin
     let wr : H2_writesched.frame_write_request =
-      { write = H2_write.Write_window_update { stream_id = st.st_id; n = Int32.to_int send };
-        stream = Some st.sched }
+      {
+        write =
+          H2_write.Write_window_update
+            { stream_id = st.st_id; n = Int32.to_int send };
+        stream = Some st.sched;
+      }
     in
     H2_writesched.push sc.write_sched wr;
     sc.queued_control_frames <- sc.queued_control_frames + 1
@@ -358,11 +372,15 @@ let body_of_pipe sc (st : stream) : Body.t =
               let n = String.length chunk in
               (* note body read -> schedule window updates on the serve loop *)
               if n > 0 then sc.push_event (Some (Body_read (st, n)));
-              if n = 0 then (saw_eof := true; Lwt.return None)
+              if n = 0 then (
+                saw_eof := true;
+                Lwt.return None)
               else Lwt.return (Some chunk))
             (fun exn ->
               match exn with
-              | End_of_file -> saw_eof := true; Lwt.return None
+              | End_of_file ->
+                  saw_eof := true;
+                  Lwt.return None
               | e -> Lwt.fail e)
   in
   Body.of_stream next
@@ -401,24 +419,31 @@ let write_via_loop sc (fw : H2_writesched.frame_write_request) : unit Lwt.t =
 let write_res_headers sc (rws : rws) ~end_stream ~content_type ~content_length =
   let h = rws.handler_header in
   let wrh : H2_write.write_res_headers =
-    { rh_stream_id = rws.rws_stream.st_id;
+    {
+      rh_stream_id = rws.rws_stream.st_id;
       http_res_code = rws.status;
       h;
       trailers = None;
       rh_end_stream = end_stream;
       date = "";
       content_type;
-      content_length }
+      content_length;
+    }
   in
   let fw : H2_writesched.frame_write_request =
-    { write = H2_write.Write_res_headers wrh; stream = Some rws.rws_stream.sched }
+    {
+      write = H2_write.Write_res_headers wrh;
+      stream = Some rws.rws_stream.sched;
+    }
   in
   write_via_loop sc fw
 
 let write_data_from_handler sc (st : stream) (data : string) ~end_stream =
   let fw : H2_writesched.frame_write_request =
-    { write = H2_write.Write_data { stream_id = st.st_id; data; end_stream };
-      stream = Some st.sched }
+    {
+      write = H2_write.Write_data { stream_id = st.st_id; data; end_stream };
+      stream = Some st.sched;
+    }
   in
   write_via_loop sc fw
 
@@ -451,9 +476,10 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
         && not (rws.status >= 100 && rws.status < 200)
       in
       let clen =
-        if (not has_content_length) && clen = "" && rws.handler_done
-           && body_allowed
-           && (String.length p > 0 || not is_head)
+        if
+          (not has_content_length) && clen = "" && rws.handler_done
+          && body_allowed
+          && (String.length p > 0 || not is_head)
         then string_of_int (String.length p)
         else clen
       in
@@ -463,9 +489,7 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
           "text/plain; charset=utf-8"
         else ""
       in
-      let end_stream =
-        (rws.handler_done && String.length p = 0) || is_head
-      in
+      let end_stream = (rws.handler_done && String.length p = 0) || is_head in
       let* () =
         write_res_headers sc rws ~end_stream ~content_type:ctype
           ~content_length:clen
@@ -486,14 +510,16 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
 let new_response_writer sc (st : stream) (req : Api.server_request) :
     response_writer * rws =
   let rws =
-    { rws_stream = st;
+    {
+      rws_stream = st;
       rws_req = req;
       handler_header = Header.create ();
       status = 0;
       wrote_header = false;
       sent_header = false;
       handler_done = false;
-      buf = Buffer.create 256 }
+      buf = Buffer.create 256;
+    }
   in
   let header () = rws.handler_header in
   let write_header code =
@@ -532,8 +558,12 @@ let new_response_writer sc (st : stream) (req : Api.server_request) :
     Buffer.clear rws.buf;
     write_chunk sc rws p
   in
-  ( { Api.rw_header = header; rw_write_header = write_header; rw_write = write;
-      rw_flush = flush },
+  ( {
+      Api.rw_header = header;
+      rw_write_header = write_header;
+      rw_write = write;
+      rw_flush = flush;
+    },
     rws )
 
 (* runHandler: run the handler, then flush the buffered response and end the
@@ -546,9 +576,7 @@ let run_handler sc (st : stream) (req : Api.server_request)
     (* writeChunk on the remaining buffered bytes, ending the stream. *)
     let p = Buffer.contents rws.buf in
     Buffer.clear rws.buf;
-    Lwt.catch
-      (fun () -> write_chunk sc rws p)
-      (fun _ -> Lwt.return_unit)
+    Lwt.catch (fun () -> write_chunk sc rws p) (fun _ -> Lwt.return_unit)
   in
   let* () =
     Lwt.catch
@@ -561,18 +589,22 @@ let run_handler sc (st : stream) (req : Api.server_request)
         | _ ->
             (* handler panic -> RST_STREAM *)
             let fw : H2_writesched.frame_write_request =
-              { write = H2_write.Write_handler_panic_rst st.st_id;
-                stream = Some st.sched }
+              {
+                write = H2_write.Write_handler_panic_rst st.st_id;
+                stream = Some st.sched;
+              }
             in
-            Lwt.catch (fun () -> write_via_loop sc fw) (fun _ -> Lwt.return_unit))
+            Lwt.catch
+              (fun () -> write_via_loop sc fw)
+              (fun _ -> Lwt.return_unit))
   in
   sc.push_event (Some Handler_done);
   Lwt.return_unit
 
 (* ---- frame processing (serve loop) ---- *)
 
-let schedule_handler sc (st : stream) (req : Api.server_request) (rw : response_writer)
-    (rws : rws) =
+let schedule_handler sc (st : stream) (req : Api.server_request)
+    (rw : response_writer) (rws : rws) =
   let start () = run_handler sc st req rw rws sc.handler in
   if sc.cur_handlers < sc.adv_max_streams then begin
     sc.cur_handlers <- sc.cur_handlers + 1;
@@ -600,11 +632,14 @@ let new_stream sc id state : stream =
   let sched = H2_writesched.make_stream ~max_frame_size:sc.max_frame_size id in
   (* link stream outflow to conn outflow and seed with the send window *)
   H2_flow.set_conn_flow sched.H2_writesched.flow sc.flow;
-  ignore (H2_flow.add sched.H2_writesched.flow (Int32.of_int sc.initial_stream_send_window));
+  ignore
+    (H2_flow.add sched.H2_writesched.flow
+       (Int32.of_int sc.initial_stream_send_window));
   let inflow = H2_flow.create_inflow () in
   H2_flow.inflow_init inflow (Int32.of_int sc.initial_stream_recv_window);
   let st =
-    { st_id = id;
+    {
+      st_id = id;
       sched;
       body = None;
       inflow;
@@ -618,7 +653,8 @@ let new_stream sc id state : stream =
       cw = Lwt_condition.create ();
       cw_closed = false;
       trailer = Header.create ();
-      req_trailer = None }
+      req_trailer = None;
+    }
   in
   Hashtbl.replace sc.streams id st;
   H2_writesched.open_stream sc.write_sched id;
@@ -678,15 +714,18 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
       (* build URL: use path as request-uri; authority is host. *)
       let url =
         let raw =
-          if scheme <> "" && authority <> "" && String.length path > 0
-             && path.[0] = '/'
+          if
+            scheme <> "" && authority <> ""
+            && String.length path > 0
+            && path.[0] = '/'
           then scheme ^ "://" ^ authority ^ path
           else path
         in
         Uri.of_string raw
       in
       let req : Api.server_request =
-        { sreq_meth = meth;
+        {
+          sreq_meth = meth;
           sreq_url = url;
           sreq_proto = "HTTP/2.0";
           sreq_proto_major = 2;
@@ -696,10 +735,13 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
           sreq_content_length = content_length;
           sreq_host = authority;
           sreq_trailer =
-            (match result.sr_trailer with Some t -> t | None -> Header.create ());
+            (match result.sr_trailer with
+            | Some t -> t
+            | None -> Header.create ());
           sreq_request_uri = result.sr_request_uri;
           sreq_remote_addr = "";
-          sreq_ctx = Context.background }
+          sreq_ctx = Context.background;
+        }
       in
       if body_open then begin
         let pipe = H2_pipe.create () in
@@ -734,11 +776,13 @@ let process_headers sc (mf : H2_frame.meta_headers_frame) :
           List.iter
             (fun (f : Hpack.header_field) ->
               if not (is_pseudo f.name) then
-                Header.add st.trailer (Header.canonical_header_key f.name) f.value)
+                Header.add st.trailer
+                  (Header.canonical_header_key f.name)
+                  f.value)
             mf.fields;
           (match st.body with
-           | Some p -> H2_pipe.close_with_error p End_of_file
-           | None -> ());
+          | Some p -> H2_pipe.close_with_error p End_of_file
+          | None -> ());
           st.state <- State_half_closed_remote;
           Ok ()
         end
@@ -771,7 +815,9 @@ let process_headers sc (mf : H2_frame.meta_headers_frame) :
 
 (* stream.endStream: closes the request body pipe (handler sees EOF). *)
 let end_stream (st : stream) =
-  (match st.body with Some p -> H2_pipe.close_with_error p End_of_file | None -> ());
+  (match st.body with
+  | Some p -> H2_pipe.close_with_error p End_of_file
+  | None -> ());
   st.state <- State_half_closed_remote
 
 let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
@@ -793,16 +839,20 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
              we just return ok (frame-level), mirroring Go's countError path is
              a stream error -> resetStream. Send RST. *)
           let wr : H2_writesched.frame_write_request =
-            { write = H2_write.Write_rst_stream { stream_id = id; code = H2_error.StreamClosed };
-              stream = None }
+            {
+              write =
+                H2_write.Write_rst_stream
+                  { stream_id = id; code = H2_error.StreamClosed };
+              stream = None;
+            }
           in
           H2_writesched.push sc.write_sched wr;
           sc.queued_control_frames <- sc.queued_control_frames + 1;
           Ok ()
         end
     | Some st ->
-        if state <> State_open || st.got_trailer_header || st.reset_queued then begin
-          if not (H2_flow.inflow_take sc.conn_inflow length) then
+        if state <> State_open || st.got_trailer_header || st.reset_queued then
+          begin if not (H2_flow.inflow_take sc.conn_inflow length) then
             Error H2_error.FlowControlError
           else begin
             send_window_update_conn sc length;
@@ -812,7 +862,7 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
               Ok ()
             end
           end
-        end
+          end
         else begin
           (* declared content-length overflow check *)
           let over =
@@ -820,32 +870,34 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
             && Int64.add st.body_bytes (Int64.of_int (String.length data))
                > st.decl_body_bytes
           in
-          if over then begin
-            if not (H2_flow.inflow_take sc.conn_inflow length) then
+          if over then
+            begin if not (H2_flow.inflow_take sc.conn_inflow length) then
               Error H2_error.FlowControlError
             else begin
               send_window_update_conn sc length;
               (match st.body with
-               | Some p ->
-                   H2_pipe.close_with_error p
-                     (Failure "sender tried to send more than declared Content-Length")
-               | None -> ());
+              | Some p ->
+                  H2_pipe.close_with_error p
+                    (Failure
+                       "sender tried to send more than declared Content-Length")
+              | None -> ());
               reset_stream sc st H2_error.ProtocolError;
               Ok ()
             end
-          end
-          else begin
-            if length > 0 then begin
-              if not (H2_flow.take_inflows sc.conn_inflow st.inflow length) then
-                Error H2_error.FlowControlError
+            end
+          else
+            begin if length > 0 then
+              begin if
+                not (H2_flow.take_inflows sc.conn_inflow st.inflow length)
+              then Error H2_error.FlowControlError
               else begin
-                (if String.length data > 0 then begin
-                   st.body_bytes <-
-                     Int64.add st.body_bytes (Int64.of_int (String.length data));
-                   match st.body with
-                   | Some p -> ignore (H2_pipe.write p data)
-                   | None -> ()
-                 end);
+                if String.length data > 0 then begin
+                  st.body_bytes <-
+                    Int64.add st.body_bytes (Int64.of_int (String.length data));
+                  match st.body with
+                  | Some p -> ignore (H2_pipe.write p data)
+                  | None -> ()
+                end;
                 (* return padding-only flow control immediately *)
                 let pad = length - String.length data in
                 if pad > 0 then begin
@@ -855,12 +907,12 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
                 if df.end_stream then end_stream st;
                 Ok ()
               end
-            end
+              end
             else begin
               if df.end_stream then end_stream st;
               Ok ()
             end
-          end
+            end
         end
 
 let process_settings sc (sf : H2_frame.settings_frame) :
@@ -893,9 +945,11 @@ let process_settings sc (sf : H2_frame.settings_frame) :
         | H2.Max_frame_size ->
             sc.max_frame_size <- Int32.to_int s.value;
             Hashtbl.iter
-              (fun _ (st : stream) -> st.sched.H2_writesched.max_frame_size <- sc.max_frame_size)
+              (fun _ (st : stream) ->
+                st.sched.H2_writesched.max_frame_size <- sc.max_frame_size)
               sc.streams
-        | H2.Enable_push | H2.Max_concurrent_streams | H2.Max_header_list_size ->
+        | H2.Enable_push | H2.Max_concurrent_streams | H2.Max_header_list_size
+          ->
             ())
       sf.settings;
     match !err with
@@ -914,7 +968,10 @@ let process_window_update sc (fh : H2_frame.frame_header)
       match st_opt with
       | None -> Ok ()
       | Some st ->
-          if not (H2_flow.add st.sched.H2_writesched.flow (Int32.of_int wf.increment))
+          if
+            not
+              (H2_flow.add st.sched.H2_writesched.flow
+                 (Int32.of_int wf.increment))
           then Error H2_error.FlowControlError
           else Ok ()
   end
@@ -941,10 +998,12 @@ let process_reset_stream sc (fh : H2_frame.frame_header)
   if state = State_idle then Error H2_error.ProtocolError
   else begin
     (match st_opt with
-     | Some st ->
-         close_stream sc st
-           (Some (H2_error.Stream_error (H2_error.stream_error fh.stream_id _rf.error_code)))
-     | None -> ());
+    | Some st ->
+        close_stream sc st
+          (Some
+             (H2_error.Stream_error
+                (H2_error.stream_error fh.stream_id _rf.error_code)))
+    | None -> ());
     Ok ()
   end
 
@@ -955,9 +1014,7 @@ let process_goaway sc (_gf : H2_frame.goaway_frame) :
 
 (* processFrame dispatch (serve loop). Returns Ok () or the connection-error
    code to GOAWAY with, or `Stream_err for a stream error. *)
-type frame_outcome =
-  | Ok_frame
-  | Conn_error of H2_error.err_code
+type frame_outcome = Ok_frame | Conn_error of H2_error.err_code
 
 let outcome_of_result = function
   | Ok () -> Ok_frame
@@ -968,7 +1025,9 @@ let process_frame sc (f : H2_frame.frame) : frame_outcome =
   let first_ok =
     if not sc.saw_first_settings then
       match f with
-      | H2_frame.Settings _ -> sc.saw_first_settings <- true; true
+      | H2_frame.Settings _ ->
+          sc.saw_first_settings <- true;
+          true
       | _ -> false
     else true
   in
@@ -1014,7 +1073,8 @@ let rec read_loop sc : unit Lwt.t =
           (* assemble meta headers; reader owns the decoder *)
           let* mf =
             Lwt.map
-              (function Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
+              (function
+                | Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
               (H2_frame.read_meta_headers sc.dec (fh, hf) sc.ic)
           in
           sc.push_event (Some (Read_meta mf));
@@ -1029,11 +1089,10 @@ let rec read_loop sc : unit Lwt.t =
 (* ---- serve loop ---- *)
 
 let handle_meta sc (mf : H2_frame.meta_headers_frame) : frame_outcome =
-  let first_ok =
-    if not sc.saw_first_settings then false else true
-  in
+  let first_ok = if not sc.saw_first_settings then false else true in
   if not first_ok then Conn_error H2_error.ProtocolError
-  else match process_headers sc mf with
+  else
+    match process_headers sc mf with
     | Ok () -> Ok_frame
     | Error code -> Conn_error code
 
@@ -1060,14 +1119,18 @@ let rec serve_loop sc : unit Lwt.t =
                 finish_or_continue sc
             | H2_error.Stream_error se ->
                 (match Hashtbl.find_opt sc.streams se.stream_id with
-                 | Some st -> reset_stream sc st se.code
-                 | None ->
-                     let wr : H2_writesched.frame_write_request =
-                       { write = H2_write.Write_rst_stream { stream_id = se.stream_id; code = se.code };
-                         stream = None }
-                     in
-                     H2_writesched.push sc.write_sched wr;
-                     sc.queued_control_frames <- sc.queued_control_frames + 1);
+                | Some st -> reset_stream sc st se.code
+                | None ->
+                    let wr : H2_writesched.frame_write_request =
+                      {
+                        write =
+                          H2_write.Write_rst_stream
+                            { stream_id = se.stream_id; code = se.code };
+                        stream = None;
+                      }
+                    in
+                    H2_writesched.push sc.write_sched wr;
+                    sc.queued_control_frames <- sc.queued_control_frames + 1);
                 let* () = schedule_frame_write sc in
                 serve_loop sc
             | _ ->
@@ -1099,8 +1162,8 @@ let rec serve_loop sc : unit Lwt.t =
             (* noteBodyRead: conn-level window update, and stream-level unless
                half-closed/closed. *)
             send_window_update_conn sc n;
-            (if st.state <> State_half_closed_remote && st.state <> State_closed
-             then send_window_update_stream sc st n);
+            if st.state <> State_half_closed_remote && st.state <> State_closed
+            then send_window_update_stream sc st n;
             let* () = schedule_frame_write sc in
             serve_loop sc
         | Handler_done ->
@@ -1113,8 +1176,10 @@ let rec serve_loop sc : unit Lwt.t =
    and no open streams under graceful), end; otherwise keep serving. *)
 and finish_or_continue sc : unit Lwt.t =
   if sc.serving_done then Lwt.return_unit
-  else if sc.in_goaway && sc.goaway_code <> H2_error.NoError
-          && not sc.need_to_send_goaway
+  else if
+    sc.in_goaway
+    && sc.goaway_code <> H2_error.NoError
+    && not sc.need_to_send_goaway
   then begin
     (* a connection error GOAWAY has been sent; close once writes flushed. *)
     sc.serving_done <- true;
@@ -1140,11 +1205,10 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
   ignore (H2_flow.add flow (Int32.of_int H2.initial_window_size));
   let conn_inflow = H2_flow.create_inflow () in
   H2_flow.inflow_init conn_inflow (Int32.of_int H2.initial_window_size);
-  let dec =
-    Hpack.new_decoder H2.initial_header_table_size (fun _ -> ())
-  in
+  let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
   let sc =
-    { ic;
+    {
+      ic;
       oc;
       handler;
       enc = Hpack.new_encoder ();
@@ -1171,15 +1235,30 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
       goaway_code = H2_error.NoError;
       serving_done = false;
       done_serving = Lwt_condition.create ();
-      unstarted = [] }
+      unstarted = [];
+    }
   in
   (* Send server's initial SETTINGS first (Go sends before reading preface, but
      reading the preface first is also valid; we send then read). *)
   let settings =
-    [ { H2.id = H2.Max_frame_size; value = Int32.of_int H2.default_max_read_frame_size };
-      { H2.id = H2.Max_concurrent_streams; value = Int32.of_int max_concurrent_streams };
-      { H2.id = H2.Initial_window_size; value = Int32.of_int sc.initial_stream_recv_window };
-      { H2.id = H2.Header_table_size; value = Int32.of_int H2.initial_header_table_size } ]
+    [
+      {
+        H2.id = H2.Max_frame_size;
+        value = Int32.of_int H2.default_max_read_frame_size;
+      };
+      {
+        H2.id = H2.Max_concurrent_streams;
+        value = Int32.of_int max_concurrent_streams;
+      };
+      {
+        H2.id = H2.Initial_window_size;
+        value = Int32.of_int sc.initial_stream_recv_window;
+      };
+      {
+        H2.id = H2.Header_table_size;
+        value = Int32.of_int H2.initial_header_table_size;
+      };
+    ]
   in
   let* () = H2_frame.write_settings sc.oc settings in
   let* () = Lwt_io.flush sc.oc in
@@ -1199,8 +1278,8 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
           Hashtbl.iter
             (fun _ (st : stream) ->
               (match st.body with
-               | Some p -> H2_pipe.break_with_error p End_of_file
-               | None -> ());
+              | Some p -> H2_pipe.break_with_error p End_of_file
+              | None -> ());
               if not st.cw_closed then begin
                 st.cw_closed <- true;
                 Lwt_condition.broadcast st.cw ()

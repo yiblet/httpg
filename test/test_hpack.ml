@@ -22,7 +22,8 @@ let of_hex h =
   String.init n (fun i ->
       Char.chr (int_of_string ("0x" ^ String.sub h (i * 2) 2)))
 
-let hex = Alcotest.testable (fun fmt s -> Format.fprintf fmt "%s" (to_hex s)) ( = )
+let hex =
+  Alcotest.testable (fun fmt s -> Format.fprintf fmt "%s" (to_hex s)) ( = )
 
 let field_t =
   Alcotest.testable
@@ -100,14 +101,11 @@ let var_int_need_more () =
 let c2_1_literal_with_indexing () =
   (* C.2.1: custom-key: custom-header, incremental indexing, no Huffman *)
   let expected =
-    of_hex
-      "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572"
+    of_hex "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572"
   in
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   let got = decode_full dec expected in
-  Alcotest.check fields_t "C.2.1 decode"
-    [ hf "custom-key" "custom-header" ]
-    got;
+  Alcotest.check fields_t "C.2.1 decode" [ hf "custom-key" "custom-header" ] got;
   (* dynamic table now has the entry, size 55 *)
   ignore got
 
@@ -139,14 +137,13 @@ let c2_4_indexed () =
 let c3_request_sequence () =
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   (* C.3.1 *)
-  let b1 =
-    of_hex
-      "8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d"
-  in
+  let b1 = of_hex "8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d" in
   let g1 = decode_full dec b1 in
   Alcotest.check fields_t "C.3.1"
     [
-      hf ":method" "GET"; hf ":scheme" "http"; hf ":path" "/";
+      hf ":method" "GET";
+      hf ":scheme" "http";
+      hf ":path" "/";
       hf ":authority" "www.example.com";
     ]
     g1;
@@ -155,8 +152,11 @@ let c3_request_sequence () =
   let g2 = decode_full dec b2 in
   Alcotest.check fields_t "C.3.2"
     [
-      hf ":method" "GET"; hf ":scheme" "http"; hf ":path" "/";
-      hf ":authority" "www.example.com"; hf "cache-control" "no-cache";
+      hf ":method" "GET";
+      hf ":scheme" "http";
+      hf ":path" "/";
+      hf ":authority" "www.example.com";
+      hf "cache-control" "no-cache";
     ]
     g2;
   (* C.3.3 *)
@@ -167,8 +167,11 @@ let c3_request_sequence () =
   let g3 = decode_full dec b3 in
   Alcotest.check fields_t "C.3.3"
     [
-      hf ":method" "GET"; hf ":scheme" "https"; hf ":path" "/index.html";
-      hf ":authority" "www.example.com"; hf "custom-key" "custom-value";
+      hf ":method" "GET";
+      hf ":scheme" "https";
+      hf ":path" "/index.html";
+      hf ":authority" "www.example.com";
+      hf "custom-key" "custom-value";
     ]
     g3
 
@@ -181,7 +184,9 @@ let c4_request_sequence_huffman () =
   let g1 = decode_full dec b1 in
   Alcotest.check fields_t "C.4.1"
     [
-      hf ":method" "GET"; hf ":scheme" "http"; hf ":path" "/";
+      hf ":method" "GET";
+      hf ":scheme" "http";
+      hf ":path" "/";
       hf ":authority" "www.example.com";
     ]
     g1;
@@ -190,8 +195,11 @@ let c4_request_sequence_huffman () =
   let g2 = decode_full dec b2 in
   Alcotest.check fields_t "C.4.2"
     [
-      hf ":method" "GET"; hf ":scheme" "http"; hf ":path" "/";
-      hf ":authority" "www.example.com"; hf "cache-control" "no-cache";
+      hf ":method" "GET";
+      hf ":scheme" "http";
+      hf ":path" "/";
+      hf ":authority" "www.example.com";
+      hf "cache-control" "no-cache";
     ]
     g2;
   (* C.4.3 *)
@@ -201,8 +209,11 @@ let c4_request_sequence_huffman () =
   let g3 = decode_full dec b3 in
   Alcotest.check fields_t "C.4.3"
     [
-      hf ":method" "GET"; hf ":scheme" "https"; hf ":path" "/index.html";
-      hf ":authority" "www.example.com"; hf "custom-key" "custom-value";
+      hf ":method" "GET";
+      hf ":scheme" "https";
+      hf ":path" "/index.html";
+      hf ":authority" "www.example.com";
+      hf "custom-key" "custom-value";
     ]
     g3
 
@@ -220,7 +231,8 @@ let c5_response_sequence () =
   let g1 = decode_full dec b1 in
   Alcotest.check fields_t "C.5.1"
     [
-      hf ":status" "302"; hf "cache-control" "private";
+      hf ":status" "302";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:21 GMT";
       hf "location" "https://www.example.com";
     ]
@@ -230,7 +242,8 @@ let c5_response_sequence () =
   let g2 = decode_full dec b2 in
   Alcotest.check fields_t "C.5.2"
     [
-      hf ":status" "307"; hf "cache-control" "private";
+      hf ":status" "307";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:21 GMT";
       hf "location" "https://www.example.com";
     ]
@@ -246,11 +259,12 @@ let c5_response_sequence () =
   let g3 = decode_full dec b3 in
   Alcotest.check fields_t "C.5.3"
     [
-      hf ":status" "200"; hf "cache-control" "private";
+      hf ":status" "200";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:22 GMT";
-      hf "location" "https://www.example.com"; hf "content-encoding" "gzip";
-      hf "set-cookie"
-        "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1";
+      hf "location" "https://www.example.com";
+      hf "content-encoding" "gzip";
+      hf "set-cookie" "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1";
     ]
     g3
 
@@ -267,7 +281,8 @@ let c6_response_sequence_huffman () =
   let g1 = decode_full dec b1 in
   Alcotest.check fields_t "C.6.1"
     [
-      hf ":status" "302"; hf "cache-control" "private";
+      hf ":status" "302";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:21 GMT";
       hf "location" "https://www.example.com";
     ]
@@ -277,7 +292,8 @@ let c6_response_sequence_huffman () =
   let g2 = decode_full dec b2 in
   Alcotest.check fields_t "C.6.2"
     [
-      hf ":status" "307"; hf "cache-control" "private";
+      hf ":status" "307";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:21 GMT";
       hf "location" "https://www.example.com";
     ]
@@ -292,11 +308,12 @@ let c6_response_sequence_huffman () =
   let g3 = decode_full dec b3 in
   Alcotest.check fields_t "C.6.3"
     [
-      hf ":status" "200"; hf "cache-control" "private";
+      hf ":status" "200";
+      hf "cache-control" "private";
       hf "date" "Mon, 21 Oct 2013 20:13:22 GMT";
-      hf "location" "https://www.example.com"; hf "content-encoding" "gzip";
-      hf "set-cookie"
-        "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1";
+      hf "location" "https://www.example.com";
+      hf "content-encoding" "gzip";
+      hf "set-cookie" "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1";
     ]
     g3
 
@@ -309,8 +326,9 @@ let encoder_c3_request_sequence () =
      bits 0b01), and (2) it round-trips back to the original field. *)
   let e = H.new_encoder () in
   let out = H.encode_to_string e [ hf "custom-key" "custom-header" ] in
-  Alcotest.(check int) "incremental-indexing type byte"
-    0x40 (Char.code out.[0] land 0xc0);
+  Alcotest.(check int)
+    "incremental-indexing type byte" 0x40
+    (Char.code out.[0] land 0xc0);
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   Alcotest.check fields_t "encoder C.2.1 round-trip"
     [ hf "custom-key" "custom-header" ]
@@ -368,7 +386,8 @@ let roundtrip_dynamic_two_passes () =
   Alcotest.check fields_t "pass 2" fields2 dec2;
   (* Confirm the repeated headers were emitted as indexed (compression):
      enc2 should be much shorter than a naive literal of fields2. *)
-  Alcotest.(check bool) "pass2 compressed" true
+  Alcotest.(check bool)
+    "pass2 compressed" true
     (String.length enc2 < String.length enc1)
 
 let roundtrip_table_size_update () =
@@ -389,16 +408,17 @@ let decode_invalid_index () =
   (* index 0 is invalid for an indexed field; 0x80 = indexed, idx 0 *)
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   (match H.decode_full dec (of_hex "80") with
-   | Error (H.Invalid_indexed 0) -> ()
-   | Error e -> Alcotest.failf "expected Invalid_indexed 0, got %s"
-                  (H.error_to_string e)
-   | Ok _ -> Alcotest.fail "expected Error Invalid_indexed");
+  | Error (H.Invalid_indexed 0) -> ()
+  | Error e ->
+      Alcotest.failf "expected Invalid_indexed 0, got %s" (H.error_to_string e)
+  | Ok _ -> Alcotest.fail "expected Error Invalid_indexed");
   (* an index way past the table also maps to Invalid_indexed *)
   let dec2 = H.new_decoder 4096 (fun _ -> ()) in
   match H.decode_full dec2 (of_hex "ff49") with
   | Error (H.Invalid_indexed 200) -> ()
-  | Error e -> Alcotest.failf "expected Invalid_indexed 200, got %s"
-                 (H.error_to_string e)
+  | Error e ->
+      Alcotest.failf "expected Invalid_indexed 200, got %s"
+        (H.error_to_string e)
   | Ok _ -> Alcotest.fail "expected Error Invalid_indexed"
 
 let decode_index_too_large () =
@@ -444,8 +464,7 @@ let decode_size_update_not_first () =
   (* literal w/ incremental indexing custom-key/custom-header (fills table),
      then a size update 0x3f... at non-first position *)
   let b =
-    of_hex
-      "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572 20"
+    of_hex "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572 20"
   in
   (* trailing 0x20 = dynamic table size update of 0 at non-first field *)
   match H.decode_full dec b with

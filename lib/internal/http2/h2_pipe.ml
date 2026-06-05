@@ -21,7 +21,8 @@ type t = {
       (* immediate read error (caller doesn't see rest of b) *)
   mutable donec : unit Lwt.t option; (* resolved on error *)
   mutable donec_wake : unit Lwt.u option;
-  mutable read_fn : (unit -> unit) option; (* optional code to run before error *)
+  mutable read_fn : (unit -> unit) option;
+      (* optional code to run before error *)
 }
 
 let create () =
@@ -38,11 +39,8 @@ let create () =
 
 (* setBuffer initializes the pipe buffer. It has no effect if the pipe is
    already closed. *)
-let set_buffer p b =
-  if p.err = None && p.break_err = None then p.b <- Some b
-
-let len p =
-  match p.b with None -> p.unread | Some b -> H2_databuffer.len b
+let set_buffer p b = if p.err = None && p.break_err = None then p.b <- Some b
+let len p = match p.b with None -> p.unread | Some b -> H2_databuffer.len b
 
 (* Read waits until data is available and copies up to [max] bytes from the
    buffer, returning them as a string. On close-with-error, after all buffered

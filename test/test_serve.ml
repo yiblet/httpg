@@ -45,8 +45,7 @@ let read_one_response ic =
     | Some (s, hdr_len) -> Lwt.return (s, hdr_len)
     | None ->
         Lwt_io.read ~count:1 ic >>= fun chunk ->
-        if chunk = "" then
-          Lwt.return (Buffer.contents buf, Buffer.length buf)
+        if chunk = "" then Lwt.return (Buffer.contents buf, Buffer.length buf)
         else begin
           Buffer.add_string buf chunk;
           read_headers ()
@@ -107,23 +106,23 @@ let with_server handler client =
 
 (* ---- handlers ---- *)
 
-let hello_handler =
-  Server.handler_func (fun w _r -> w.Server.write "hello")
+let hello_handler = Server.handler_func (fun w _r -> w.Server.write "hello")
 
 (* ---- tests ---- *)
 
 let hello_handler_test () =
   let client ~port =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
-    Lwt_io.write oc "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    Lwt_io.write oc
+      "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     >>= fun () ->
     Lwt_io.flush oc >>= fun () ->
     read_to_eof ic >>= fun resp ->
     Lwt_io.close oc >>= fun () -> Lwt.return resp
   in
   let resp = with_server hello_handler client in
-  Alcotest.(check bool) "200 status line"
-    true
+  Alcotest.(check bool)
+    "200 status line" true
     (contains (status_line resp) "200 OK");
   Alcotest.(check string) "body" "hello" (body_of resp)
 
@@ -140,11 +139,11 @@ let not_found_test () =
     Lwt_io.close oc >>= fun () -> Lwt.return resp
   in
   let resp = with_server (Server.serve_mux_handler mux) client in
-  Alcotest.(check bool) "404 status line"
-    true
+  Alcotest.(check bool)
+    "404 status line" true
     (contains (status_line resp) "404 Not Found");
-  Alcotest.(check bool) "body mentions not found"
-    true
+  Alcotest.(check bool)
+    "body mentions not found" true
     (contains resp "404 page not found")
 
 let mux_routing_test () =
@@ -155,8 +154,8 @@ let mux_routing_test () =
   let get path ~port =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
     Lwt_io.write oc
-      (Printf.sprintf "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-         path)
+      (Printf.sprintf
+         "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" path)
     >>= fun () ->
     Lwt_io.flush oc >>= fun () ->
     read_to_eof ic >>= fun resp ->
@@ -166,7 +165,11 @@ let mux_routing_test () =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
     Lwt_io.write oc
       (Printf.sprintf
-         "POST %s HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+         "POST %s HTTP/1.1\r\n\
+          Host: localhost\r\n\
+          Content-Length: 0\r\n\
+          Connection: close\r\n\
+          \r\n"
          path)
     >>= fun () ->
     Lwt_io.flush oc >>= fun () ->
@@ -180,12 +183,10 @@ let mux_routing_test () =
   Alcotest.(check string) "path /b" "handler-b" (body_of rb);
   (* GET /c -> method not allowed (only POST registered). *)
   let rc_get = with_server h (get "/c") in
-  Alcotest.(check bool) "GET /c 405"
-    true
+  Alcotest.(check bool)
+    "GET /c 405" true
     (contains (status_line rc_get) "405 Method Not Allowed");
-  Alcotest.(check bool) "Allow header"
-    true
-    (contains rc_get "Allow: POST");
+  Alcotest.(check bool) "Allow header" true (contains rc_get "Allow: POST");
   (* POST /c -> handler-c-post. *)
   let rc_post = with_server h (post "/c") in
   Alcotest.(check string) "POST /c" "handler-c-post" (body_of rc_post)
@@ -201,13 +202,13 @@ let http10_close_test () =
     Lwt_io.close oc >>= fun () -> Lwt.return resp
   in
   let resp = with_server hello_handler client_default in
-  Alcotest.(check bool) "HTTP/1.0 status"
-    true
+  Alcotest.(check bool)
+    "HTTP/1.0 status" true
     (contains (status_line resp) "HTTP/1.0 200");
   Alcotest.(check string) "HTTP/1.0 body" "hello" (body_of resp);
   (* The default HTTP/1.0 response must NOT advertise keep-alive (it closes). *)
-  Alcotest.(check bool) "no keep-alive on default 1.0"
-    false
+  Alcotest.(check bool)
+    "no keep-alive on default 1.0" false
     (contains resp "Connection: keep-alive");
 
   (* HTTP/1.0 with Connection: keep-alive: server keeps the connection open,
@@ -216,8 +217,7 @@ let http10_close_test () =
      block waiting for EOF that won't come. *)
   let client_keepalive ~port =
     Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
-    Lwt_io.write oc
-      "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
+    Lwt_io.write oc "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
     >>= fun () ->
     Lwt_io.flush oc >>= fun () ->
     read_one_response ic >>= fun resp1 ->
@@ -228,8 +228,8 @@ let http10_close_test () =
     Lwt_io.close oc >>= fun () -> Lwt.return (resp1, resp2)
   in
   let resp1, resp2 = with_server hello_handler client_keepalive in
-  Alcotest.(check bool) "1.0 keep-alive advertised"
-    true
+  Alcotest.(check bool)
+    "1.0 keep-alive advertised" true
     (contains resp1 "Connection: keep-alive");
   Alcotest.(check string) "keep-alive resp1 body" "hello" (body_of resp1);
   Alcotest.(check string) "keep-alive resp2 body" "hello" (body_of resp2)
@@ -243,13 +243,14 @@ let handle_conflict_result () =
   | Error _ -> Alcotest.fail "first registration should succeed");
   (match Server.handle_func mux "/a/{y}" (fun w _r -> w.Server.write "b") with
   | Error (Server.Register msg) ->
-      Alcotest.(check bool) "conflict message" true
+      Alcotest.(check bool)
+        "conflict message" true
         (contains msg "conflicts with")
   | Ok () -> Alcotest.fail "conflicting registration should be Error");
   (* Empty pattern and a malformed pattern are also Error (Register _). *)
-  (match Server.handle_func mux "" (fun w _r -> w.Server.write "c") with
+  match Server.handle_func mux "" (fun w _r -> w.Server.write "c") with
   | Error (Server.Register _) -> ()
-  | Ok () -> Alcotest.fail "empty pattern should be Error")
+  | Ok () -> Alcotest.fail "empty pattern should be Error"
 
 let tests =
   [

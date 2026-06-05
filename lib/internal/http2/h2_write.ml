@@ -1,6 +1,5 @@
 (* Port of go/src/net/http/internal/http2/write.go. *)
 
-
 type write_res_headers = {
   rh_stream_id : int;
   http_res_code : int;
@@ -43,9 +42,7 @@ let write_ends_stream = function
   | _ -> false
 
 (* The flow-control byte count: len(wd.p) for DATA, 0 otherwise. *)
-let data_size = function
-  | Write_data { data; _ } -> String.length data
-  | _ -> 0
+let data_size = function Write_data { data; _ } -> String.length data | _ -> 0
 
 (* http2.httpCodeString. *)
 let httpcode_string code =
@@ -53,8 +50,12 @@ let httpcode_string code =
 
 (* http2.validWireHeaderFieldName, httpguts.ValidHeaderFieldValue and
    httpcommon.LowerHeader now live in Gohttp_internal.Httpcommon. *)
-let valid_wire_header_field_name = Gohttp_internal.Httpcommon.valid_wire_header_field_name
-let valid_header_field_value = Gohttp_internal.Httpcommon.valid_header_field_value
+let valid_wire_header_field_name =
+  Gohttp_internal.Httpcommon.valid_wire_header_field_name
+
+let valid_header_field_value =
+  Gohttp_internal.Httpcommon.valid_header_field_value
+
 let lower_header = Gohttp_internal.Httpcommon.lower_header
 
 (* encKV: encode one header field. *)
@@ -167,8 +168,6 @@ let write_frame ~enc oc w =
   | Write_res_headers w -> write_res_headers_frame oc enc w
   | Write_push_promise w -> write_push_promise_frame oc enc w
   | Write_100_continue stream_id ->
-      let block =
-        encode_block enc (fun () -> enc_kv enc ":status" "100")
-      in
+      let block = encode_block enc (fun () -> enc_kv enc ":status" "100") in
       H2_frame.write_headers oc ~stream_id ~end_stream:false ~end_headers:true
         block

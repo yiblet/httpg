@@ -11,10 +11,7 @@ let max_window = (1 lsl 31) - 1
 (* inflow accounts for an inbound flow control window.
    It tracks both the latest window sent to the peer (used for enforcement)
    and the accumulated unsent window. *)
-type inflow = {
-  mutable avail : int32;
-  mutable unsent : int32;
-}
+type inflow = { mutable avail : int32; mutable unsent : int32 }
 
 let create_inflow () = { avail = 0l; unsent = 0l }
 
@@ -58,8 +55,9 @@ let inflow_take f n =
    typically connection-level and stream-level flows.
    It reports whether both windows have available capacity. *)
 let take_inflows f1 f2 n =
-  if Int64.of_int n > Int64.of_int32 f1.avail
-     || Int64.of_int n > Int64.of_int32 f2.avail
+  if
+    Int64.of_int n > Int64.of_int32 f1.avail
+    || Int64.of_int n > Int64.of_int32 f2.avail
   then false
   else begin
     f1.avail <- Int32.sub f1.avail (Int32.of_int n);
@@ -79,27 +77,22 @@ type outflow = {
 }
 
 let create_outflow () = { n = 0l; conn = None }
-
 let set_conn_flow f cf = f.conn <- Some cf
 
 let available f =
   let n = f.n in
-  match f.conn with
-  | Some c when c.n < n -> c.n
-  | _ -> n
+  match f.conn with Some c when c.n < n -> c.n | _ -> n
 
 let take f n =
   if n > available f then invalid_arg "internal error: took too much";
   f.n <- Int32.sub f.n n;
-  match f.conn with
-  | Some c -> c.n <- Int32.sub c.n n
-  | None -> ()
+  match f.conn with Some c -> c.n <- Int32.sub c.n n | None -> ()
 
 (* add adds n bytes (positive or negative) to the flow control window.
    It returns false if the sum would exceed 2^31-1. *)
 let add f n =
   let sum = Int32.add f.n n in
-  if (sum > n) = (f.n > 0l) then begin
+  if sum > n = (f.n > 0l) then begin
     f.n <- sum;
     true
   end

@@ -45,28 +45,41 @@ let read_request_malformed () =
         (* (a) malformed request line: no method/uri/proto split. *)
         Io.read_request (ic_of_string "GET\r\n\r\n") >>= fun res_a ->
         (match res_a with
-        | Error (Io.Protocol _) -> Alcotest.(check pass) "malformed request line -> Protocol" () ()
-        | Error e -> Alcotest.failf "malformed line -> Error %s; want Protocol _" (Io.error_to_string e)
+        | Error (Io.Protocol _) ->
+            Alcotest.(check pass) "malformed request line -> Protocol" () ()
+        | Error e ->
+            Alcotest.failf "malformed line -> Error %s; want Protocol _"
+              (Io.error_to_string e)
         | Ok _ -> Alcotest.fail "malformed request line -> Ok; want Error");
         (* (b) bad header line (no colon). *)
-        Io.read_request (ic_of_string "GET / HTTP/1.1\r\nbadheader\r\n\r\n") >>= fun res_b ->
+        Io.read_request (ic_of_string "GET / HTTP/1.1\r\nbadheader\r\n\r\n")
+        >>= fun res_b ->
         (match res_b with
-        | Error (Io.Protocol _) -> Alcotest.(check pass) "bad header line -> Protocol" () ()
-        | Error e -> Alcotest.failf "bad header -> Error %s; want Protocol _" (Io.error_to_string e)
+        | Error (Io.Protocol _) ->
+            Alcotest.(check pass) "bad header line -> Protocol" () ()
+        | Error e ->
+            Alcotest.failf "bad header -> Error %s; want Protocol _"
+              (Io.error_to_string e)
         | Ok _ -> Alcotest.fail "bad header line -> Ok; want Error");
         (* (c) well-formed request -> Ok. *)
-        Io.read_request (ic_of_string "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n") >>= fun res_c ->
+        Io.read_request (ic_of_string "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n")
+        >>= fun res_c ->
         (match res_c with
         | Ok r ->
-          Alcotest.(check string) "method" "GET" r.Request.meth;
-          Alcotest.(check string) "host" "foo.com" r.Request.host
-        | Error e -> Alcotest.failf "well-formed request -> Error %s; want Ok" (Io.error_to_string e));
+            Alcotest.(check string) "method" "GET" r.Request.meth;
+            Alcotest.(check string) "host" "foo.com" r.Request.host
+        | Error e ->
+            Alcotest.failf "well-formed request -> Error %s; want Ok"
+              (Io.error_to_string e));
         (* (d) write_request with no Host -> Error Missing_host. *)
         let oc = null_oc () in
         Io.write_request oc (req_no_host ()) >>= fun res_d ->
         (match res_d with
-        | Error Io.Missing_host -> Alcotest.(check pass) "no host -> Missing_host" () ()
-        | Error e -> Alcotest.failf "no host -> Error %s; want Missing_host" (Io.error_to_string e)
+        | Error Io.Missing_host ->
+            Alcotest.(check pass) "no host -> Missing_host" () ()
+        | Error e ->
+            Alcotest.failf "no host -> Error %s; want Missing_host"
+              (Io.error_to_string e)
         | Ok () -> Alcotest.fail "no host write -> Ok; want Error Missing_host");
         Lwt.return_unit))
 

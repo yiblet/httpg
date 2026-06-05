@@ -44,7 +44,8 @@ let len b = b.size
 
 (* bytesFromFirstChunk returns the readable slice [off, lim) of chunks[0]. *)
 let bytes_from_first_chunk b =
-  if Array.length b.chunks = 1 then (b.r, b.w) else (b.r, Bytes.length b.chunks.(0))
+  if Array.length b.chunks = 1 then (b.r, b.w)
+  else (b.r, Bytes.length b.chunks.(0))
 
 (* Read copies bytes from the buffer into p. It is an error to read when no
    data is available. Returns the number of bytes copied; raises Read_empty
@@ -94,7 +95,10 @@ let write b (p : bytes) (off : int) (plen : int) : int =
   while !remaining > 0 do
     (* Try to allocate enough to fully copy p plus any additional bytes we
        expect to receive. However, this may allocate less than len(p). *)
-    let want = if b.expected > Int64.of_int !remaining then b.expected else Int64.of_int !remaining in
+    let want =
+      if b.expected > Int64.of_int !remaining then b.expected
+      else Int64.of_int !remaining
+    in
     let chunk = last_chunk_or_alloc b want in
     let room = Bytes.length chunk - b.w in
     let n = min room !remaining in

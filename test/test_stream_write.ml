@@ -41,7 +41,11 @@ let split_headers raw =
   | i -> (String.sub raw 0 i, String.sub raw (i + 4) (String.length raw - i - 4))
   | exception Not_found -> (raw, "")
 
-let header_has raw re = try ignore (Str.search_forward (Str.regexp_case_fold re) raw 0); true with Not_found -> false
+let header_has raw re =
+  try
+    ignore (Str.search_forward (Str.regexp_case_fold re) raw 0);
+    true
+  with Not_found -> false
 
 (* Decode an HTTP/1.1 chunked body into its payload. *)
 let dechunk body =
@@ -110,10 +114,13 @@ let server_streams_unbuffered () =
      Lwt_condition.signal got_first ();
      (* The early bytes must contain a chunked frame for "alpha" while the
         handler is still suspended. *)
-     Alcotest.(check bool) "chunked encoding announced" true
+     Alcotest.(check bool)
+       "chunked encoding announced" true
        (header_has early "transfer-encoding:[ \t]*chunked");
-     Alcotest.(check bool) "early alpha chunk present" true
-       (let _, b = split_headers early in dechunk b = "alpha");
+     Alcotest.(check bool)
+       "early alpha chunk present" true
+       (let _, b = split_headers early in
+        dechunk b = "alpha");
      ignore got_first;
      (* Now let the handler finish and read the rest to EOF. *)
      Lwt.wakeup_later wake_release ();
@@ -137,9 +144,11 @@ let small_response () =
      Lwt_io.flush oc >>= fun () ->
      read_to_eof ic >>= fun raw ->
      let headers, body = split_headers raw in
-     Alcotest.(check bool) "has Content-Length" true
+     Alcotest.(check bool)
+       "has Content-Length" true
        (header_has headers "content-length:[ \t]*16");
-     Alcotest.(check bool) "no chunked" false
+     Alcotest.(check bool)
+       "no chunked" false
        (header_has headers "transfer-encoding:[ \t]*chunked");
      Alcotest.(check string) "body" "hello small body" body;
      Server.close srv)
@@ -157,9 +166,11 @@ let large_response () =
      Lwt_io.flush oc >>= fun () ->
      read_to_eof ic >>= fun raw ->
      let headers, body = split_headers raw in
-     Alcotest.(check bool) "chunked" true
+     Alcotest.(check bool)
+       "chunked" true
        (header_has headers "transfer-encoding:[ \t]*chunked");
-     Alcotest.(check bool) "no Content-Length" false
+     Alcotest.(check bool)
+       "no Content-Length" false
        (header_has headers "content-length:");
      Alcotest.(check string) "dechunked body" payload (dechunk body);
      Server.close srv)

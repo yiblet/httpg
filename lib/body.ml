@@ -28,19 +28,33 @@ let read_all (b : t) : string Lwt.t =
       in
       loop ()
 
-(* Read and discard the whole body until EOF. [Empty]/[String] are no-ops
-   (nothing is held on the wire). For a [Stream] this pulls every chunk until
-   [next ()] returns [None], the analogue of Go's body.Close consuming to EOF
-   so a kept-alive connection is positioned at the next message boundary. *)
-let drain (b : t) : unit Lwt.t =
+(* Read and discard the body until EOF, or until more than [limit] bytes have
+   been read. Returns [`Drained] if the body reached EOF (within [limit] when
+   given) — a kept-alive connection is then positioned at the next message
+   boundary — or [`Too_big] if [limit] was given and more bytes remained unread.
+   With no [limit] the whole body is consumed (always [`Drained]), the analogue
+   of Go's [io.Copy(io.Discard, body)]. With [limit] it is the analogue of the
+   bounded discards Go uses to keep a connection alive: [finishRequest]'s
+   [io.CopyN(io.Discard, body, maxPostHandlerReadBytes+1)] (server.go) and the
+   redirect loop's [maxBodySlurpSize] slurp (client.go); past the bound the
+   caller closes the connection instead of reading an unbounded amount.
+   [Empty]/[String] are no-ops unless they themselves exceed [limit]. *)
+let drain ?(limit : int option) (b : t) : [ `Drained | `Too_big ] Lwt.t =
+  let over seen = match limit with Some l -> seen > l | None -> false in
   match b with
-  | Empty | String _ -> Lwt.return_unit
+  | Empty -> Lwt.return `Drained
+  | String s ->
+      Lwt.return (if over (String.length s) then `Too_big else `Drained)
   | Stream next ->
-      let rec loop () =
+      let rec loop seen =
         Lwt.bind (next ()) (fun chunk ->
-            match chunk with None -> Lwt.return_unit | Some _ -> loop ())
+            match chunk with
+            | None -> Lwt.return `Drained
+            | Some s ->
+                let seen = seen + String.length s in
+                if over seen then Lwt.return `Too_big else loop seen)
       in
-      loop ()
+      loop 0
 
 (* Apply [f] to each successive chunk of the body, in order, until EOF.
    [Empty] yields no calls; [String s] yields exactly one call [f s]; a

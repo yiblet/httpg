@@ -117,7 +117,7 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
              EOF and fires its pool-return action; without it the next hop would
              dial a fresh connection. *)
           Body.drain resp.Response.body
-          >>= fun () ->
+          >>= fun _ ->
           let include_body = include_body && include_body_on_hop in
           let strip_sensitive = url_host loc_url <> initial_host in
           let new_header = Header.create () in

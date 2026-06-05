@@ -20,19 +20,19 @@ exception Error of string
 type request = {
   url_scheme : string;
   url_host : string;
-  request_uri : string;  (* URL.RequestURI(): path?query, precomputed *)
-  url_opaque : string;  (* URL.Opaque (only used in a :path error message) *)
+  request_uri : string; (* URL.RequestURI(): path?query, precomputed *)
+  url_opaque : string; (* URL.Opaque (only used in a :path error message) *)
   meth : string;
   host : string;
   header : (string, string list) Hashtbl.t;
   trailer : (string, string list) Hashtbl.t;
-  actual_content_length : int64;  (* 0 means 0, -1 means unknown *)
+  actual_content_length : int64; (* 0 means 0, -1 means unknown *)
 }
 
 type encode_headers_param = {
   request : request;
   add_gzip_header : bool;
-  peer_max_header_list_size : int64;  (* 0 = unset *)
+  peer_max_header_list_size : int64; (* 0 = unset *)
   default_user_agent : string;
 }
 
@@ -50,8 +50,8 @@ type server_request_param = {
 type server_request_result = {
   sr_request_uri : string;
   sr_trailer : (string, string list) Hashtbl.t option;
-  sr_needs_continue : bool;  (* client sent "Expect: 100-continue" *)
-  sr_invalid_reason : string;  (* "" when valid (Go's CountError reason) *)
+  sr_needs_continue : bool; (* client sent "Expect: 100-continue" *)
+  sr_invalid_reason : string; (* "" when valid (Go's CountError reason) *)
 }
 
 (* Go LowerHeader: lower-case a header name, reporting whether it was ASCII.

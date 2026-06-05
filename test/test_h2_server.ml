@@ -45,10 +45,7 @@ let client_headers oc ~stream_id ?(end_stream = true) fields =
 (* A collected frame. For HEADERS we eagerly decode the block (the server sends
    END_HEADERS in a single frame in these tests) using the connection-wide
    decoder so the shared HPACK dynamic table stays in sync across streams. *)
-type collected = {
-  frame : F.frame;
-  headers : (string * string) list option;
-}
+type collected = { frame : F.frame; headers : (string * string) list option }
 
 (* Read frames from the server until the predicate is satisfied. A single
    [dec] decodes every HEADERS block (HPACK is stateful across the conn). *)
@@ -137,17 +134,20 @@ let test_get () =
     let* () = client_handshake oc in
     let* () =
       client_headers oc ~stream_id:1
-        [ (":method", "GET");
+        [
+          (":method", "GET");
           (":path", "/");
           (":scheme", "https");
-          (":authority", "example.com") ]
+          (":authority", "example.com");
+        ]
     in
     let* () = Lwt_io.flush oc in
     let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
     collect_frames ic dec [] ~until:(saw_end_stream 1)
   in
   let frames = run ~handler client in
-  Alcotest.(check (option string)) "status 200" (Some "200") (status_of_frames frames);
+  Alcotest.(check (option string))
+    "status 200" (Some "200") (status_of_frames frames);
   Alcotest.(check string) "body hello" "hello" (data_of_frames frames)
 
 (* ---- TestServer POST echo ---- *)
@@ -163,10 +163,12 @@ let test_post_echo () =
     let* () = client_handshake oc in
     let* () =
       client_headers oc ~stream_id:1 ~end_stream:false
-        [ (":method", "POST");
+        [
+          (":method", "POST");
           (":path", "/echo");
           (":scheme", "https");
-          (":authority", "example.com") ]
+          (":authority", "example.com");
+        ]
     in
     let* () = F.write_data oc 1 true "ping" in
     let* () = Lwt_io.flush oc in
@@ -174,7 +176,8 @@ let test_post_echo () =
     collect_frames ic dec [] ~until:(saw_end_stream 1)
   in
   let frames = run ~handler client in
-  Alcotest.(check (option string)) "status 200" (Some "200") (status_of_frames frames);
+  Alcotest.(check (option string))
+    "status 200" (Some "200") (status_of_frames frames);
   Alcotest.(check string) "echo ping" "ping" (data_of_frames frames)
 
 (* ---- TestServer two concurrent streams (ids 1 and 3) ---- *)
@@ -191,19 +194,27 @@ let test_two_streams () =
     let* () = client_handshake oc in
     let* () =
       client_headers oc ~stream_id:1
-        [ (":method", "GET"); (":path", "/a"); (":scheme", "https");
-          (":authority", "x") ]
+        [
+          (":method", "GET");
+          (":path", "/a");
+          (":scheme", "https");
+          (":authority", "x");
+        ]
     in
     let* () =
       client_headers oc ~stream_id:3
-        [ (":method", "GET"); (":path", "/b"); (":scheme", "https");
-          (":authority", "x") ]
+        [
+          (":method", "GET");
+          (":path", "/b");
+          (":scheme", "https");
+          (":authority", "x");
+        ]
     in
     let* () = Lwt_io.flush oc in
     let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
     (* collect until both stream 1 and stream 3 have ended *)
-    collect_frames ic dec []
-      ~until:(fun fs -> saw_end_stream 1 fs && saw_end_stream 3 fs)
+    collect_frames ic dec [] ~until:(fun fs ->
+        saw_end_stream 1 fs && saw_end_stream 3 fs)
   in
   let frames = run ~handler client in
   (* Both streams should produce a HEADERS with :status 200 and a DATA body. *)

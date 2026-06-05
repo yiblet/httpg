@@ -3,24 +3,21 @@
    parsing, GetBody, Cancel, TLS and context fields are intentionally omitted
    (deferred). *)
 
-(** A multipart file part, the analogue of Go's [multipart.FileHeader]. The
-    contents are held in memory (the multipart_form-lwt stand-in materializes
-    parts as strings). *)
 type file_header = {
   filename : string;
   fh_header : (string * string) list;
   content : string;
 }
+(** A multipart file part, the analogue of Go's [multipart.FileHeader]. The
+    contents are held in memory (the multipart_form-lwt stand-in materializes
+    parts as strings). *)
 
-(** The analogue of Go's [*multipart.Form]: named text values and file parts. *)
 type multipart_form = {
   value : Values.t;
   file : (string, file_header list) Hashtbl.t;
 }
+(** The analogue of Go's [*multipart.Form]: named text values and file parts. *)
 
-(** A request mirroring Go's [Request] struct. The body field is parametric so
-    the type carries no IO dependency; {!Io} instantiates ['body] to
-    {!Body.t}. *)
 type 'body t = {
   mutable meth : string;  (** Go [Method]; "" means GET for client requests *)
   mutable url : Uri.t;  (** Go [URL] (a [*url.URL] modeled as [Uri.t]) *)
@@ -44,48 +41,51 @@ type 'body t = {
       (** Go [Request.ctx]: the request context (deadline/cancellation),
           defaulting to {!Context.background}. *)
 }
+(** A request mirroring Go's [Request] struct. The body field is parametric so
+    the type carries no IO dependency; {!Io} instantiates ['body] to {!Body.t}.
+*)
 
-(** [defaultUserAgent]. *)
 val default_user_agent : string
+(** [defaultUserAgent]. *)
 
+val parse_http_version : string -> (int * int) option
 (** [ParseHTTPVersion vers]: [Some (major, minor)] on success, [None] on a
     malformed version. *)
-val parse_http_version : string -> (int * int) option
 
-(** [Request.ProtoAtLeast]. *)
 val proto_at_least : 'a t -> int -> int -> bool
+(** [Request.ProtoAtLeast]. *)
 
-(** [Request.UserAgent]: the "User-Agent" header value, or "". *)
 val user_agent : 'a t -> string
+(** [Request.UserAgent]: the "User-Agent" header value, or "". *)
 
-(** [Request.Referer]: the "Referer" header value, or "". *)
 val referer : 'a t -> string
+(** [Request.Referer]: the "Referer" header value, or "". *)
 
-(** [Request.Cookies]: all cookies in the "Cookie" header. *)
 val cookies : 'a t -> Cookie.t list
+(** [Request.Cookies]: all cookies in the "Cookie" header. *)
 
-(** [Request.Cookie name]: the named cookie, or [None] (Go's [ErrNoCookie]). *)
 val cookie : 'a t -> string -> Cookie.t option
+(** [Request.Cookie name]: the named cookie, or [None] (Go's [ErrNoCookie]). *)
 
-(** [Request.AddCookie]: append a single cookie to the "Cookie" header
-    (RFC 6265 5.4: one Cookie header field, semicolon-separated). *)
 val add_cookie : 'a t -> Cookie.t -> unit
+(** [Request.AddCookie]: append a single cookie to the "Cookie" header (RFC 6265
+    5.4: one Cookie header field, semicolon-separated). *)
 
-(** [parseBasicAuth auth]: [Some (username, password)] or [None]. *)
 val parse_basic_auth : string -> (string * string) option
+(** [parseBasicAuth auth]: [Some (username, password)] or [None]. *)
 
-(** [Request.BasicAuth]: parse the "Authorization" header. *)
 val basic_auth : 'a t -> (string * string) option
+(** [Request.BasicAuth]: parse the "Authorization" header. *)
 
-(** [basicAuth username password] (client.go): the base64 credential. *)
 val basic_auth_encode : string -> string -> string
+(** [basicAuth username password] (client.go): the base64 credential. *)
 
-(** [Request.SetBasicAuth]: set the "Authorization" header. *)
 val set_basic_auth : 'a t -> string -> string -> unit
+(** [Request.SetBasicAuth]: set the "Authorization" header. *)
 
+val context : 'a t -> Context.t
 (** [Request.Context]: the request's context (never nil; defaults to
     {!Context.background}). *)
-val context : 'a t -> Context.t
 
-(** [Request.WithContext]: a shallow copy of the request carrying [ctx]. *)
 val with_context : 'a t -> Context.t -> 'a t
+(** [Request.WithContext]: a shallow copy of the request carrying [ctx]. *)

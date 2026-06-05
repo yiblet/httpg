@@ -53,11 +53,11 @@ let deadline t = t.deadline_v
 let do_cancel c (cause : exn) =
   match c.err_cell with
   | Some _ -> () (* already cancelled: first cause wins *)
-  | None ->
-    c.err_cell <- Some cause;
-    (match c.wake with
-     | Some u -> Lwt.wakeup_later u ()
-     | None -> () (* unreachable for cancellable contexts *))
+  | None -> (
+      c.err_cell <- Some cause;
+      match c.wake with
+      | Some u -> Lwt.wakeup_later u ()
+      | None -> () (* unreachable for cancellable contexts *))
 
 (* Build a fresh cancellable child whose Done promise also fires when [parent]'s
    Done fires (Go's propagateCancel: a child is cancelled when its parent is).
@@ -71,10 +71,12 @@ let new_cancel_ctx (parent : t) ?(deadline_v = parent.deadline_v) () =
      the child is itself cancelled (its Done having resolved makes the bind a
      no-op on the already-resolved child). *)
   Lwt.async (fun () ->
-    Lwt.bind parent.done_p (fun () ->
-      let cause = match parent.err_cell with Some e -> e | None -> Canceled in
-      do_cancel c cause;
-      Lwt.return_unit));
+      Lwt.bind parent.done_p (fun () ->
+          let cause =
+            match parent.err_cell with Some e -> e | None -> Canceled
+          in
+          do_cancel c cause;
+          Lwt.return_unit));
   c
 
 (* Go's WithCancel: returns a child and a cancel function. The cancel function
@@ -104,11 +106,15 @@ let with_deadline (parent : t) (deadline_epoch : float) : t * (exn -> unit) =
   else begin
     let timer = Lwt_unix.sleep delay in
     Lwt.async (fun () ->
-      Lwt.bind timer (fun () -> do_cancel c Deadline_exceeded; Lwt.return_unit));
+        Lwt.bind timer (fun () ->
+            do_cancel c Deadline_exceeded;
+            Lwt.return_unit));
     (* Cancel the timer once the context is done by any route, to avoid leaking
        a pending sleep (Go's timerCtx.cancel stops the timer). *)
     Lwt.async (fun () ->
-      Lwt.bind c.done_p (fun () -> Lwt.cancel timer; Lwt.return_unit))
+        Lwt.bind c.done_p (fun () ->
+            Lwt.cancel timer;
+            Lwt.return_unit))
   end;
   (c, fun cause -> do_cancel c cause)
 

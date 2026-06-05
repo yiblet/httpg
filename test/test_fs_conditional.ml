@@ -10,7 +10,6 @@
 
 open Gohttp
 open Lwt.Infix
-
 module Ts = Httptest.Server
 
 (* ---- temp-dir helpers (same shape as test_fs.ml) ---- *)
@@ -42,7 +41,11 @@ let write_file path contents =
 
 let with_tmpdir f =
   let dir = mktempdir () in
-  Lwt.finalize (fun () -> f dir) (fun () -> rm_rf dir; Lwt.return_unit)
+  Lwt.finalize
+    (fun () -> f dir)
+    (fun () ->
+      rm_rf dir;
+      Lwt.return_unit)
 
 (* ---- scan_etag (Go's scanETag) ---- *)
 let scan_etag_unit () =
@@ -67,8 +70,7 @@ let scan_etag_unit () =
   (* invalid: empty *)
   Alcotest.(check bool) "empty -> None" true (Fs.scan_etag "" = None);
   (* invalid: unterminated quote *)
-  Alcotest.(check bool) "unterminated -> None" true
-    (Fs.scan_etag "\"abc" = None)
+  Alcotest.(check bool) "unterminated -> None" true (Fs.scan_etag "\"abc" = None)
 
 (* ---- A handler that sets an ETag (when given) then serves a file via
    serve_content, mirroring Go's TestServeContent which sets w.Header()'s Etag
@@ -124,7 +126,7 @@ let if_modified_since_304 () =
             let c = Ts.client s in
             (* plain GET to learn Last-Modified *)
             Client.get c (Ts.url s ^ "/x.txt") >>= fun r0 ->
-            Body.drain r0.Response.body >>= fun () ->
+            Body.drain r0.Response.body >>= fun _ ->
             let last_mod = Header.get r0.Response.header "Last-Modified" in
             (* If-Modified-Since == Last-Modified -> 304 *)
             request_with_headers c
@@ -133,9 +135,7 @@ let if_modified_since_304 () =
             >>= fun (status, body, _) -> Lwt.return (last_mod, status, body))
           (fun () -> Ts.close s))
   in
-  let last_mod, status, body =
-    Lwt_main.run (Net.with_timeout 10. (run ()))
-  in
+  let last_mod, status, body = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check bool) "Last-Modified present" true (last_mod <> "");
   Alcotest.(check int) "If-Modified-Since >= modtime -> 304" 304 status;
   Alcotest.(check string) "304 body empty" "" body
@@ -177,16 +177,14 @@ let if_none_match_304 () =
           (fun () ->
             let c = Ts.client s in
             (* exact strong match -> 304 *)
-            request_with_headers c (Ts.url s)
-              [ ("If-None-Match", "\"foo\"") ]
+            request_with_headers c (Ts.url s) [ ("If-None-Match", "\"foo\"") ]
             >>= fun (st1, b1, _) ->
             (* weak-match in a list -> 304 (If-None-Match uses weak compare) *)
             request_with_headers c (Ts.url s)
               [ ("If-None-Match", "\"baz\", W/\"foo\"") ]
             >>= fun (st2, _, _) ->
             (* non-matching ETag -> 200 served *)
-            request_with_headers c (Ts.url s)
-              [ ("If-None-Match", "\"Foo\"") ]
+            request_with_headers c (Ts.url s) [ ("If-None-Match", "\"Foo\"") ]
             >>= fun (st3, b3, _) -> Lwt.return (st1, b1, st2, st3, b3))
           (fun () -> Ts.close s))
   in
@@ -210,17 +208,14 @@ let if_match_412 () =
           (fun () ->
             let c = Ts.client s in
             (* If-Match a wrong ETag -> 412 *)
-            request_with_headers c (Ts.url s)
-              [ ("If-Match", "\"wrong\"") ]
+            request_with_headers c (Ts.url s) [ ("If-Match", "\"wrong\"") ]
             >>= fun (st_bad, _, _) ->
             (* If-Match the right ETag -> 200 *)
-            request_with_headers c (Ts.url s)
-              [ ("If-Match", "\"right\"") ]
+            request_with_headers c (Ts.url s) [ ("If-Match", "\"right\"") ]
             >>= fun (st_ok, b_ok, _) ->
             (* If-Match: * -> 200 *)
             request_with_headers c (Ts.url s) [ ("If-Match", "*") ]
-            >>= fun (st_star, _, _) ->
-            Lwt.return (st_bad, st_ok, b_ok, st_star))
+            >>= fun (st_star, _, _) -> Lwt.return (st_bad, st_ok, b_ok, st_star))
           (fun () -> Ts.close s))
   in
   let st_bad, st_ok, b_ok, st_star =
@@ -250,7 +245,7 @@ let if_unmodified_since_412 () =
             >>= fun (st_old, _, _) ->
             (* learn Last-Modified, then If-Unmodified-Since == modtime -> 200 *)
             Client.get c (Ts.url s ^ "/u.txt") >>= fun r0 ->
-            Body.drain r0.Response.body >>= fun () ->
+            Body.drain r0.Response.body >>= fun _ ->
             let last_mod = Header.get r0.Response.header "Last-Modified" in
             request_with_headers c
               (Ts.url s ^ "/u.txt")

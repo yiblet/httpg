@@ -10,52 +10,49 @@
       large").
     - {!Not_multipart} is Go's [ErrNotMultipart]: [parse_multipart_form] on a
       non-multipart/form-data request. *)
-type error =
-  | Form of string
-  | Not_multipart
+type error = Form of string | Not_multipart
 
-(** Render an {!error} as its Go message text. *)
 val error_to_string : error -> string
+(** Render an {!error} as its Go message text. *)
 
+exception Media_type_error of string
 (** Raised by {!parse_media_type} on an invalid media parameter (Go's
     [mime.ParseMediaType] error). This pure helper keeps Go's error-as-exception
-    shape; the result-returning entrypoints {!parse_form}/{!parse_multipart_form}
-    catch it and surface {!Form}. *)
-exception Media_type_error of string
+    shape; the result-returning entrypoints
+    {!parse_form}/{!parse_multipart_form} catch it and surface {!Form}. *)
 
-(** [defaultMaxMemory] = 32 MB. *)
 val default_max_memory : int64
+(** [defaultMaxMemory] = 32 MB. *)
 
+val parse_media_type : string -> string * (string * string) list
 (** [mime.ParseMediaType v]: the lowercased bare media type and its parameters.
     Raises {!Media_type_error} for invalid parameters. *)
-val parse_media_type : string -> string * (string * string) list
 
+val parse_form : Body.t Request.t -> (unit, error) result Lwt.t
 (** [Request.ParseForm]: populate [r.form] (query + urlencoded body) and
     [r.post_form] (body only). Idempotent. Returns the first error encountered
     instead of raising (mirroring Go's error return). For POST/PUT/PATCH with
     Content-Type application/x-www-form-urlencoded the body is read and parsed;
     body params take precedence in [r.form]. *)
-val parse_form : Body.t Request.t -> (unit, error) result Lwt.t
 
-(** [Request.ParseMultipartForm ~max_memory]: parse a multipart/form-data body
-    into [r.multipart_form], also merging text values into [r.form]/[r.post_form]
-    (Issue 9305). Calls {!parse_form} first. Returns [Error Not_multipart] for a
-    non-multipart request or [Error (Form _)] on a parse failure. Idempotent.
-    NOTE: [max_memory] is accepted for signature fidelity but the stand-in
-    library materializes all parts in memory. *)
 val parse_multipart_form :
   Body.t Request.t -> max_memory:int64 -> (unit, error) result Lwt.t
+(** [Request.ParseMultipartForm ~max_memory]: parse a multipart/form-data body
+    into [r.multipart_form], also merging text values into
+    [r.form]/[r.post_form] (Issue 9305). Calls {!parse_form} first. Returns
+    [Error Not_multipart] for a non-multipart request or [Error (Form _)] on a
+    parse failure. Idempotent. NOTE: [max_memory] is accepted for signature
+    fidelity but the stand-in library materializes all parts in memory. *)
 
+val form_value : Body.t Request.t -> string -> string Lwt.t
 (** [Request.FormValue key]: the first value for [key], lazily parsing
     (ParseMultipartForm then ParseForm) and ignoring errors. "" if absent. *)
-val form_value : Body.t Request.t -> string -> string Lwt.t
 
+val post_form_value : Body.t Request.t -> string -> string Lwt.t
 (** [Request.PostFormValue key]: the first body value for [key] (query ignored),
     lazily parsing and ignoring errors. "" if absent. *)
-val post_form_value : Body.t Request.t -> string -> string Lwt.t
 
-(** [Request.FormFile key]: the first file for [key] as
-    [(filename, content)] (a simplification of Go's
-    [(multipart.File, *multipart.FileHeader)]), lazily parsing. [None] if
-    absent. *)
 val form_file : Body.t Request.t -> string -> (string * string) option Lwt.t
+(** [Request.FormFile key]: the first file for [key] as [(filename, content)] (a
+    simplification of Go's [(multipart.File, *multipart.FileHeader)]), lazily
+    parsing. [None] if absent. *)

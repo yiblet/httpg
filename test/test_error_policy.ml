@@ -22,11 +22,14 @@
    [.mli] files are declared as deps of the test executable (see test/dune) so
    dune materializes them next to the runner. *)
 
-let candidate_lib_dirs =
-  [ "../lib"; "lib"; "../../lib"; "../default/lib" ]
+let candidate_lib_dirs = [ "../lib"; "lib"; "../../lib"; "../default/lib" ]
 
 let find_lib_dir () =
-  match List.find_opt (fun d -> Sys.file_exists (Filename.concat d "io.mli")) candidate_lib_dirs with
+  match
+    List.find_opt
+      (fun d -> Sys.file_exists (Filename.concat d "io.mli"))
+      candidate_lib_dirs
+  with
   | Some d -> d
   | None ->
       Alcotest.failf
@@ -73,39 +76,74 @@ let contains ~needle haystack =
 (* The HTTP/2 stack lives in lib/internal/http2/ (its own gohttp_http2 library);
    hpack/hpack_huffman/h2_frame/h2_error are reached by their nested path. *)
 let modules_with_type_error =
-  [ "transfer"; "io"; "internal/http2/hpack"; "internal/http2/hpack_huffman";
-    "pattern"; "values"; "cookie"; "fs"; "form"; "server" ]
+  [
+    "transfer";
+    "io";
+    "internal/http2/hpack";
+    "internal/http2/hpack_huffman";
+    "pattern";
+    "values";
+    "cookie";
+    "fs";
+    "form";
+    "server";
+  ]
 
 (* All [.mli] files we sweep for the no-[_exn] guard. *)
 let all_mli_modules =
   modules_with_type_error
-  @ [ "internal/http2/h2_frame"; "internal/http2/h2_error"; "client";
-      "transport"; "internal/chunked" ]
+  @ [
+      "internal/http2/h2_frame";
+      "internal/http2/h2_error";
+      "client";
+      "transport";
+      "internal/chunked";
+    ]
 
 (* The unhandleable allowlist: modules whose surviving exceptions /
    invariants / control-flow sentinels are deliberately kept (never converted
    to Result). Enumerated here as a static, documented list mirroring
    [plans/error-handling-audit.md] "Unhandleable allowlist". *)
 let unhandleable_allowlist =
-  [ "h2_flow";          (* Invalid_argument: window-accounting invariant *)
-    "h2_writesched";    (* Failure: scheduler invariant *)
-    "net";              (* Failure: bound_port + TLS/csr setup misuse *)
-    "hpack_tables";     (* Invalid_argument: table-index invariant (evict_oldest) *)
-    "hpack";            (* exception Need_more: decoder control-flow sentinel *)
-    "hpack_huffman";    (* raise Exit: internal loop control flow *)
-    "pattern";          (* let exception Done; failwith describeConflict invariants *)
-    "mapping";          (* let exception Stop: iteration control flow *)
-    "cookie";           (* raise Exit: String.iter early-exit *)
-    "h2_frame";         (* Invalid_argument "illegal window increment": write-side invariant *)
-    "context";          (* exception Canceled / Deadline_exceeded: the context contract *)
-    "httptest";         (* invalid_arg "invalid WriteHeader code": precondition *)
-    "routing_tree";     (* failwith: tree-construction invariant *)
-    "h2_write";         (* failwith "unexpected empty hpack": encoder invariant *)
-    "h2_pipe";          (* Closed_pipe_write / Uninitialized_pipe_write: write invariants *)
-    "h2_databuffer";    (* Read_empty: read-past-empty invariant *)
-    "h2_transport";     (* internal conn-loop control-flow exceptions (boundary-only conv) *)
-    "h2_server";        (* internal conn-loop control-flow (boundary-only conv) *)
-    "client";           (* exception Aborted of error: typed redirect-abort carrier *)
+  [
+    "h2_flow";
+    (* Invalid_argument: window-accounting invariant *)
+    "h2_writesched";
+    (* Failure: scheduler invariant *)
+    "net";
+    (* Failure: bound_port + TLS/csr setup misuse *)
+    "hpack_tables";
+    (* Invalid_argument: table-index invariant (evict_oldest) *)
+    "hpack";
+    (* exception Need_more: decoder control-flow sentinel *)
+    "hpack_huffman";
+    (* raise Exit: internal loop control flow *)
+    "pattern";
+    (* let exception Done; failwith describeConflict invariants *)
+    "mapping";
+    (* let exception Stop: iteration control flow *)
+    "cookie";
+    (* raise Exit: String.iter early-exit *)
+    "h2_frame";
+    (* Invalid_argument "illegal window increment": write-side invariant *)
+    "context";
+    (* exception Canceled / Deadline_exceeded: the context contract *)
+    "httptest";
+    (* invalid_arg "invalid WriteHeader code": precondition *)
+    "routing_tree";
+    (* failwith: tree-construction invariant *)
+    "h2_write";
+    (* failwith "unexpected empty hpack": encoder invariant *)
+    "h2_pipe";
+    (* Closed_pipe_write / Uninitialized_pipe_write: write invariants *)
+    "h2_databuffer";
+    (* Read_empty: read-past-empty invariant *)
+    "h2_transport";
+    (* internal conn-loop control-flow exceptions (boundary-only conv) *)
+    "h2_server";
+    (* internal conn-loop control-flow (boundary-only conv) *)
+    "client";
+    (* exception Aborted of error: typed redirect-abort carrier *)
   ]
 
 (* ----------------------------------------------------------------------- *)
@@ -132,11 +170,13 @@ let test_no_handleable_raise_escapes () =
     modules_with_type_error;
   (* h2_error owns the unified handleable type as [type t]. *)
   let h2_error = read_mli lib "internal/http2/h2_error" in
-  Alcotest.(check bool) "h2_error.mli declares 'type t'" true
+  Alcotest.(check bool)
+    "h2_error.mli declares 'type t'" true
     (contains ~needle:"type t" h2_error);
   (* h2_frame surfaces the unified [H2_error.t] at its read boundary. *)
   let h2_frame = read_mli lib "internal/http2/h2_frame" in
-  Alcotest.(check bool) "h2_frame.mli references H2_error.t in a result" true
+  Alcotest.(check bool)
+    "h2_frame.mli references H2_error.t in a result" true
     (contains ~needle:"H2_error.t) result" h2_frame)
 
 let test_unhandleable_allowlisted () =
@@ -144,11 +184,13 @@ let test_unhandleable_allowlisted () =
      allowlist. It is intentionally a static enumeration that mirrors
      [plans/error-handling-audit.md]; if a surviving exception is added or
      removed, this list and the audit doc must be updated together. *)
-  Alcotest.(check bool) "allowlist is non-empty" true
+  Alcotest.(check bool)
+    "allowlist is non-empty" true
     (List.length unhandleable_allowlist > 0);
   (* No duplicates in the enumerated allowlist. *)
   let sorted = List.sort_uniq String.compare unhandleable_allowlist in
-  Alcotest.(check int) "allowlist has no duplicates"
+  Alcotest.(check int)
+    "allowlist has no duplicates"
     (List.length unhandleable_allowlist)
     (List.length sorted);
   (* Spot-check the canonical entries called out by the plan are present. *)
@@ -158,12 +200,26 @@ let test_unhandleable_allowlisted () =
         (Printf.sprintf "allowlist contains %s" expected)
         true
         (List.mem expected unhandleable_allowlist))
-    [ "h2_flow"; "h2_writesched"; "net"; "hpack_tables"; "hpack";
-      "pattern"; "mapping"; "context"; "h2_pipe"; "h2_databuffer";
-      "routing_tree"; "h2_write"; "httptest" ]
+    [
+      "h2_flow";
+      "h2_writesched";
+      "net";
+      "hpack_tables";
+      "hpack";
+      "pattern";
+      "mapping";
+      "context";
+      "h2_pipe";
+      "h2_databuffer";
+      "routing_tree";
+      "h2_write";
+      "httptest";
+    ]
 
 let tests =
-  [ Alcotest.test_case "no_handleable_raise_escapes" `Quick
+  [
+    Alcotest.test_case "no_handleable_raise_escapes" `Quick
       test_no_handleable_raise_escapes;
     Alcotest.test_case "unhandleable_allowlisted" `Quick
-      test_unhandleable_allowlisted ]
+      test_unhandleable_allowlisted;
+  ]

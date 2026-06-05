@@ -27,7 +27,9 @@ let test_is_print () =
       ("ASCII low non-print", "This is a unit separator: \x1f", false);
       ("ASCII high non-print", "This is a Delete: \x7f", false);
       (* Kelvin sign U+212A. *)
-      ("Unicode letter", "Today it's 280\xe2\x84\xaa outside: it's freezing!", false);
+      ( "Unicode letter",
+        "Today it's 280\xe2\x84\xaa outside: it's freezing!",
+        false );
       (* Cheese emoji U+1F9C0. *)
       ("Unicode emoji", "Gophers like \xf0\x9f\xa7\x80", false);
     ]

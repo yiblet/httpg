@@ -48,15 +48,11 @@ let alpn_negotiates_h2 () =
   let server ~ic:_ ~oc:_ ~proto = Lwt.return proto in
   let client ~ic:_ ~oc:_ ~proto = Lwt.return proto in
   let cproto, sproto =
-    with_tls_pair
-      ~server_alpn:[ "h2"; "http/1.1" ]
-      ~client_alpn:[ "h2"; "http/1.1" ]
-      ~server ~client ()
+    with_tls_pair ~server_alpn:[ "h2"; "http/1.1" ]
+      ~client_alpn:[ "h2"; "http/1.1" ] ~server ~client ()
   in
-  Alcotest.(check (option string))
-    "client negotiated h2" (Some "h2") cproto;
-  Alcotest.(check (option string))
-    "server negotiated h2" (Some "h2") sproto
+  Alcotest.(check (option string)) "client negotiated h2" (Some "h2") cproto;
+  Alcotest.(check (option string)) "server negotiated h2" (Some "h2") sproto
 
 (* (b) Server advertises ["h2"; "http/1.1"], client advertises only
    ["http/1.1"] => negotiated "http/1.1". *)
@@ -64,9 +60,7 @@ let alpn_negotiates_http11 () =
   let server ~ic:_ ~oc:_ ~proto = Lwt.return proto in
   let client ~ic:_ ~oc:_ ~proto = Lwt.return proto in
   let cproto, sproto =
-    with_tls_pair
-      ~server_alpn:[ "h2"; "http/1.1" ]
-      ~client_alpn:[ "http/1.1" ]
+    with_tls_pair ~server_alpn:[ "h2"; "http/1.1" ] ~client_alpn:[ "http/1.1" ]
       ~server ~client ()
   in
   Alcotest.(check (option string))
@@ -92,10 +86,8 @@ let tls_byte_roundtrip () =
     Lwt.return echoed
   in
   let echoed, () =
-    with_tls_pair
-      ~server_alpn:[ "h2"; "http/1.1" ]
-      ~client_alpn:[ "h2"; "http/1.1" ]
-      ~server ~client ()
+    with_tls_pair ~server_alpn:[ "h2"; "http/1.1" ]
+      ~client_alpn:[ "h2"; "http/1.1" ] ~server ~client ()
   in
   Alcotest.(check string) "echoed line over TLS" "PING-over-TLS" echoed
 
