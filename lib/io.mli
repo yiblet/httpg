@@ -61,6 +61,13 @@ type error =
           so per the mid-stream policy this {b keeps raising} rather than
           surfacing as a boundary [Error] from {!read_request}/{!read_response}.
       *)
+  | Malformed_host
+      (** {!read_request}: the single inbound [Host] header value contained a
+          byte outside Go's lenient host byte set ([httpguts.ValidHostHeader],
+          httplex.go:209-263); the server answers [400 Bad Request]
+          (server.go:1050-1051). A missing required Host (HTTP/1.1+,
+          non-CONNECT, non-h2-upgrade) and an invalid header name/value
+          (server.go:1045-1062) surface as {!Protocol} (also 400). *)
 
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)
@@ -86,6 +93,12 @@ val read_request :
     against [max_header_bytes + 4096] bytes (Go's [initialReadLimitSize], the
     "bufio slop", server.go:929); exceeding it short-circuits as
     [Error Request_too_large]. Omitting it leaves the head read unbounded.
+
+    After the header block is parsed, a validation sweep mirroring Go's
+    [conn.serve] (server.go:1045-1062) runs: a missing required [Host] on
+    HTTP/1.1+ (non-CONNECT, non-h2-upgrade), an invalid header name or
+    CTL-bearing header value short-circuit as [Error (Protocol _)], and a
+    malformed [Host] value as [Error Malformed_host] — all answered 400.
 
     Header / initial-parse errors short-circuit as [Error]; see {!error} for the
     mid-stream policy. *)

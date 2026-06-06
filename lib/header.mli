@@ -50,6 +50,12 @@ val has : t -> string -> bool
 val clone : t -> t
 (** A deep copy of the header (Go's [Header.Clone]). *)
 
+val valid_header_field_name : string -> bool
+(** Whether [s] is a valid HTTP/1.x header field name: a non-empty RFC 7230
+    token (Go's [httpguts.ValidHeaderFieldName], httplex.go:196-206). Used on
+    the write path to drop invalid keys and on the read path to reject inbound
+    requests bearing a non-token header name (server.go:1053-1055). *)
+
 val write : t -> Buffer.t -> unit
 (** [write h buf] writes the header to [buf] as sorted [Key: value\r\n] lines
     (Go's [Header.Write]). *)

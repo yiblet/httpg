@@ -318,7 +318,7 @@ Test Successful in 2.281s. 512 tests run.
 ---
 
 ### Ticket 4 — Server read-path header-name/value + Host validation (Cases 6 & 8)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Add Go's post-parse validation sweep on inbound requests: reject non-token header **names** and CTL-bearing values (Case 6 read-side), reject a missing `Host` on HTTP/1.1 and a malformed `Host` value (Case 8). Outbound CRLF neutralization is already faithful (`header.ml`) — no change there.
@@ -341,7 +341,40 @@ Requests with invalid header names/values or missing/malformed Host get `400`; v
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/io.ml`:
+  - New internal sentinel `exception Malformed_host` + `malformed_host_sentinel` alias (Go's `badRequestError("malformed Host header")`, server.go:1051), declared before `type error` so the `Malformed_host` arm can shadow the name — the same idiom as the existing `Missing_host`/`Request_too_large`/`Trailer_too_large` sentinels. New `Io.error` arm `Malformed_host` (`error_to_string` = `"malformed Host header"`), mapped at the boundary in `error_of_exception` (`e == malformed_host_sentinel -> Malformed_host`), riding the established `to_result` catch-at-boundary path.
+  - New `valid_host_byte`/`valid_host_header` — a faithful port of httpguts `validHostByte`/`ValidHostHeader` (httplex.go:209-263): the lenient host byte table (alnum + sub-delims + unreserved + `% : [ ] ' _ ~` etc.), placed next to the existing `valid_header_value_byte`.
+  - **The validation sweep** added to `read_request_raising` right after the `too many Host headers` check, before the Host is derived/deleted, mirroring Go's `conn.serve` ordering (server.go:1045-1062): (1) missing required Host on proto≥1.1, non-CONNECT, non-h2-upgrade → `Protocol_error "missing required Host header"`; (2) a single malformed Host value → `malformed_host_sentinel`; (3) the per-header name/value loop over the parsed `Header.t`: `Header.valid_header_field_name k` false → `Protocol_error "invalid header name"`, any value byte failing `valid_header_value_byte` → `Protocol_error "invalid header value"`. `is_h2_upgrade` ports request.go:529 (`PRI`, empty headers, path `*`, `HTTP/2.0`).
+- `lib/io.mli`: added the `Malformed_host` boundary-error arm and documented the validation sweep on `read_request`.
+- `lib/header.ml`/`lib/header.mli`: exposed the already-present `valid_header_field_name` in the `.mli` (no impl change) so the read path can reuse it — no second token table.
+- `lib/server.ml`: added `Io.Malformed_host` to `write_read_error_response`'s 400 arm (alongside `Protocol`/`Missing_host`/`Transfer`/`Trailer_too_large`), matching Go's `badRequestError` → 400.
+- `test/test_abuse.ml`: added `rejects_invalid_header_name`, `rejects_bad_host_header`, `rejects_missing_host_http11`, `accepts_valid_host_and_headers` (raw-loopback integration, bounded by `Net.with_timeout`).
+
+**Error-variant decisions**
+- **Added `Malformed_host`** (own variant) — Go gives malformed Host its own `badRequestError` message; a distinct arm keeps the boundary error faithful and reusable.
+- **Reused `Protocol`** for invalid-header-name, invalid-header-value, and missing-Host. All map to 400; `Protocol` carries Go's exact message text (`"invalid header name"` / `"invalid header value"` / `"missing required Host header"`). The write-side `Missing_host` arm was **not** reused for the inbound missing-Host case: its `error_to_string` is the write-path message (`"http: Request.Write on Request with no Host or URL set"`), which would be wrong inbound. `Protocol "missing required Host header"` is the faithful inbound message and still maps to 400, so the dead inbound `Missing_host` arm stays for the write path only.
+
+**Precedent followed**
+- **Write-side `Header.valid_header_field_name`** (header.ml:65): reused verbatim on the read path — no second token table. **Verified against Go:** it is `String.length s > 0 && String.for_all Gohttp_base.Textproto.valid_header_field_byte s`, and `valid_header_field_byte` matches httpguts `isTokenTable` (httplex.go:15-93) byte-for-byte (tchar set). Faithful; no correction.
+- **`valid_header_value_byte`** (io.ml): reused for the value-byte check. **Verified:** `b = 0x09 || (b >= 0x20 && b <> 0x7f)` is exactly `!(isCTL(b) && !isLWS(b))` from httpguts `ValidHeaderFieldValue` (httplex.go:303-310) — allows HTAB and any non-DEL byte ≥ 0x20 (incl. high bytes), rejects other CTLs. Faithful; no correction.
+- **Sentinel→`error` boundary** (io.ml `error_of_exception`/`to_result`): `Malformed_host` added the same way as T2/T3's `Request_too_large`/`Trailer_too_large` — raised deep, mapped once at the boundary. Invalid-name/value/missing-Host reuse the existing `Protocol_error` sentinel directly.
+
+**Fuzz harness:** the HTTP Garden harness directory (`fuzz/garden/`) is not present in this checkout, so it could not be consulted. The four alcotest tests cover the no-Host (`GET / HTTP/1.1\r\n\r\n` → 400) and malformed-target/Host (`Host: bad host` → 400) cases the harness flagged; both verified passing.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                   8   rejects_invalid_header_name.
+  [OK]          Abuse                   9   rejects_bad_host_header.
+  [OK]          Abuse                  10   rejects_missing_host_http11.
+  [OK]          Abuse                  11   accepts_valid_host_and_headers.
+
+Test Successful in 2.274s. 516 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt`/`dune build @fmt` clean, full `dune test --force` green (516 tests: 512 prior + 4 new).
+
+**Commit:** `pnzmvtww` (`feat(io): validate inbound header names/values + Host (400 on violation)`).
 
 ---
 

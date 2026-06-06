@@ -346,6 +346,101 @@ let chunked_small_trailer_ok () =
       Alcotest.(check string) "trailer Md5" "abc123" (Header.get t "Md5")
   | None -> Alcotest.fail "expected a parsed trailer header"
 
+(* ------------------------------------------------------------------ *)
+(* Ticket 4 — server read-path header-name/value + Host validation     *)
+(* (Cases 6 & 8).                                                       *)
+(*                                                                      *)
+(* Go runs a post-parse validation sweep on every inbound request       *)
+(* (server.go:1045-1062): a missing required Host on HTTP/1.1, a         *)
+(* malformed Host value (httpguts.ValidHostHeader), and any non-token    *)
+(* header name / CTL-bearing header value all yield 400 Bad Request via  *)
+(* badRequestError. We drive a real loopback server with a raw socket    *)
+(* and assert the status line. *)
+(* ------------------------------------------------------------------ *)
+
+(* Send [raw] to a fresh loopback server, read the status line, confirm the
+   connection is then closed. Returns the status line. *)
+let send_raw_expect_status raw =
+  let run () =
+    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        Lwt_io.write oc raw >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_status_line ic >>= fun status ->
+        Lwt_io.close oc >>= fun () -> Lwt.return status)
+      (fun () -> Server.close srv)
+  in
+  Lwt_main.run (Net.with_timeout 3. (run ()))
+
+let status_contains status needle =
+  match Str.search_forward (Str.regexp_string needle) status 0 with
+  | _ -> true
+  | exception Not_found -> false
+
+(* TestServerRejectsInvalidHeaderName (server.go:1053-1055,
+   httpguts.ValidHeaderFieldName): a header whose name is not a token (here a
+   space inside the name) -> 400 Bad Request. *)
+let rejects_invalid_header_name () =
+  let status =
+    send_raw_expect_status
+      "GET / HTTP/1.1\r\nHost: localhost\r\nFoo Bar: x\r\n\r\n"
+  in
+  Alcotest.(check bool)
+    (Printf.sprintf "400 for invalid header name (%S)" status)
+    true
+    (status_contains status "400")
+
+(* TestServerRejectsBadHostHeader (server.go:1050-1051,
+   httpguts.ValidHostHeader): a Host value bearing a byte outside the lenient
+   host byte set (a space) -> 400 Bad Request. *)
+let rejects_bad_host_header () =
+  let status =
+    send_raw_expect_status "GET / HTTP/1.1\r\nHost: bad host\r\n\r\n"
+  in
+  Alcotest.(check bool)
+    (Printf.sprintf "400 for malformed Host (%S)" status)
+    true
+    (status_contains status "400")
+
+(* TestServerRejectsMissingHostHTTP11 (server.go:1045-1048): an HTTP/1.1 request
+   with no Host header, non-CONNECT, non-h2-upgrade -> 400 Bad Request. *)
+let rejects_missing_host_http11 () =
+  let status = send_raw_expect_status "GET / HTTP/1.1\r\n\r\n" in
+  Alcotest.(check bool)
+    (Printf.sprintf "400 for missing Host on HTTP/1.1 (%S)" status)
+    true
+    (status_contains status "400")
+
+(* TestServerAcceptsValidHostAndHeaders: a normal, valid HTTP/1.1 request with a
+   well-formed Host and header is served 200 — the sweep must not produce false
+   positives. *)
+let accepts_valid_host_and_headers () =
+  let run () =
+    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        Lwt_io.write oc
+          "GET / HTTP/1.1\r\nHost: localhost:8080\r\nX-Token: ok\r\n\r\n"
+        >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_one_response ic >>= fun resp ->
+        Lwt_io.close oc >>= fun () -> Lwt.return resp)
+      (fun () -> Server.close srv)
+  in
+  let resp = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "served 200 (%S)"
+       (String.sub resp 0 (min 20 (String.length resp))))
+    true
+    (status_contains resp "200 OK")
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -361,4 +456,11 @@ let tests =
       chunked_empty_trailer_ok;
     Alcotest.test_case "chunked_small_trailer_ok" `Quick
       chunked_small_trailer_ok;
+    Alcotest.test_case "rejects_invalid_header_name" `Quick
+      rejects_invalid_header_name;
+    Alcotest.test_case "rejects_bad_host_header" `Quick rejects_bad_host_header;
+    Alcotest.test_case "rejects_missing_host_http11" `Quick
+      rejects_missing_host_http11;
+    Alcotest.test_case "accepts_valid_host_and_headers" `Quick
+      accepts_valid_host_and_headers;
   ]

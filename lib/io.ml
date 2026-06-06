@@ -44,6 +44,15 @@ exception Trailer_too_large
 
 let trailer_too_large_sentinel = Trailer_too_large
 
+(* badRequestError("malformed Host header") (server.go:1051): the single inbound
+   Host value contained a byte outside [httpguts.ValidHostHeader]'s lenient host
+   byte set (httplex.go:209-263). Declared before [type error] (whose
+   [Malformed_host] arm shadows the name) and aliased so the deep parser can raise
+   it; caught at the boundary and mapped to the {!error} arm -> 400. *)
+exception Malformed_host
+
+let malformed_host_sentinel = Malformed_host
+
 (* Handleable boundary error (see io.mli). *)
 type error =
   | Protocol of string
@@ -52,6 +61,7 @@ type error =
   | Unexpected_eof
   | Request_too_large
   | Trailer_too_large
+  | Malformed_host
 
 let error_to_string = function
   | Protocol s -> s
@@ -60,6 +70,7 @@ let error_to_string = function
   | Unexpected_eof -> "unexpected EOF"
   | Request_too_large -> "http: request too large"
   | Trailer_too_large -> "http: suspiciously long trailer after chunked body"
+  | Malformed_host -> "malformed Host header"
 
 (* Internal sentinels carrying a typed boundary error through the raising parse
    path. Caught at the read/write boundary and mapped to {!error}; never escape
@@ -83,6 +94,7 @@ let error_of_exception = function
   | e when e == missing_host_sentinel -> Missing_host
   | e when e == request_too_large_sentinel -> Request_too_large
   | e when e == trailer_too_large_sentinel -> Trailer_too_large
+  | e when e == malformed_host_sentinel -> Malformed_host
   | e -> raise e
 
 (* ------------------------------------------------------------------ *)
@@ -154,6 +166,21 @@ let valid_header_value_byte c =
   let b = Char.code c in
   (* From Go: \t (0x09) and any byte >= 0x20 except DEL (0x7f). *)
   b = 0x09 || (b >= 0x20 && b <> 0x7f)
+
+(* httpguts.ValidHostHeader / validHostByte (httplex.go:209-263): a lenient host
+   byte set — uri-host plus the optional ":port" — searching for any byte that is
+   not valid in those grammars rather than fully parsing. Faithful port of the
+   [validHostByte] table. *)
+let valid_host_byte c =
+  match c with
+  | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
+  (* sub-delims, unreserved, pct-encoded, IPv6 brackets/zone, port colon. *)
+  | '!' | '$' | '%' | '&' | '(' | ')' | '*' | '+' | ',' | '-' | '.' | ':' | ';'
+  | '=' | '[' | '\'' | ']' | '_' | '~' ->
+      true
+  | _ -> false
+
+let valid_host_header h = String.for_all valid_host_byte h
 
 (* ReadMIMEHeader: read a CRLF-terminated header block (until the blank line),
    honoring obs-fold continuation lines (lines starting with space/tab). Returns
@@ -380,65 +407,104 @@ let read_request_raising ?(max_header_bytes : int option)
             if List.length (Header.values header "Host") > 1 then
               Lwt.fail (Protocol_error "too many Host headers")
             else begin
-              let host =
-                match Uri.host url with
-                | Some h when h <> "" -> h
-                | _ -> Header.get header "Host"
+              (* Post-parse validation sweep (server.go:1045-1062). Go's
+                 [isH2Upgrade]: method "PRI", no headers, path "*", proto
+                 "HTTP/2.0" (request.go:529). *)
+              let proto_at_least_11 =
+                proto_major > 1 || (proto_major = 1 && proto_minor >= 1)
               in
-              fix_pragma_cache_control header;
-              let close =
-                Transfer.should_close ~major:proto_major ~minor:proto_minor
-                  ~header ~remove_close_header:false
+              let host_values = Header.values header "Host" in
+              let is_h2_upgrade =
+                meth = "PRI"
+                && Hashtbl.length header = 0
+                && Uri.path url = "*"
+                && proto = "HTTP/2.0"
               in
-              let msg =
-                {
-                  Transfer.is_response = false;
+              (* Missing required Host on HTTP/1.1+ (server.go:1045-1048). *)
+              if
+                proto_at_least_11 && host_values = [] && (not is_h2_upgrade)
+                && meth <> "CONNECT"
+              then Lwt.fail (Protocol_error "missing required Host header")
+              else
+                (* Malformed single Host value (server.go:1050-1051). *)
+                begin match host_values with
+                | [ h ] when not (valid_host_header h) ->
+                    Lwt.fail malformed_host_sentinel
+                | _ -> Lwt.return_unit
+                end
+                >>= fun () ->
+                (* Invalid header name / value sweep (server.go:1053-1062), using
+                 the write-side [Header.valid_header_field_name] and the read-side
+                 [valid_header_value_byte]. *)
+                Hashtbl.iter
+                  (fun k vs ->
+                    if not (Header.valid_header_field_name k) then
+                      raise (Protocol_error "invalid header name");
+                    List.iter
+                      (fun v ->
+                        if not (String.for_all valid_header_value_byte v) then
+                          raise (Protocol_error "invalid header value"))
+                      vs)
                   header;
-                  status_code = 0;
-                  request_method = meth;
-                  proto_major;
-                  proto_minor;
-                  close;
-                }
-              in
-              read_transfer_or_raise msg ic >>= fun res ->
-              (* ReadRequest deletes the Host header. *)
-              Header.del header "Host";
-              (* Build the record first with the declared trailer; the streaming
+                let host =
+                  match Uri.host url with
+                  | Some h when h <> "" -> h
+                  | _ -> Header.get header "Host"
+                in
+                fix_pragma_cache_control header;
+                let close =
+                  Transfer.should_close ~major:proto_major ~minor:proto_minor
+                    ~header ~remove_close_header:false
+                in
+                let msg =
+                  {
+                    Transfer.is_response = false;
+                    header;
+                    status_code = 0;
+                    request_method = meth;
+                    proto_major;
+                    proto_minor;
+                    close;
+                  }
+                in
+                read_transfer_or_raise msg ic >>= fun res ->
+                (* ReadRequest deletes the Host header. *)
+                Header.del header "Host";
+                (* Build the record first with the declared trailer; the streaming
                body's EOF action mutates [r.trailer] (Go's mergeSetHeader onto
                rr.Trailer) on the chunked trailer read. *)
-              let r =
-                {
-                  Request.meth;
-                  url;
-                  proto;
-                  proto_major;
-                  proto_minor;
-                  header;
-                  body = Body.Empty;
-                  content_length = res.Transfer.content_length;
-                  transfer_encoding =
-                    (if res.Transfer.is_chunked then [ "chunked" ] else []);
-                  close = res.Transfer.result_close;
-                  host;
-                  trailer = res.Transfer.trailer;
-                  request_uri;
-                  remote_addr = "";
-                  form = None;
-                  post_form = None;
-                  multipart_form = None;
-                  ctx = Context.background;
-                }
-              in
-              r.Request.body <-
-                (match res.Transfer.body with
-                | Body.Stream reader ->
-                    stream_body ~is_chunked:res.Transfer.is_chunked
-                      ~declared_trailer:res.Transfer.trailer
-                      ~set_trailer:(fun t -> r.Request.trailer <- t)
-                      ic reader
-                | (Body.Empty | Body.String _) as b -> b);
-              Lwt.return r
+                let r =
+                  {
+                    Request.meth;
+                    url;
+                    proto;
+                    proto_major;
+                    proto_minor;
+                    header;
+                    body = Body.Empty;
+                    content_length = res.Transfer.content_length;
+                    transfer_encoding =
+                      (if res.Transfer.is_chunked then [ "chunked" ] else []);
+                    close = res.Transfer.result_close;
+                    host;
+                    trailer = res.Transfer.trailer;
+                    request_uri;
+                    remote_addr = "";
+                    form = None;
+                    post_form = None;
+                    multipart_form = None;
+                    ctx = Context.background;
+                  }
+                in
+                r.Request.body <-
+                  (match res.Transfer.body with
+                  | Body.Stream reader ->
+                      stream_body ~is_chunked:res.Transfer.is_chunked
+                        ~declared_trailer:res.Transfer.trailer
+                        ~set_trailer:(fun t -> r.Request.trailer <- t)
+                        ic reader
+                  | (Body.Empty | Body.String _) as b -> b);
+                Lwt.return r
             end
         end)
     (function
