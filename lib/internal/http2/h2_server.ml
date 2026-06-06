@@ -105,8 +105,10 @@ type server_conn = {
   mutable goaway_code : H2_error.err_code;
   mutable serving_done : bool; (* serve loop has ended; unblocks handlers *)
   done_serving : unit Lwt_condition.t;
-  (* unstarted handlers queued when over MAX_CONCURRENT_STREAMS *)
-  mutable unstarted : (int * (unit -> unit Lwt.t)) list;
+  (* unstarted handlers queued when over MAX_CONCURRENT_STREAMS.
+     A Queue (FIFO) rather than a list with O(n) [@ [..]] append, since under
+     a rapid-reset flood this churns hot (CVE-2023-44487). *)
+  unstarted : (int * (unit -> unit Lwt.t)) Queue.t;
 }
 
 (* ---- helpers ---- *)
@@ -603,29 +605,48 @@ let run_handler sc (st : stream) (req : Api.server_request)
 
 (* ---- frame processing (serve loop) ---- *)
 
+(* scheduleHandler: start a handler fiber, or queue one to start as soon as an
+   existing handler finishes (server.go:2254-2273). Over the backlog cap
+   (4*advMaxStreams) this trips ENHANCE_YOUR_CALM, defending against the
+   open+RST_STREAM rapid-reset flood (CVE-2023-44487, server.go:2263). *)
 let schedule_handler sc (st : stream) (req : Api.server_request)
-    (rw : response_writer) (rws : rws) =
+    (rw : response_writer) (rws : rws) : (unit, H2_error.err_code) result =
   let start () = run_handler sc st req rw rws sc.handler in
   if sc.cur_handlers < sc.adv_max_streams then begin
     sc.cur_handlers <- sc.cur_handlers + 1;
-    Lwt.async start
+    Lwt.async start;
+    Ok ()
   end
-  else sc.unstarted <- sc.unstarted @ [ (st.st_id, start) ]
+  else if Queue.length sc.unstarted > 4 * sc.adv_max_streams then
+    Error H2_error.EnhanceYourCalm
+  else begin
+    Queue.add (st.st_id, start) sc.unstarted;
+    Ok ()
+  end
 
+(* handlerDone: a handler finished; start as many queued handlers as the
+   concurrency limit allows, in FIFO order, skipping streams that were reset
+   before their fiber started (server.go:2275-2297). *)
 let handler_done_serve sc =
   sc.cur_handlers <- sc.cur_handlers - 1;
-  let rec drain = function
-    | [] -> []
-    | (sid, start) :: tl ->
-        if not (Hashtbl.mem sc.streams sid) then drain tl
-        else if sc.cur_handlers >= sc.adv_max_streams then (sid, start) :: tl
+  let rec drain () =
+    match Queue.peek_opt sc.unstarted with
+    | None -> ()
+    | Some (sid, start) ->
+        if not (Hashtbl.mem sc.streams sid) then begin
+          (* This stream was reset before its fiber had a chance to start. *)
+          ignore (Queue.pop sc.unstarted);
+          drain ()
+        end
+        else if sc.cur_handlers >= sc.adv_max_streams then ()
         else begin
+          ignore (Queue.pop sc.unstarted);
           sc.cur_handlers <- sc.cur_handlers + 1;
           Lwt.async start;
-          drain tl
+          drain ()
         end
   in
-  sc.unstarted <- drain sc.unstarted
+  drain ()
 
 (* newStream + register with the scheduler. *)
 let new_stream sc id state : stream =
@@ -808,8 +829,7 @@ let process_headers sc (mf : H2_frame.meta_headers_frame) :
                 Ok ()
             | Ok (req, _) ->
                 let rw, rws = new_response_writer sc st req in
-                schedule_handler sc st req rw rws;
-                Ok ()
+                schedule_handler sc st req rw rws
           end
         end
 
@@ -1235,7 +1255,7 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
       goaway_code = H2_error.NoError;
       serving_done = false;
       done_serving = Lwt_condition.create ();
-      unstarted = [];
+      unstarted = Queue.create ();
     }
   in
   (* Send server's initial SETTINGS first (Go sends before reading preface, but

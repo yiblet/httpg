@@ -796,6 +796,127 @@ let redirect_referer_https_to_http () =
     "referer omitted on https->http hop" ""
     (header_on seen_downgrade "http://b.com/" "Referer")
 
+(* ------------------------------------------------------------------ *)
+(* Ticket 8 — HTTP/2 rapid-reset backlog cap (Case 9, CVE-2023-44487). *)
+(*                                                                      *)
+(* An open+RST_STREAM flood must not cheaply force unbounded handler    *)
+(* scheduling: once the unstarted-handler backlog exceeds               *)
+(* [4 * adv_max_streams], the server trips an ENHANCE_YOUR_CALM         *)
+(* connection error (GOAWAY). Adapted from Go's                         *)
+(* testServerMaxHandlerGoroutines (go/src/net/http/internal/http2/      *)
+(* server_test.go:4257-4356; the cap is server.go:2263). Driven over    *)
+(* the same in-memory Lwt_io pipe + raw H2 framer harness as            *)
+(* test_h2_server.ml. *)
+module F = Gohttp_http2.H2_frame
+module S = Gohttp_http2.H2_server
+module H2 = Gohttp_http2.H2
+module Hpack = Gohttp_http2.Hpack
+module H2_error = Gohttp_http2.H2_error
+module Api = Gohttp_http2.Api
+
+let h2_duplex () =
+  let s_ic, c_oc = Lwt_io.pipe () in
+  let c_ic, s_oc = Lwt_io.pipe () in
+  (s_ic, s_oc, c_ic, c_oc)
+
+let h2_encode_block (fields : (string * string) list) =
+  let enc = Hpack.new_encoder () in
+  let buf = Buffer.create 64 in
+  Hpack.set_writer enc (fun s -> Buffer.add_string buf s);
+  List.iter
+    (fun (name, value) ->
+      Hpack.write_field enc { Hpack.name; value; sensitive = false })
+    fields;
+  Buffer.contents buf
+
+let h2_request_block path =
+  h2_encode_block
+    [
+      (":method", "GET");
+      (":path", path);
+      (":scheme", "https");
+      (":authority", "example.com");
+    ]
+
+let h2_open oc ~stream_id =
+  F.write_headers oc ~stream_id ~end_stream:true ~end_headers:true
+    (h2_request_block "/")
+
+(* Read frames until a GOAWAY is seen; return its error code. *)
+let rec read_until_goaway ic =
+  F.read_frame ic >>= function
+  | Ok (F.GoAway (_, gf)) -> Lwt.return gf.error_code
+  | Ok _ -> read_until_goaway ic
+  | Error e -> raise (H2_error.to_exception e)
+
+let too_many_early_resets () =
+  (* adv_max_streams = 1, so the backlog cap is 4 * 1 = 4: the 6th queued
+     handler trips ENHANCE_YOUR_CALM. *)
+  let max_streams = 1 in
+  (* A blocking handler: the first (un-reset) stream's handler parks on a
+     never-resolved promise, keeping cur_handlers == adv_max_streams so every
+     later stream's handler is queued rather than started. *)
+  let block, _wake = Lwt.wait () in
+  let started, started_u = Lwt.wait () in
+  let woken = ref false in
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    if not !woken then begin
+      woken := true;
+      Lwt.wakeup_later started_u ()
+    end;
+    block >>= fun () -> rw.Api.rw_flush ()
+  in
+  let code =
+    Lwt_main.run
+      (Net.with_timeout 15.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server =
+            S.serve ~max_concurrent_streams:max_streams s_ic s_oc ~handler
+          in
+          (* client handshake: preface + empty SETTINGS *)
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          F.write_settings c_oc [] >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* Stream 1: starts the (blocking) handler, then reset it so
+             cur_client_streams drops back to 0 while the handler fiber keeps
+             running (cur_handlers stays at adv_max_streams). Mirrors Go's
+             "reset after the handler goroutine has started". *)
+          h2_open c_oc ~stream_id:1 >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* wait until the handler has actually started before resetting *)
+          started >>= fun () ->
+          F.write_rst_stream c_oc 1 H2_error.Cancel >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* Flood: open then immediately reset a stream, repeatedly. Each open
+             reaches schedule_handler (cur_client_streams stays low because we
+             reset each one), which queues it (cur_handlers is full). The reset
+             removes the stream from sc.streams but the queued entry persists,
+             so the backlog grows. After it exceeds 4*adv_max_streams the server
+             must GOAWAY with ENHANCE_YOUR_CALM. Send 5*adv_max_streams*... well
+             beyond the cap (matching Go's 5*maxHandlers loop). *)
+          let flood =
+            let rec loop sid n =
+              if n = 0 then Lwt.return_unit
+              else
+                h2_open c_oc ~stream_id:sid >>= fun () ->
+                F.write_rst_stream c_oc sid H2_error.Cancel >>= fun () ->
+                Lwt_io.flush c_oc >>= fun () -> loop (sid + 2) (n - 1)
+            in
+            loop 3 20
+          in
+          flood >>= fun () ->
+          read_until_goaway c_ic >>= fun code ->
+          (* close down: drop the client side and let serve finish. *)
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () -> Lwt.return code))
+  in
+  Alcotest.(check bool)
+    "GOAWAY error code is ENHANCE_YOUR_CALM" true
+    (code = H2_error.EnhanceYourCalm)
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -830,4 +951,5 @@ let tests =
       redirect_keeps_header_on_subdomain;
     Alcotest.test_case "redirect_referer_https_to_http" `Quick
       redirect_referer_https_to_http;
+    Alcotest.test_case "too_many_early_resets" `Quick too_many_early_resets;
   ]

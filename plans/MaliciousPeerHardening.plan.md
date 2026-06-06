@@ -549,7 +549,7 @@ Test Successful in 2.286s. 523 tests run.
 ---
 
 ### Ticket 8 — HTTP/2 rapid-reset backlog cap (Case 9, CVE-2023-44487)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Bound the unstarted-handler backlog so an open+RST_STREAM flood can't cheaply force unbounded handler scheduling. Trip an `ENHANCE_YOUR_CALM` connection error when the backlog exceeds `4*adv_max_streams`, matching Go's CVE fix.
@@ -571,7 +571,33 @@ A rapid open+reset loop terminates the connection with `ENHANCE_YOUR_CALM`; norm
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/internal/http2/h2_server.ml`:
+  - `serverConn.unstarted` changed from a `(int * (unit -> unit Lwt.t)) list` (appended with the O(n) `sc.unstarted @ [..]`) to a FIFO `(int * (unit -> unit Lwt.t)) Queue.t`. Under a rapid-reset flood this list churned hot; `Queue.add`/`Queue.pop` are O(1) and preserve the FIFO drain order. Initializer is now `Queue.create ()`.
+  - `schedule_handler` now returns `(unit, H2_error.err_code) result` (was `unit`). It mirrors Go's `scheduleHandler` (server.go:2254-2273): if `cur_handlers < adv_max_streams` it starts the handler fiber and returns `Ok ()`; **else if `Queue.length sc.unstarted > 4 * sc.adv_max_streams`** it returns `Error H2_error.EnhanceYourCalm` (Go's `ConnectionError(ErrCodeEnhanceYourCalm)`, server.go:2263); otherwise it `Queue.add`s the entry and returns `Ok ()`. The comparison matches Go's `> int(4*sc.advMaxStreams)` exactly.
+  - `handler_done_serve` rewritten to drain the `Queue` (was a recursive list rebuild): pop from the front, skip-and-drop streams that were reset before their fiber started (`not (Hashtbl.mem sc.streams sid)`), start handlers up to `adv_max_streams`, and stop (leaving the remainder queued) once at the limit. Same FIFO semantics and reset-skip as before and as Go's `handlerDone` (server.go:2275-2297).
+  - The single call site in `process_headers` (the `Ok (req, _)` branch) now returns `schedule_handler sc st req rw rws` directly instead of discarding its result and returning `Ok ()`. The error therefore rides the existing `process_headers` → `outcome_of_result` → `Conn_error code` → `go_away sc code` path verbatim (no bespoke teardown).
+- `lib/internal/http2/h2_server.mli`: no change needed — `schedule_handler`/`handler_done_serve`/`unstarted` are internal (not exposed in the `.mli`).
+- `test/test_abuse.ml`: added `too_many_early_resets` (wired into the `Abuse` suite), driven over the same in-memory `Lwt_io.pipe` + raw `H2_frame`/`Hpack` framer harness as `test/test_h2_server.ml`, bounded by `Net.with_timeout 15.`.
+
+**Precedent followed**
+- The connection-error → GOAWAY path: handlers/processors return `Error H2_error.X`, `outcome_of_result` (h2_server.ml ~:1037) turns it into `Conn_error code`, and `go_away` (~:367) emits the GOAWAY. The refused-stream over-limit case (~:814, `RefusedStream`) and the `>100` SETTINGS count check are the concrete sibling models. `schedule_handler` was made to return the same `Error H2_error.X` so it flows through unchanged. **Verified against Go** (`go/src/net/http/internal/http2/server.go:2254-2297`): the cap (`len(sc.unstartedHandlers) > int(4*sc.advMaxStreams)` → `ConnectionError(ErrCodeEnhanceYourCalm)`), the FIFO drain, and the reset-stream skip all match. The `EnhanceYourCalm` variant (0xb) in `h2_error.ml` was previously defined-but-unused; it is now wired. No precedent correction was required.
+
+**Data-structure change:** `sc.unstarted` is now a `Queue.t` (was a list with O(n) append). FIFO drain order preserved; the drain still drops reset streams and starts up to `adv_max_streams`.
+
+**Test harness used:** `test/test_h2_server.ml`'s in-memory full-duplex `Lwt_io.pipe` pair driving `H2_server.serve` with a hand-built H2 client (preface + `H2_frame.write_settings`/`write_headers`/`write_rst_stream`, `Hpack` encoder). The new test reuses that idiom: `serve ~max_concurrent_streams:1`, a blocking handler (parked on a never-resolved `Lwt.wait ()`) on the first stream to pin `cur_handlers` at `adv_max_streams`, that first stream then reset (so `cur_client_streams` drops back, keeping later opens from being REFUSED), then a flood of 20 open+RST_STREAM pairs; the test reads frames until a GOAWAY and asserts its code is `ENHANCE_YOUR_CALM`. This adapts Go's `testServerMaxHandlerGoroutines` (server_test.go:4257-4356) to the Lwt harness (no synctest channels).
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  19   too_many_early_resets.
+
+Full test results in `~/workspace/gohttp/_build/default/test/_build/_tests/gohttp'.
+Test Successful in 2.272s. 524 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (524 tests: 523 prior + 1 new).
+
+**Commit:** `pvmotnlq` (`feat(h2): cap rapid-reset handler backlog with ENHANCE_YOUR_CALM`).
 
 ---
 
