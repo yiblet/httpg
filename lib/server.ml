@@ -645,15 +645,36 @@ type t = {
   mutable addr : string;
   mutable port : int;
   handler : handler;
+  (* Go's Server duration knobs (server.go:3717-3724); seconds, 0. = no timeout
+     (Go's zero-value = off). [read_header_timeout]/[idle_timeout] fall back to
+     [read_timeout] when zero, mirroring Server.readHeaderTimeout()/idleTimeout()
+     (server.go:3717-3729). *)
+  read_timeout : float;
+  read_header_timeout : float;
+  write_timeout : float;
+  idle_timeout : float;
   (* a promise that, when resolved, makes the accept loop stop. *)
   stop : unit Lwt.t;
   wake_stop : unit Lwt.u;
   mutable listen_fd : Lwt_unix.file_descr option;
 }
 
-let create ?(addr = "") ?(port = 0) handler =
+let create ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
+    ?(read_header_timeout = 0.) ?(write_timeout = 0.) ?(idle_timeout = 0.)
+    handler =
   let stop, wake_stop = Lwt.wait () in
-  { addr; port; handler; stop; wake_stop; listen_fd = None }
+  {
+    addr;
+    port;
+    handler;
+    read_timeout;
+    read_header_timeout;
+    write_timeout;
+    idle_timeout;
+    stop;
+    wake_stop;
+    listen_fd = None;
+  }
 
 (* Minimal Server.Close: resolve the stop promise and close the listener. *)
 let close srv =
@@ -694,48 +715,180 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
 
-(* The per-connection serve loop: read a request, dispatch, write the response,
-   loop while keep-alive holds. *)
-let serve_conn (handler : handler) (cfd, peer) =
-  let ic, oc = Net.channels_of_fd cfd in
-  let remote = Net.sockaddr_to_string peer in
+(* The four server duration knobs, resolved for one connection (Go's
+   readHeaderTimeout()/idleTimeout() fallback to ReadTimeout already applied).
+   Seconds; 0. means "no timeout" (Go's zero-value semantics). *)
+type timeouts = {
+  to_read : float;
+  to_read_header : float;
+  to_write : float;
+  to_idle : float;
+}
+
+let timeouts_of_server (srv : t) : timeouts =
+  let fallback x = if x <> 0. then x else srv.read_timeout in
+  {
+    to_read = srv.read_timeout;
+    to_read_header = fallback srv.read_header_timeout;
+    to_write = srv.write_timeout;
+    to_idle = fallback srv.idle_timeout;
+  }
+
+(* Go implements these timeouts with socket SetReadDeadline/SetWriteDeadline
+   (server.go:1007-1022, :2145-2149), separate from the request context. Lwt_io
+   channels expose no settable socket deadline, so we use a child Context as the
+   timeout vehicle — the same adaptation the client made (client.ml:203-209).
+   The deadline child is derived off [conn_ctx] and is NOT made the parent of
+   [req_ctx] (Go's request context is not cancelled by ReadTimeout).
+
+   [race_deadline conn_ctx ~secs op]: when [secs] <= 0. run [op] unbounded; else
+   derive [Context.with_timeout conn_ctx secs] and race the operation against
+   the deadline, calling [cancel] on the happy path to disarm the timer (as
+   client.ml:209 does). Returns [`Done v] when [op] finished first, [`Timeout]
+   when the deadline fired (server hangs up — no reply, as Go does). *)
+let race_deadline conn_ctx ~secs (op : unit -> 'a Lwt.t) :
+    [ `Done of 'a | `Timeout ] Lwt.t =
+  if secs <= 0. then op () >>= fun v -> Lwt.return (`Done v)
+  else begin
+    let ctx, cancel = Context.with_timeout conn_ctx secs in
+    Lwt.try_bind
+      (fun () ->
+        Lwt.pick
+          [
+            (op () >>= fun v -> Lwt.return (`Done v));
+            (Context.done_ ctx >>= fun () -> Lwt.return `Timeout);
+          ])
+      (fun outcome ->
+        cancel Context.Canceled;
+        Lwt.return outcome)
+      (fun exn ->
+        cancel Context.Canceled;
+        Lwt.fail exn)
+  end
+
+(* Wrap the request body so each stream pull is bounded by the whole-request
+   read deadline (Go's ReadTimeout / wholeReqDeadline, server.go:1015,:1074-1076),
+   a child Context derived off [conn_ctx]. On EOF (or read failure) the timer is
+   disarmed via [cancel] (idempotent), mirroring [Client.wrap_timer_body]
+   (client.ml:164-180). A zero [secs] leaves the body untouched. *)
+let wrap_read_timeout_body conn_ctx ~secs (r : Body.t Request.t) : unit =
+  if secs > 0. then
+    match r.Request.body with
+    | Body.Empty | Body.String _ -> ()
+    | Body.Stream inner ->
+        let ctx, cancel = Context.with_timeout conn_ctx secs in
+        let next () =
+          Lwt.try_bind
+            (fun () ->
+              Lwt.pick
+                [
+                  (inner () >>= fun chunk -> Lwt.return (`Chunk chunk));
+                  (Context.done_ ctx >>= fun () -> Lwt.return `Timeout);
+                ])
+            (function
+              | `Chunk (Some _ as chunk) -> Lwt.return chunk
+              | `Chunk None ->
+                  cancel Context.Canceled;
+                  Lwt.return_none
+              | `Timeout ->
+                  (* Whole-request deadline exceeded mid-body: surface as EOF so
+                     the read terminates (Go's read past the deadline errors). *)
+                  Lwt.return_none)
+            (fun exn ->
+              cancel Context.Canceled;
+              Lwt.fail exn)
+        in
+        r.Request.body <- Body.Stream next
+
+let no_timeouts =
+  { to_read = 0.; to_read_header = 0.; to_write = 0.; to_idle = 0. }
+
+(* The per-connection keep-alive serve loop over already-wrapped channels (used
+   by both the plaintext and the HTTP/1.x-over-TLS paths). Reads a request,
+   dispatches, writes the response, loops while keep-alive holds. The four Go
+   duration knobs (server.go:1007-1022, :2145-2149) are applied as Context
+   deadlines derived off [conn_ctx]:
+   - [to_read_header] around the header read (Io.read_request);
+   - [to_idle] around the between-requests wait for the next request's first
+     bytes (Go's Peek(4), server.go:2145-2152);
+   - [to_read] (whole-request) around the request body stream pulls
+     (server.go:1015,:1074-1076), via [wrap_read_timeout_body];
+   - [to_write] around the response write (serve_one).
+   On a header or idle timeout the connection is closed with no reply (Go's
+   read past the deadline errors out and conn.serve returns). *)
+let serve_loop ~timeouts ~ic ~oc ~remote (handler : handler) : unit Lwt.t =
   (* Go's Server: a base context cancelled when the connection is closed
      (connContext / cancelCtx in conn.serve), off which each request derives
      its own per-request context. Cancelled in the finalizer below so a handler
      observing Context.done_ sees the connection close (Go's conn.serve). *)
   let conn_ctx, cancel_conn = Context.with_cancel Context.background in
-  let rec loop () =
-    Lwt.catch
-      (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
-      (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof)))
+  (* [first] distinguishes the very first request (header timeout only) from a
+     kept-alive next request (idle timeout until the first bytes arrive, then
+     the header timeout takes over). *)
+  let rec loop ~first () =
+    (* Idle deadline: wait for the next request's first byte before arming the
+       header deadline (Go peeks 4 bytes under the idle deadline, server.go:
+       2145-2156). We approximate the peek by racing the whole read against the
+       idle deadline; once it returns we are already past the header read too,
+       which is acceptable since both deadlines are read-side. On the first
+       request there is no idle wait — Go arms the header deadline directly. *)
+    let read_secs =
+      if first then timeouts.to_read_header
+      else if timeouts.to_idle > 0. then timeouts.to_idle
+      else timeouts.to_read_header
+    in
+    race_deadline conn_ctx ~secs:read_secs (fun () ->
+        Lwt.catch
+          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
+          (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof))))
     >>= function
-    | `Read (Error e) ->
+    | `Timeout ->
+        (* Header / idle deadline exceeded: hang up, no reply (Go's behavior). *)
+        Lwt.return_unit
+    | `Done (`Read (Error e)) ->
         (* Malformed request: reply (400 / 501) per Go's conn.serve, then close. *)
         write_read_error_response oc e
-    | `Read (Ok r) ->
+    | `Done (`Read (Ok r)) ->
         r.Request.remote_addr <- remote;
         (* Per-request context cancelled when the handler returns (Go cancels
            the request context as ServeHTTP unwinds) and, via its parent
            [conn_ctx], when the connection closes. *)
         let req_ctx, cancel_req = Context.with_cancel conn_ctx in
         r.Request.ctx <- req_ctx;
-        Lwt.catch (fun () -> serve_one oc r handler) (fun _ -> Lwt.return false)
-        >>= fun keep_alive ->
+        (* Whole-request read deadline around the streaming body pulls. *)
+        wrap_read_timeout_body conn_ctx ~secs:timeouts.to_read r;
+        (* Write deadline around the response write (Go's deferred
+           SetWriteDeadline, server.go:1017-1021). *)
+        race_deadline conn_ctx ~secs:timeouts.to_write (fun () ->
+            Lwt.catch
+              (fun () -> serve_one oc r handler)
+              (fun _ -> Lwt.return false))
+        >>= fun write_outcome ->
         cancel_req Context.Canceled;
+        let keep_alive =
+          match write_outcome with `Done k -> k | `Timeout -> false
+        in
         (* Go's finishRequest: consume/close the request body before reusing the
            connection, so a kept-alive connection is positioned at the next
            message boundary (and any chunked trailer is read). The drain is
            bounded; if too much remained unread, close instead of reusing. *)
         if keep_alive then
           drain_request_body r >>= fun reusable ->
-          if reusable then loop () else Lwt.return_unit
+          if reusable then loop ~first:false () else Lwt.return_unit
         else Lwt.return_unit
   in
-  Lwt.finalize loop (fun () ->
+  Lwt.finalize
+    (fun () -> loop ~first:true ())
+    (fun () ->
       cancel_conn Context.Canceled;
       Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
       >>= fun () ->
       Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
+
+let serve_conn ?(timeouts = no_timeouts) (handler : handler) (cfd, peer) =
+  let ic, oc = Net.channels_of_fd cfd in
+  let remote = Net.sockaddr_to_string peer in
+  serve_loop ~timeouts ~ic ~oc ~remote handler
 
 (* Go's Server.Serve over a listening fd: accept connections, handle each in
    its own fiber, until [stop] resolves. *)
@@ -747,9 +900,10 @@ let serve srv listen_fd =
     Lwt.choose [ accept_p; stop_p ] >>= function
     | `Stop -> Lwt.return_unit
     | `Conn conn ->
+        let timeouts = timeouts_of_server srv in
         Lwt.async (fun () ->
             Lwt.catch
-              (fun () -> serve_conn srv.handler conn)
+              (fun () -> serve_conn ~timeouts srv.handler conn)
               (fun _ -> Lwt.return_unit));
         accept_loop ()
   in
@@ -821,7 +975,8 @@ let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the
    existing HTTP/1.x serve loop over the TLS channels. *)
-let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
+let serve_tls_conn ?(timeouts = no_timeouts) (handler : handler)
+    (ic, oc, alpn, peer) =
   match alpn with
   | Some "h2" ->
       Lwt.finalize
@@ -833,36 +988,11 @@ let serve_tls_conn (handler : handler) (ic, oc, alpn, peer) =
           >>= fun () ->
           Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
   | _ ->
-      (* HTTP/1.x over TLS: reuse the plaintext serve loop. It already wraps the
-         channels in a keep-alive loop with per-conn/per-request contexts and
-         closes the channels in its finalizer. *)
+      (* HTTP/1.x over TLS: reuse the shared keep-alive serve loop. It wraps the
+         channels with per-conn/per-request contexts, applies the timeout
+         deadlines, and closes the channels in its finalizer. *)
       let remote = Net.sockaddr_to_string peer in
-      let conn_ctx, cancel_conn = Context.with_cancel Context.background in
-      let rec loop () =
-        Lwt.catch
-          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
-          (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof)))
-        >>= function
-        | `Read (Error e) -> write_read_error_response oc e
-        | `Read (Ok r) ->
-            r.Request.remote_addr <- remote;
-            let req_ctx, cancel_req = Context.with_cancel conn_ctx in
-            r.Request.ctx <- req_ctx;
-            Lwt.catch
-              (fun () -> serve_one oc r handler)
-              (fun _ -> Lwt.return false)
-            >>= fun keep_alive ->
-            cancel_req Context.Canceled;
-            if keep_alive then
-              drain_request_body r >>= fun reusable ->
-              if reusable then loop () else Lwt.return_unit
-            else Lwt.return_unit
-      in
-      Lwt.finalize loop (fun () ->
-          cancel_conn Context.Canceled;
-          Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)
-          >>= fun () ->
-          Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
+      serve_loop ~timeouts ~ic ~oc ~remote handler
 
 (* Go's Server.ServeTLS over a [Net.tls_server]: accept + handshake each
    connection, dispatch by ALPN, until [srv.stop] resolves. *)
@@ -874,9 +1004,10 @@ let serve_tls srv (tls_srv : Net.tls_server) =
     Lwt.choose [ accept_p; stop_p ] >>= function
     | `Stop -> Lwt.return_unit
     | `Conn conn ->
+        let timeouts = timeouts_of_server srv in
         Lwt.async (fun () ->
             Lwt.catch
-              (fun () -> serve_tls_conn srv.handler conn)
+              (fun () -> serve_tls_conn ~timeouts srv.handler conn)
               (fun _ -> Lwt.return_unit));
         accept_loop ()
   in
@@ -911,8 +1042,12 @@ let listen_and_serve_tls_started ~certificates ?(alpn = default_alpn_protocols)
 (* Like listen_and_serve but returns the [Server.t] and the bound port via a
    callback once the listener is up, so tests can connect to an ephemeral
    port and stop the server. *)
-let listen_and_serve_started ~addr ~port handler =
-  let srv = create ~addr ~port handler in
+let listen_and_serve_started ?read_timeout ?read_header_timeout ?write_timeout
+    ?idle_timeout ~addr ~port handler =
+  let srv =
+    create ?read_timeout ?read_header_timeout ?write_timeout ?idle_timeout ~addr
+      ~port handler
+  in
   Net.listen (if addr = "" then "0.0.0.0" else addr) port >>= fun listen_fd ->
   srv.listen_fd <- Some listen_fd;
   let bound = Net.bound_port listen_fd in

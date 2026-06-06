@@ -95,8 +95,35 @@ type t
 (** Go's [Server]. The zero-ish value carries an address, a handler and an
     internal stop signal used to shut the accept loop down (for tests). *)
 
-val create : ?addr:string -> ?port:int -> handler -> t
-(** [create ?addr ?port handler] builds a server bound to [addr]:[port]. *)
+val create :
+  ?addr:string ->
+  ?port:int ->
+  ?read_timeout:float ->
+  ?read_header_timeout:float ->
+  ?write_timeout:float ->
+  ?idle_timeout:float ->
+  handler ->
+  t
+(** [create ?addr ?port handler] builds a server bound to [addr]:[port].
+
+    The four optional duration knobs are Go's [Server.ReadTimeout],
+    [ReadHeaderTimeout], [WriteTimeout] and [IdleTimeout] (server.go:3717-3724),
+    in seconds. Each defaults to [0.] meaning "no timeout" (Go's zero-value
+    semantics) — production deployments should set them to defend against slow /
+    idle / incomplete (Slowloris) clients. As in Go, [read_header_timeout] and
+    [idle_timeout] fall back to [read_timeout] when left at [0.].
+
+    - [read_header_timeout] bounds reading the request line + header block; a
+      client that never finishes the headers is dropped (no reply).
+    - [idle_timeout] bounds how long a kept-alive connection may sit idle
+      between requests before being closed.
+    - [read_timeout] (whole-request) additionally bounds reading the request
+      body.
+    - [write_timeout] bounds writing the response.
+
+    The timeouts are implemented as child {!Gohttp_base.Context} deadlines
+    derived off the per-connection context (Lwt_io channels expose no socket
+    deadline, unlike Go's [SetReadDeadline]/[SetWriteDeadline]). *)
 
 val close : t -> unit Lwt.t
 (** Minimal [Server.Close]: stop accepting and close the listening socket. *)
@@ -111,10 +138,18 @@ val listen_and_serve : addr:string -> port:int -> handler -> unit Lwt.t
     process or the listener is torn down. *)
 
 val listen_and_serve_started :
-  addr:string -> port:int -> handler -> (t * int * unit Lwt.t) Lwt.t
+  ?read_timeout:float ->
+  ?read_header_timeout:float ->
+  ?write_timeout:float ->
+  ?idle_timeout:float ->
+  addr:string ->
+  port:int ->
+  handler ->
+  (t * int * unit Lwt.t) Lwt.t
 (** Like {!listen_and_serve} but binds first and returns the running [Server.t],
     the bound port (useful when [port = 0] selects an ephemeral port) and the
-    serve loop promise — so tests can connect and {!close}. *)
+    serve loop promise — so tests can connect and {!close}. The four optional
+    duration knobs are forwarded to {!create}. *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 

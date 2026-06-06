@@ -47,4 +47,5 @@ let () =
       ("H2ClientServer", Test_h2_clientserver.tests);
       ("StreamH2", Test_stream_h2.tests);
       ("Error_policy", Test_error_policy.tests);
+      ("Abuse", Test_abuse.tests);
     ]

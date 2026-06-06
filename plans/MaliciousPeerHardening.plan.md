@@ -139,7 +139,7 @@
 ## Build Out
 
 ### Ticket 1 — Server read / header / idle / write timeouts (Case 1)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Add Go's four server duration knobs so a slow/idle/incomplete client cannot pin a fiber forever (Slowloris). Closes the highest-value DoS gap. New optional `create` args, default off (zero = no timeout, like Go) — document that production should set them.
@@ -165,7 +165,35 @@ A connection that never completes the request headers is closed within `read_hea
 `dune build` clean; `dune test` green incl. the two new tests; `dune fmt` applied.
 
 **G) Execution Record**
-_(to be filled during implementation: changes, alcotest tail, commit id, status)_
+
+**What changed**
+- `lib/server.ml`:
+  - `Server.t` gains four duration fields `read_timeout`, `read_header_timeout`, `write_timeout`, `idle_timeout` (seconds; `0.` = no timeout, Go's zero-value). `create` gains the matching optional args (default `0.`).
+  - New internal `timeouts` record + `timeouts_of_server`, applying Go's `readHeaderTimeout()`/`idleTimeout()` fallback to `read_timeout` (server.go:3717-3729). Note `write_timeout` does NOT fall back (matches Go — only header/idle fall back).
+  - New `race_deadline conn_ctx ~secs op`: when `secs<=0.` runs the op unbounded; otherwise derives `Context.with_timeout conn_ctx secs` and `Lwt.pick`s the op against `Context.done_`, returning ``` `Done v ``` / ``` `Timeout ```, calling the returned `cancel` on the happy path to disarm the timer (mirrors client.ml:209).
+  - New `wrap_read_timeout_body conn_ctx ~secs r`: wraps the request `Body.Stream` so each pull is raced against a whole-request read deadline (server.go:1015,:1074-1076); on EOF/failure it disarms via `cancel`; on deadline it surfaces EOF. Same shape as `Client.wrap_timer_body`.
+  - Refactored the duplicated per-connection loop in `serve_conn` and the http1-over-TLS branch of `serve_tls_conn` into one shared `serve_loop ~timeouts ~ic ~oc ~remote handler`, which applies: header deadline (`read_header_timeout`) around `Io.read_request` on the first request; idle deadline (`idle_timeout`) around the between-requests next read; whole-request deadline (`read_timeout`) around body pulls via the wrapper; write deadline (`write_timeout`) around `serve_one`. On header/idle timeout it closes with no reply (Go hangs up). `serve`/`serve_tls` accept loops now compute `timeouts_of_server srv` per connection and thread it in.
+  - `listen_and_serve_started` gains the four optional knobs (forwarded to `create`) so tests can configure them.
+- `lib/server.mli`: documented the four new `create` knobs and the four new `listen_and_serve_started` knobs (kept in sync).
+- `test/test_abuse.ml` (new) + wired `("Abuse", Test_abuse.tests)` into `test/test_gohttp.ml`: `slowloris_header_timeout` and `idle_timeout`, both raw-loopback-socket integration tests bounded by `Net.with_timeout`.
+
+**Precedent followed**
+- `Client.Timeout` (`client.ml:203-209`) — derive a deadline child via `Context.with_timeout`, `cancel`-disarm on the happy path. Mirrored exactly in `race_deadline`. **Verified against Go:** Go uses socket `SetReadDeadline`/`SetWriteDeadline` (server.go:1007-1022,:2145-2149), separate from the request context; Lwt_io has no settable socket deadline, so Context-as-timeout-vehicle is the deliberate, already-established Lwt adaptation. No correction to the precedent was needed.
+- `Client.wrap_timer_body` (`client.ml:164-180`) — wrap a `Body.Stream` thunk with a one-shot side-effect/disarm. Mirrored in `wrap_read_timeout_body`.
+- Connection context tree already owned by the server: `conn_ctx`/`req_ctx` (`server.ml:706`,`:720`). The deadline children are derived off `conn_ctx` and are **not** made the parent of `req_ctx` — Go's request context is not cancelled by ReadTimeout, so this preserves Go's separation.
+
+**Fidelity note (the deliberate adaptation):** Go implements all four timeouts with socket `SetReadDeadline`/`SetWriteDeadline` (server.go:1007-1022,:2145-2149), independent of the request `context`. Lwt_io channels expose no settable socket deadline, so this port uses a child `Context` deadline derived off `conn_ctx` as the timeout vehicle — the same adaptation the client made for `Client.Timeout`. The deadline child is deliberately NOT the parent of `req_ctx`. One minor approximation: Go arms the idle deadline only over the `Peek(4)` wait for the next request's first bytes, then switches to the header deadline; here the idle deadline is raced over the whole next `read_request` (both are read-side deadlines, so for the idle drop this is equivalent in observable behavior).
+
+**Alcotest tail**
+```
+  [OK]          Abuse                   0   slowloris_header_timeout.
+  [OK]          Abuse                   1   idle_timeout.
+
+Test Successful in 2.297s. 506 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test` green (506 tests).
+
+**Commit:** `yyykxtxy` (`feat(server): add read/header/idle/write timeouts (Slowloris hardening)`).
 
 ---
 
