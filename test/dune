@@ -1,19 +1,6 @@
 (test
  (name test_httpg)
+ ; lib .mli sources, so test_error_policy can sweep them at ../lib.
  (deps
-  (glob_files ../lib/*.mli)
-  (glob_files ../lib/base/*.mli)
-  (glob_files ../lib/internal/*.mli)
-  (glob_files ../lib/internal/http2/*.mli))
- (libraries
-  httpg
-  httpg_base
-  httpg_internal
-  httpg_http2
-  alcotest
-  lwt
-  lwt.unix
-  str
-  base64
-  fmt
-  uri))
+  (glob_files_rec %{project_root}/lib/*.mli))
+ (libraries httpg httpg_http2 alcotest eio eio_main str))

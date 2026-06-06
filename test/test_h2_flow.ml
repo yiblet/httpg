@@ -57,9 +57,8 @@ let test_inflow_add_overflow () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f (Int32.of_int Flow.max_window);
   Alcotest.check_raises "overflow"
-    (Httpg_http2.H2_error.Connection_error
-       Httpg_http2.H2_error.FlowControlError) (fun () ->
-      ignore (Flow.inflow_add f 1))
+    (Httpg_http2.H2_error.Connection_error Httpg_http2.H2_error.FlowControlError)
+    (fun () -> ignore (Flow.inflow_add f 1))
 
 (* TestOutFlow *)
 let test_outflow () =

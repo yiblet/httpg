@@ -42,21 +42,17 @@ val parse_hex_uint : string -> (int64, error) result
 (** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] /
     [Error Line_too_long] on bad input (header/initial-parse boundary). *)
 
-val new_chunked_reader : Lwt_io.input_channel -> unit -> string option Lwt.t
-(** [new_chunked_reader ic] is [internal.NewChunkedReader]: a pull function
-    returning successive decoded chunk payloads and finally [None] at the
-    terminating 0-length chunk. Raises {!Chunk_error} / {!Err_line_too_long} on
-    malformed input. *)
+val new_chunked_reader : Eio.Buf_read.t -> unit -> string option
+(** [internal.NewChunkedReader]: a pull function returning successive decoded
+    chunk payloads and finally [None] at the terminating 0-length chunk. Raises
+    {!Chunk_error} / {!Err_line_too_long} on malformed input. *)
 
-val chunked_writer_write : Lwt_io.output_channel -> string -> unit Lwt.t
-(** [chunked_writer_write oc data] writes [data] as one chunk (hex-length CRLF
-    data CRLF). Empty [data] writes nothing (it would look like EOF). Mirrors
-    [internal.chunkedWriter.Write]. *)
+val chunked_writer_write : Eio.Buf_write.t -> string -> unit
+(** [internal.chunkedWriter.Write]: write [data] as one chunk. Empty [data]
+    writes nothing. *)
 
-val chunked_writer_close : Lwt_io.output_channel -> unit Lwt.t
-(** [chunked_writer_close oc] writes the final ["0\r\n"] chunk
-    ([internal.chunkedWriter.Close]); it does not write the trailing CRLF after
-    trailers. *)
+val chunked_writer_close : Eio.Buf_write.t -> unit
+(** [internal.chunkedWriter.Close]: write the final ["0\r\n"] chunk. *)
 
 (* --- transfer.go helpers. --- *)
 
@@ -130,17 +126,15 @@ type result = {
 }
 (** The decoded framing, the [transferReader] outputs unified back. *)
 
-val read_transfer :
-  message -> Lwt_io.input_channel -> (result, error) Stdlib.result Lwt.t
-(** [read_transfer msg ic] is [readTransfer]: parse framing from [ic] and
-    produce the body reader and derived fields.
+val read_transfer : message -> Eio.Buf_read.t -> (result, error) Stdlib.result
+(** [read_transfer msg r] is [readTransfer]: parse framing from [r] and produce
+    the body reader and derived fields.
 
     Header / initial-parse framing errors short-circuit as [Error error].
     {b Mid-stream policy (Resolution #1):} the returned {!result.body}, a
     {!Body.t} [Stream], {b raises} {!Chunk_error} / {!Err_line_too_long} on a
     malformed body discovered {b after} this returned [Ok] — the faithful
-    analogue of Go's later-[Read]-error model. Only this boundary returns
-    [result]; the stream thunk is {b not} result-ified. *)
+    analogue of Go's later-[Read]-error model. *)
 
 (* --- write_body. --- *)
 
@@ -180,17 +174,15 @@ val should_send_content_length : transfer_writer -> bool
 (** [should_send_content_length t] is [transferWriter.shouldSendContentLength].
 *)
 
-val write_transfer_header :
-  Lwt_io.output_channel -> transfer_writer -> unit Lwt.t
-(** [write_transfer_header oc t] is [transferWriter.writeHeader]: write the
-    Connection / Content-Length / Transfer-Encoding / Trailer header lines that
-    derive from the sanitized field triple. Raises {!Bad_string_error} on an
-    invalid Trailer key. *)
+val write_transfer_header : Eio.Buf_write.t -> transfer_writer -> unit
+(** [transferWriter.writeHeader]: write the Connection / Content-Length /
+    Transfer-Encoding / Trailer header lines that derive from the sanitized
+    field triple. Raises {!Bad_string_error} on an invalid Trailer key. *)
 
 val has_token : string -> string -> bool
 (** [has_token v token] is Go's [hasToken] (case-insensitive token search). *)
 
-val write_body : Lwt_io.output_channel -> transfer_writer -> unit Lwt.t
-(** [write_body oc t] is [transferWriter.writeBody]: write the body (chunked,
-    fixed content-length, or unknown-length) and any trailers to [oc]. Raises
-    {!Chunk_error} on a ContentLength/body-length mismatch. *)
+val write_body : Eio.Buf_write.t -> transfer_writer -> unit
+(** [transferWriter.writeBody]: write the body (chunked, fixed content-length,
+    or unknown-length) and any trailers. Raises {!Chunk_error} on a
+    ContentLength/body-length mismatch. *)

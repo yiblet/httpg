@@ -1,72 +1,54 @@
-(* Integration tests for the file-serving core (Tier 1, Ticket 3), a ported
-   subset of go/src/net/http/fs_test.go.
+(* Integration tests for the file-serving core, a ported subset of
+   go/src/net/http/fs_test.go.
 
-   Each test creates a unique temp directory, populates it, serves it via a
-   [Fs.file_server] over an ephemeral loopback [Httptest.Server], drives it with
-   the httpg [Client], and removes the temp dir in an [Lwt.finalize]. The whole
-   run is bounded by [Net.with_timeout] so a hang fails rather than blocks. *)
+   Each test creates a unique temp directory under the fs capability, populates
+   it, serves it via a [Fs.file_server] over an ephemeral loopback
+   [Httptest.Server], drives it with the httpg [Client], and removes the temp dir
+   afterwards. The whole run is bounded by a timeout (Test_harness.with_fs). *)
 
 open Httpg
-open Lwt.Infix
 module Ts = Httptest.Server
 
-(* ---- temp-dir helpers ---- *)
-
-let mktempdir () =
-  let base = Filename.get_temp_dir_name () in
+(* Run [f ~net ~sw ~clock dir_path] with a fresh temp dir (an [Eio.Path] under
+   the fs capability), cleaning up afterwards. *)
+let with_tmpdir ~fs ~net ~clock ~sw f =
   let name =
     Printf.sprintf "httpg_fs_%d_%d" (Unix.getpid ()) (Random.int 1_000_000_000)
   in
-  let dir = Filename.concat base name in
-  Unix.mkdir dir 0o755;
-  dir
+  let dir = Eio.Path.(fs / Filename.get_temp_dir_name () / name) in
+  Eio.Path.mkdir ~perm:0o755 dir;
+  Fun.protect
+    (fun () -> f ~net ~sw ~clock dir)
+    ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true dir)
 
-let rec rm_rf path =
-  match Unix.lstat path with
-  | exception _ -> ()
-  | st ->
-      if st.Unix.st_kind = Unix.S_DIR then begin
-        Array.iter (fun e -> rm_rf (Filename.concat path e)) (Sys.readdir path);
-        Unix.rmdir path
-      end
-      else Unix.unlink path
+let write_file dir name contents =
+  Eio.Path.save ~create:(`Exclusive 0o644) Eio.Path.(dir / name) contents
 
-let write_file path contents =
-  let oc = open_out_bin path in
-  output_string oc contents;
-  close_out oc
-
-(* Run [f tmpdir] with a fresh temp dir, cleaning up afterwards. *)
-let with_tmpdir f =
-  let dir = mktempdir () in
-  Lwt.finalize
-    (fun () -> f dir)
-    (fun () ->
-      rm_rf dir;
-      Lwt.return_unit)
+(* Serve [dir] over an ephemeral loopback server and run [client ~sw c url]
+   ([c] captures net/clock), stopping the server afterwards. *)
+let serve_dir ~net ~sw ~clock dir client =
+  let handler = Fs.file_server (Fs.dir dir) in
+  let s = Ts.new_server ~net ~clock ~sw handler in
+  Fun.protect
+    (fun () -> client ~sw (Ts.client s) (Ts.url s))
+    ~finally:(fun () -> Ts.close s)
 
 (* ---- Fs.serve_file (known file) ---- *)
-(* Go's TestServeFile (subset): GET a known file → 200 + exact bytes +
-   Content-Type from the extension + Last-Modified + Accept-Ranges. *)
 let serve_known_file () =
   let body_contents = "hello, file server\n" in
-  let run () =
-    with_tmpdir (fun dir ->
-        write_file (Filename.concat dir "hello.txt") body_contents;
-        let handler = Fs.file_server (Fs.dir dir) in
-        Ts.new_server handler >>= fun s ->
-        Lwt.finalize
-          (fun () ->
-            let c = Ts.client s in
-            Client.get c (Ts.url s ^ "/hello.txt") >>= fun resp ->
-            Body.read_all resp.Response.body >>= fun body ->
-            let ct = Header.get resp.Response.header "Content-Type" in
-            let lm = Header.get resp.Response.header "Last-Modified" in
-            let ar = Header.get resp.Response.header "Accept-Ranges" in
-            Lwt.return (resp.Response.status_code, body, ct, lm, ar))
-          (fun () -> Ts.close s))
+  let status, body, ct, lm, ar =
+    Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
+        with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
+            write_file dir "hello.txt" body_contents;
+            serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
+                let resp = Client.get ~sw c (url ^ "/hello.txt") in
+                let body = Body.read_all resp.Response.body in
+                ( resp.Response.status_code,
+                  body,
+                  Header.get resp.Response.header "Content-Type",
+                  Header.get resp.Response.header "Last-Modified",
+                  Header.get resp.Response.header "Accept-Ranges" ))))
   in
-  let status, body, ct, lm, ar = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "body == file contents" body_contents body;
   Alcotest.(check string) "content-type .txt" "text/plain; charset=utf-8" ct;
@@ -74,25 +56,19 @@ let serve_known_file () =
   Alcotest.(check string) "accept-ranges bytes" "bytes" ar
 
 (* ---- Fs.dir_list ---- *)
-(* Go's TestDirectoryIfNotModified / dirList: GET a directory → 200,
-   text/html, body lists the entry filenames. *)
 let dir_listing () =
-  let run () =
-    with_tmpdir (fun dir ->
-        write_file (Filename.concat dir "alpha.txt") "a";
-        write_file (Filename.concat dir "beta.txt") "b";
-        let handler = Fs.file_server (Fs.dir dir) in
-        Ts.new_server handler >>= fun s ->
-        Lwt.finalize
-          (fun () ->
-            let c = Ts.client s in
-            Client.get c (Ts.url s ^ "/") >>= fun resp ->
-            Body.read_all resp.Response.body >>= fun body ->
-            let ct = Header.get resp.Response.header "Content-Type" in
-            Lwt.return (resp.Response.status_code, body, ct))
-          (fun () -> Ts.close s))
+  let status, body, ct =
+    Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
+        with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
+            write_file dir "alpha.txt" "a";
+            write_file dir "beta.txt" "b";
+            serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
+                let resp = Client.get ~sw c (url ^ "/") in
+                let body = Body.read_all resp.Response.body in
+                ( resp.Response.status_code,
+                  body,
+                  Header.get resp.Response.header "Content-Type" ))))
   in
-  let status, body, ct = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "content-type html" "text/html; charset=utf-8" ct;
   let contains sub =
@@ -106,68 +82,54 @@ let dir_listing () =
   Alcotest.(check bool) "lists beta.txt" true (contains "beta.txt")
 
 (* ---- traversal guard ---- *)
-(* Go's TestServeFileDirPanicEmptyPath / containsDotDot: a "/../" path must not
-   escape the root; the FileServer 404s it. *)
 let traversal_blocked () =
-  let run () =
-    with_tmpdir (fun dir ->
-        write_file (Filename.concat dir "ok.txt") "ok";
-        let handler = Fs.file_server (Fs.dir dir) in
-        Ts.new_server handler >>= fun s ->
-        Lwt.finalize
-          (fun () ->
-            let c = Ts.client s in
-            (* a literal ../ escape attempt; path.Clean collapses it within the
-               root, and Dir.Open rejects any residual "..". *)
-            Client.get c (Ts.url s ^ "/../../../../etc/passwd") >>= fun resp ->
-            Body.drain resp.Response.body >>= fun _ ->
-            Lwt.return resp.Response.status_code)
-          (fun () -> Ts.close s))
+  let status =
+    Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
+        with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
+            write_file dir "ok.txt" "ok";
+            serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
+                let resp = Client.get ~sw c (url ^ "/../../../../etc/passwd") in
+                ignore (Body.drain resp.Response.body);
+                resp.Response.status_code)))
   in
-  let status = Lwt_main.run (Net.with_timeout 10. (run ())) in
-  (* path.Clean("/../../etc/passwd") = "/etc/passwd", which does not exist in
-     the temp root → 404 (never escapes). *)
+  (* path.Clean("/../../etc/passwd") = "/etc/passwd", absent in the temp root
+     → 404 (never escapes). *)
   Alcotest.(check int) "traversal blocked (404)" 404 status
 
 (* ---- missing file ---- *)
 let missing_file () =
-  let run () =
-    with_tmpdir (fun dir ->
-        let handler = Fs.file_server (Fs.dir dir) in
-        Ts.new_server handler >>= fun s ->
-        Lwt.finalize
-          (fun () ->
-            let c = Ts.client s in
-            Client.get c (Ts.url s ^ "/nope.txt") >>= fun resp ->
-            Body.drain resp.Response.body >>= fun _ ->
-            Lwt.return resp.Response.status_code)
-          (fun () -> Ts.close s))
+  let status =
+    Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
+        with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
+            serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
+                let resp = Client.get ~sw c (url ^ "/nope.txt") in
+                ignore (Body.drain resp.Response.body);
+                resp.Response.status_code)))
   in
-  let status = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "missing file 404" 404 status
 
 (* ---- dir → dir/ redirect (301) ---- *)
-(* Go's TestFileServerImplicitLeadingSlash / redirect: a request for a directory
-   without a trailing slash gets a 301 to dir/. We use Transport.round_trip to
-   observe the raw 301 (the Client would follow it). *)
+(* A directory request without a trailing slash gets a 301 to dir/. We use
+   Transport.round_trip to observe the raw 301 (the Client would follow it). *)
 let dir_redirect () =
-  let run () =
-    with_tmpdir (fun dir ->
-        Unix.mkdir (Filename.concat dir "sub") 0o755;
-        write_file (Filename.concat dir "sub/x.txt") "x";
-        let handler = Fs.file_server (Fs.dir dir) in
-        Ts.new_server handler >>= fun s ->
-        Lwt.finalize
-          (fun () ->
-            let tr = Transport.create () in
-            let req = Client.make_request "GET" (Ts.url s ^ "/sub") in
-            Transport.round_trip tr req >>= fun resp ->
-            Body.drain resp.Response.body >>= fun _ ->
-            let loc = Header.get resp.Response.header "Location" in
-            Lwt.return (resp.Response.status_code, loc))
-          (fun () -> Ts.close s))
+  let status, loc =
+    Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
+        with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
+            Eio.Path.mkdir ~perm:0o755 Eio.Path.(dir / "sub");
+            write_file dir "sub/x.txt" "x";
+            let handler = Fs.file_server (Fs.dir dir) in
+            let s = Ts.new_server ~net ~clock ~sw handler in
+            Fun.protect
+              (fun () ->
+                let tr = Transport.create ~net ~clock () in
+                Transport.run tr ~sw (fun () ->
+                    let req = Client.make_request "GET" (Ts.url s ^ "/sub") in
+                    let resp = Transport.round_trip tr req in
+                    ignore (Body.drain resp.Response.body);
+                    ( resp.Response.status_code,
+                      Header.get resp.Response.header "Location" )))
+              ~finally:(fun () -> Ts.close s)))
   in
-  let status, loc = Lwt_main.run (Net.with_timeout 10. (run ())) in
   Alcotest.(check int) "dir redirect 301" 301 status;
   Alcotest.(check string) "Location is sub/" "sub/" loc
 

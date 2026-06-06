@@ -1,31 +1,29 @@
-(* Unit tests for Httpg.H2_write: serialize each writer value through the
-   Ticket-4 framer over an Lwt_io.pipe and read it back, asserting fields.
-   This covers the write.go writeFramer values and splitHeaderBlock. *)
+(* Unit tests for H2_write: serialize each writer value through the framer into
+   an in-memory buffer and read it back through a Buf_read, asserting fields.
+   Covers the write.go writeFramer values and splitHeaderBlock. Frame IO is
+   synchronous, so no fibers/switch are needed. *)
 
-open Httpg
 open Httpg_http2
 module W = H2_write
 module F = H2_frame
 
-let with_pipe (writer : Lwt_io.output_channel -> unit Lwt.t)
-    (reader : Lwt_io.input_channel -> 'a Lwt.t) : 'a =
-  Lwt_main.run
-    (Net.with_timeout 10.
-       (let ic, oc = Lwt_io.pipe () in
-        Lwt.bind (writer oc) (fun () ->
-            Lwt.bind (Lwt_io.close oc) (fun () -> reader ic))))
+(* Serialize [w] into a string via Buf_write, then read it back through a fresh
+   Buf_read with [reader]. *)
+let with_pipe (writer : Eio.Buf_write.t -> unit) (reader : Eio.Buf_read.t -> 'a)
+    : 'a =
+  reader
+    (Test_harness.buf_read_of_string (Test_harness.with_output_string writer))
 
-(* read_frame now returns [result]; unwrap [Ok] (raising on a boundary error). *)
-let read_frame_ok ic =
-  Lwt.map
-    (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
-    (F.read_frame ic)
+(* read_frame returns [result]; unwrap [Ok], re-raising the boundary error. *)
+let read_frame_ok r =
+  match F.read_frame r with
+  | Ok f -> f
+  | Error e -> raise (H2_error.to_exception e)
 
 let write_one w oc =
   let enc = Hpack.new_encoder () in
   W.write_frame ~enc oc w
 
-(* SETTINGS round-trip. *)
 let test_settings () =
   let settings = [ { H2.id = H2.Max_frame_size; value = 16384l } ] in
   let f = with_pipe (write_one (W.Write_settings settings)) read_frame_ok in
@@ -100,19 +98,15 @@ let test_ping_ack () =
   | _ -> Alcotest.fail "expected PING ack"
 
 (* writeResHeaders: read back via read_meta_headers, assert :status + fields. *)
-let read_meta ic =
-  Lwt.bind (F.read_frame ic) (fun fr ->
-      match fr with
-      | Ok (F.Headers (fh, h)) ->
-          let dec =
-            Hpack.new_decoder H2.initial_header_table_size (fun _ -> ())
-          in
-          Lwt.map
-            (function
-              | Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
-            (F.read_meta_headers dec (fh, h) ic)
-      | Ok _ -> Lwt.fail (Failure "expected HEADERS")
+let read_meta r =
+  match F.read_frame r with
+  | Ok (F.Headers (fh, h)) -> (
+      let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
+      match F.read_meta_headers dec (fh, h) r with
+      | Ok mf -> mf
       | Error e -> raise (H2_error.to_exception e))
+  | Ok _ -> failwith "expected HEADERS"
+  | Error e -> raise (H2_error.to_exception e)
 
 let field_value (m : F.meta_headers_frame) name =
   match
@@ -122,8 +116,8 @@ let field_value (m : F.meta_headers_frame) name =
   | None -> "<absent>"
 
 let test_res_headers () =
-  let h = Header.create () in
-  Header.add h "X-Foo" "bar";
+  let h = Api.Header.create () in
+  Api.Header.add h "X-Foo" "bar";
   let w =
     W.Write_res_headers
       {
@@ -152,9 +146,8 @@ let test_100_continue () =
 
 (* Large header block forces HEADERS + CONTINUATION (split at 16384). *)
 let test_continuation_split () =
-  let h = Header.create () in
-  (* One huge value > 16384 bytes after HPACK so the block needs splitting. *)
-  Header.add h "X-Big" (String.make 40000 'a');
+  let h = Api.Header.create () in
+  Api.Header.add h "X-Big" (String.make 40000 'a');
   let w =
     W.Write_res_headers
       {

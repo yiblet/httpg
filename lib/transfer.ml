@@ -1,23 +1,15 @@
-(* Port of go/src/net/http/transfer.go and go/src/net/http/internal/chunked.go:
-   the HTTP/1.x wire framing -- chunked transfer-encoding codec, content-length
-   framing, trailers -- plus the version-sensitive length/encoding/trailer
-   fixups.
+(* Port of go/src/net/http/transfer.go: HTTP/1.x wire framing -- content-length
+   framing, trailers, version-sensitive length/encoding/trailer fixups -- over
+   [Eio.Buf_read.t] / [Eio.Buf_write.t]. The chunked codec lives in
+   [Httpg_internal.Chunked]; its surface is re-exported here.
 
-   Request/Response structs do not exist yet (Ticket 6), so the [read_transfer]
-   inputs are modeled as the [message] record below, mirroring the fields of
-   Go's [transferReader] that come from a *Request or *Response. *)
+   The [read_transfer] inputs are modeled as the [message] record, mirroring the
+   fields of Go's [transferReader] that come from a *Request or *Response. *)
 
-(* The chunked codec now lives in the private internal package
-   (Httpg_internal.Chunked, mirroring net/http/internal). Re-export its
-   exceptions so [transfer.ml]'s own framing code and dependent modules/tests
-   keep referring to [Transfer.Chunk_error] / [Transfer.Err_line_too_long] with
-   the same identity the codec raises. *)
+(* Re-export the codec's mid-stream exceptions so dependents keep the same
+   [Transfer.*] identity the codec raises. *)
 exception Err_line_too_long = Httpg_internal.Chunked.Err_line_too_long
-(* internal.ErrLineTooLong *)
-
 exception Chunk_error = Httpg_internal.Chunked.Chunk_error
-(* malformed-chunk / framing errors carrying Go's message *)
-
 exception Bad_string_error of string * string
 (* badStringError(what, value) -> "what: value" *)
 
@@ -119,15 +111,7 @@ let foreach_header_element v fn =
         let f = trim_string f in
         if f <> "" then fn f)
 
-(* ------------------------------------------------------------------ *)
-(* Chunked codec (go/src/net/http/internal/chunked.go).                *)
-(*                                                                      *)
-(* The codec now lives in the private internal package                  *)
-(* [Httpg_internal.Chunked] (mirroring net/http/internal). [transfer.ml]*)
-(* delegates to it and re-exports its surface so the public             *)
-(* [Transfer.*] API stays stable for dependents (io.ml, body.ml) and    *)
-(* tests.                                                               *)
-(* ------------------------------------------------------------------ *)
+(* Chunked codec re-exports (Httpg_internal.Chunked). *)
 
 let max_line_length = Httpg_internal.Chunked.max_line_length
 
@@ -368,12 +352,12 @@ type result = {
   trailer : Header.t option;
 }
 
-(* read_transfer composes the header/initial-parse steps via Lwt_result so the
-   first framing error short-circuits as [Error error]; the resulting body's
-   [Body.Stream] thunk keeps raising on mid-stream errors (Resolution #1). *)
-let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
-    (result, error) Stdlib.result Lwt.t =
-  let open Lwt_result.Syntax in
+(* read_transfer: header/initial-parse framing errors short-circuit as [Error];
+   the resulting body's [Body.Stream] thunk keeps raising on mid-stream errors
+   (Resolution #1). *)
+let read_transfer (msg : message) (r : Eio.Buf_read.t) :
+    (result, error) Stdlib.result =
+  let ( let* ) = Result.bind in
   let header = msg.header in
   let request_method = msg.request_method in
   (* Default to HTTP/1.1 when proto is 0.0. *)
@@ -393,23 +377,16 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
     else msg.close
   in
 
-  let* is_chunked =
-    Lwt_result.lift (parse_transfer_encoding ~major ~minor ~header)
-  in
-
+  let* is_chunked = parse_transfer_encoding ~major ~minor ~header in
   let* real_length =
-    Lwt_result.lift
-      (fix_length ~is_response ~status ~request_method ~header
-         ~chunked:is_chunked)
+    fix_length ~is_response ~status ~request_method ~header ~chunked:is_chunked
   in
   let* content_length =
     if is_response && request_method = "HEAD" then
-      Lwt_result.lift
-        (parse_content_length (Header.values header "Content-Length"))
-    else Lwt_result.return real_length
+      parse_content_length (Header.values header "Content-Length")
+    else Ok real_length
   in
-
-  let* trailer = Lwt_result.lift (fix_trailer ~header ~chunked:is_chunked) in
+  let* trailer = fix_trailer ~header ~chunked:is_chunked in
 
   (* Unbounded-body -> close, for responses. *)
   let close =
@@ -422,6 +399,16 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
     else close
   in
 
+  (* Read up to [want] buffered bytes from [r], reading the flow only if empty.
+     Returns "" at EOF. Bounded windows keep memory flat for large bodies. *)
+  let read_some want =
+    match Eio.Buf_read.ensure r 1 with
+    | exception End_of_file -> ""
+    | () ->
+        let avail = Eio.Buf_read.buffered_bytes r in
+        Eio.Buf_read.take (min want avail) r
+  in
+
   (* Prepare body reader. *)
   let body : Body.t =
     if is_chunked then
@@ -430,52 +417,35 @@ let read_transfer (msg : message) (ic : Lwt_io.input_channel) :
         && (no_response_body_expected request_method
            || not (body_allowed_for_status status))
       then Body.Empty
-      else Body.Stream (new_chunked_reader ic)
+      else Body.Stream (new_chunked_reader r)
     else if Int64.compare real_length 0L = 0 then Body.Empty
     else if Int64.compare real_length 0L > 0 then begin
       (* LimitReader(r, realLength): read exactly real_length bytes. *)
       let remaining = ref real_length in
       Body.Stream
         (fun () ->
-          if Int64.compare !remaining 0L <= 0 then Lwt.return None
+          if Int64.compare !remaining 0L <= 0 then None
           else
             let want = min copy_buf_size (Int64.to_int !remaining) in
-            let b = Bytes.create want in
-            Lwt.bind
-              (Lwt.catch
-                 (fun () -> Lwt_io.read_into ic b 0 want)
-                 (function End_of_file -> Lwt.return 0 | e -> Lwt.fail e))
-              (fun got ->
-                if got = 0 then begin
-                  (* Early EOF: ErrUnexpectedEOF in Go. *)
-                  remaining := 0L;
-                  raise (Chunk_error "unexpected EOF")
-                end
-                else begin
-                  remaining := Int64.sub !remaining (Int64.of_int got);
-                  Lwt.return (Some (Bytes.sub_string b 0 got))
-                end))
+            let s = read_some want in
+            if s = "" then begin
+              remaining := 0L;
+              raise (Chunk_error "unexpected EOF") (* ErrUnexpectedEOF *)
+            end
+            else begin
+              remaining := Int64.sub !remaining (Int64.of_int (String.length s));
+              Some s
+            end)
     end
     else if close then
       (* realLength < 0 and closing (HTTP/1.0 close-delimited): read until EOF. *)
       Body.Stream
         (fun () ->
-          let want = copy_buf_size in
-          let b = Bytes.create want in
-          Lwt.bind
-            (Lwt.catch
-               (fun () -> Lwt_io.read_into ic b 0 want)
-               (function End_of_file -> Lwt.return 0 | e -> Lwt.fail e))
-            (fun got ->
-              if got = 0 then Lwt.return None
-              else Lwt.return (Some (Bytes.sub_string b 0 got))))
-    else
-      (* Persistent connection, no length -> no body. *)
-      Body.Empty
+          let s = read_some copy_buf_size in
+          if s = "" then None else Some s)
+    else Body.Empty (* persistent connection, no length -> no body *)
   in
-
-  Lwt_result.return
-    { body; content_length; is_chunked; result_close = close; trailer }
+  Ok { body; content_length; is_chunked; result_close = close; trailer }
 
 (* ------------------------------------------------------------------ *)
 (* write_body: the transferWriter body-writing logic.                  *)
@@ -496,17 +466,64 @@ type transfer_writer = {
   tw_header : Header.t;
 }
 
-(* newTransferWriter's Body/ContentLength/TransferEncoding sanitization, the
-   pure part (no probeRequestBody async sniffing). *)
+(* requestMethodUsuallyLacksBody (request.go:1578). *)
+let request_method_usually_lacks_body = function
+  | "GET" | "HEAD" | "DELETE" | "OPTIONS" | "PROPFIND" | "SEARCH" -> true
+  | _ -> false
+
+(* probeRequestBody (transfer.go): pull one chunk to see whether the body has
+   content. Returns the possibly-pulled chunk to re-prepend, or None at EOF.
+   Unlike Go we don't bound the wait with a channel — a streaming body thunk
+   that blocks would block here too, but Go's blocking is the same hazard. *)
+let probe_request_body (body : Body.t ref) : bool =
+  match !body with
+  | Body.Empty -> false
+  | Body.String s -> String.length s > 0
+  | Body.Stream inner -> (
+      match inner () with
+      | None | Some "" ->
+          body := Body.Empty;
+          false
+      | Some first ->
+          (* Re-prepend the probed chunk so the body still reads in full. *)
+          let pending = ref (Some first) in
+          body :=
+            Body.Stream
+              (fun () ->
+                match !pending with
+                | Some _ as c ->
+                    pending := None;
+                    c
+                | None -> inner ());
+          true)
+
+(* shouldSendChunkedRequestBody (transfer.go:152): only for cl<0, non-CONNECT.
+   Body-lacking methods (GET/HEAD/...) are probed so a content-less ReadCloser
+   isn't sent as a spurious chunked GET (Issue 18257); all other methods chunk. *)
+let should_send_chunked_request_body ~method_ (body : Body.t ref) : bool =
+  if method_ = "CONNECT" then false
+  else if request_method_usually_lacks_body method_ then probe_request_body body
+  else true
+
+(* newTransferWriter's Body/ContentLength/TransferEncoding sanitization. Ports
+   transfer.go:96 chunked auto-select for unknown-length request bodies. *)
 let make_transfer_writer ?(is_response = false) ?(method_ = "GET")
     ?(response_to_head = false) ?(trailer = None) ?(at_least_http11 = true)
     ?(close = false) ?header ~(body : Body.t) ~(content_length : int64)
     ~(transfer_encoding : string list) () : transfer_writer =
   let header = match header with Some h -> h | None -> Header.create () in
-  let body_is_nil = body = Body.Empty in
   let te = ref transfer_encoding in
   let cl = ref content_length in
   let body = ref body in
+  (* transfer.go:96: cl<0, no explicit TE, request -> auto-select chunked
+     (probing body-lacking methods). Mutates [body] via the probe. *)
+  if
+    (not is_response)
+    && Int64.compare !cl 0L < 0
+    && !te = []
+    && should_send_chunked_request_body ~method_ body
+  then te := [ "chunked" ];
+  let body_is_nil = !body = Body.Empty in
   if response_to_head then begin
     body := Body.Empty;
     if chunked !te then cl := -1L
@@ -545,23 +562,16 @@ let should_send_content_length (t : transfer_writer) : bool =
 (* transferWriter.writeHeader: write Connection/Content-Length/Transfer-Encoding/
    Trailer header lines derived from the sanitized triple. Raises Bad_string_error
    on an invalid Trailer key. *)
-let write_transfer_header (oc : Lwt_io.output_channel) (t : transfer_writer) :
-    unit Lwt.t =
-  let open Lwt.Infix in
-  (if
-     t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close")
-   then Lwt_io.write oc "Connection: close\r\n"
-   else Lwt.return_unit)
-  >>= fun () ->
-  (if should_send_content_length t then
-     Lwt_io.write oc
-       (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
-   else if chunked t.tw_transfer_encoding then
-     Lwt_io.write oc "Transfer-Encoding: chunked\r\n"
-   else Lwt.return_unit)
-  >>= fun () ->
+let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
+  let out = Eio.Buf_write.string w in
+  if t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close")
+  then out "Connection: close\r\n";
+  if should_send_content_length t then
+    out (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
+  else if chunked t.tw_transfer_encoding then
+    out "Transfer-Encoding: chunked\r\n";
   match t.tw_trailer with
-  | None -> Lwt.return_unit
+  | None -> ()
   | Some tr ->
       let keys =
         Hashtbl.fold
@@ -574,53 +584,50 @@ let write_transfer_header (oc : Lwt_io.output_channel) (t : transfer_writer) :
             k :: acc)
           tr []
       in
-      if keys = [] then Lwt.return_unit
-      else
-        let keys = List.sort String.compare keys in
-        Lwt_io.write oc ("Trailer: " ^ String.concat "," keys ^ "\r\n")
+      if keys <> [] then
+        out
+          ("Trailer: "
+          ^ String.concat "," (List.sort String.compare keys)
+          ^ "\r\n")
 
-(* writeBody: write the body (and trailers) to [oc] in wire format. Raises
+(* writeBody: write the body (and trailers) to [w] in wire format. Raises
    Chunk_error on a ContentLength/body-length mismatch. *)
-let write_body (oc : Lwt_io.output_channel) (t : transfer_writer) : unit Lwt.t =
+let write_body (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   let body_present = (not t.tw_response_to_head) && t.tw_body <> Body.Empty in
-  let after_body () : unit Lwt.t =
+  let after_body () =
     if (not t.tw_response_to_head) && chunked t.tw_transfer_encoding then begin
-      (* Trailer header then the terminating CRLF. *)
-      Lwt.bind
-        (match t.tw_trailer with
-        | Some tr ->
-            let buf = Buffer.create 64 in
-            Header.write tr buf;
-            Lwt_io.write oc (Buffer.contents buf)
-        | None -> Lwt.return_unit)
-        (fun () -> Lwt_io.write oc "\r\n")
+      (match t.tw_trailer with
+      | Some tr ->
+          let buf = Buffer.create 64 in
+          Header.write tr buf;
+          Eio.Buf_write.string w (Buffer.contents buf)
+      | None -> ());
+      Eio.Buf_write.string w "\r\n"
     end
-    else Lwt.return_unit
   in
   if not body_present then after_body ()
-  else if chunked t.tw_transfer_encoding then
-    (* Chunked: stream each source chunk through the chunked writer (Go's
-       [io.Copy] into the chunkedWriter), then the terminating 0-chunk. *)
-    Lwt.bind
-      (Body.iter (fun chunk -> chunked_writer_write oc chunk) t.tw_body)
-      (fun () -> Lwt.bind (chunked_writer_close oc) (fun () -> after_body ()))
-  else if Int64.compare t.tw_content_length (-1L) = 0 then
-    (* Unknown length: copy entire body. *)
-    Lwt.bind (Body.write oc t.tw_body) (fun () -> after_body ())
-  else
-    (* Fixed length: stream the body (Go's [io.CopyN]), counting bytes, then
-       verify the byte count matches ContentLength. *)
+  else if chunked t.tw_transfer_encoding then begin
+    Body.iter (fun chunk -> chunked_writer_write w chunk) t.tw_body;
+    chunked_writer_close w;
+    after_body ()
+  end
+  else if Int64.compare t.tw_content_length (-1L) = 0 then begin
+    Body.write w t.tw_body;
+    (* unknown length: copy entire body *)
+    after_body ()
+  end
+  else begin
+    (* Fixed length (Go's io.CopyN): count bytes and verify against ContentLength. *)
     let n = ref 0L in
-    Lwt.bind
-      (Body.iter
-         (fun chunk ->
-           n := Int64.add !n (Int64.of_int (String.length chunk));
-           Lwt_io.write oc chunk)
-         t.tw_body)
-      (fun () ->
-        if Int64.compare t.tw_content_length !n <> 0 then
-          raise
-            (Chunk_error
-               (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld"
-                  t.tw_content_length !n));
-        after_body ())
+    Body.iter
+      (fun chunk ->
+        n := Int64.add !n (Int64.of_int (String.length chunk));
+        Eio.Buf_write.string w chunk)
+      t.tw_body;
+    if Int64.compare t.tw_content_length !n <> 0 then
+      raise
+        (Chunk_error
+           (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld"
+              t.tw_content_length !n));
+    after_body ()
+  end

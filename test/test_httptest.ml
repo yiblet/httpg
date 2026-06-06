@@ -1,18 +1,15 @@
 open Httpg
 module R = Httptest.Response_recorder
 
-let ( let* ) = Lwt.bind
-
-(* Run a handler (response_writer -> unit Lwt.t) against a fresh recorder and
-   return it, mirroring recorder_test.go's `h.ServeHTTP(rec, r)`. *)
-let run (h : Server.response_writer -> unit Lwt.t) : R.t =
+(* Run a handler (response_writer -> unit) against a fresh recorder and return
+   it, mirroring recorder_test.go's `h.ServeHTTP(rec, r)`. *)
+let run (h : Server.response_writer -> unit) : R.t =
   let rec_ = R.create () in
   let w = R.to_response_writer rec_ in
-  Lwt_main.run (h w);
+  h w;
   rec_
 
-let body_of_result (rec_ : R.t) : string =
-  Lwt_main.run (Body.read_all (R.result rec_).body)
+let body_of_result (rec_ : R.t) : string = Body.read_all (R.result rec_).body
 
 (* "recorder_basic" — the Success Criterion: set a header, WriteHeader(201),
    write a body; result has code 201, the header and the body. *)
@@ -33,7 +30,7 @@ let recorder_basic () =
 
 (* "200 default" — no writes at all -> Code stays 200, empty body. *)
 let default_200 () =
-  let rec_ = run (fun _w -> Lwt.return_unit) in
+  let rec_ = run (fun _w -> ()) in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "" (R.body_string rec_);
   Alcotest.(check int) "result status_code" 200 (R.result rec_).status_code
@@ -53,10 +50,9 @@ let first_code_only () =
 let implicit_write_header () =
   let rec_ =
     run (fun w ->
-        let* () = w.write "hi first" in
+        w.write "hi first";
         w.write_header 201;
-        w.write_header 202;
-        Lwt.return_unit)
+        w.write_header 202)
   in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "hi first" (R.body_string rec_);
@@ -77,9 +73,8 @@ let write_string () =
 let flush_sets_flushed () =
   let rec_ =
     run (fun w ->
-        let* () = w.flush () in
-        w.write_header 201;
-        Lwt.return_unit)
+        w.flush ();
+        w.write_header 201)
   in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check bool) "flushed true" true rec_.flushed;
@@ -111,8 +106,7 @@ let header_snapshot () =
         let h = w.header () in
         Header.set h "Key" "correct";
         w.write_header 200;
-        Header.set h "Key" "incorrect";
-        Lwt.return_unit)
+        Header.set h "Key" "incorrect")
   in
   Alcotest.(check string)
     "snapshot Key" "correct"

@@ -3,9 +3,8 @@
  (public_name httpg)
  (libraries
   uri
-  lwt
-  lwt.unix
-  tls-lwt
+  eio
+  eio_main
   tls
   x509
   ca-certs
@@ -13,7 +12,7 @@
   mirage-crypto-rng.unix
   fmt
   base64
-  multipart_form-lwt
+  multipart_form
   httpg_base
   httpg_internal
   httpg_http2))

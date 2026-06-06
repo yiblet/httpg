@@ -95,13 +95,14 @@ let split_header_block block fn =
   let max_frame_size = split_max_frame_size in
   let len = String.length block in
   let rec loop pos first =
-    if pos >= len then Lwt.return_unit
+    if pos >= len then ()
     else begin
       let frag_len = min (len - pos) max_frame_size in
       let frag = String.sub block pos frag_len in
       let next = pos + frag_len in
       let last = next >= len in
-      Lwt.bind (fn frag first last) (fun () -> loop next false)
+      fn frag first last;
+      loop next false
     end
   in
   loop 0 true

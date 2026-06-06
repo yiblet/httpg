@@ -1,7 +1,8 @@
 (* Port of go/src/net/http/internal/http2/frame.go: the Framer, FrameHeader,
    and all frame types. The byte-level encode/decode of each frame is a set of
-   pure functions over strings/bytes; thin Lwt wrappers read/write through
-   [Lwt_io] channels. Composes {!H2}, {!H2_error} and {!Hpack}. *)
+   pure functions over strings/bytes; thin direct-style wrappers read/write
+   through [Eio.Buf_read]/[Eio.Buf_write]. Composes {!H2}, {!H2_error} and
+   {!Hpack}. *)
 
 type frame_header = {
   length : int;  (** payload length, not including the 9-byte header *)
@@ -125,9 +126,8 @@ val decode_frame_header : string -> frame_header
 
 (* ---- reading ---- *)
 
-val read_frame :
-  ?max_size:int -> Lwt_io.input_channel -> (frame, H2_error.t) result Lwt.t
-(** [read_frame ?max_size ic] reads the next frame from [ic]: the 9-byte header,
+val read_frame : ?max_size:int -> Eio.Buf_read.t -> (frame, H2_error.t) result
+(** [read_frame ?max_size r] reads the next frame from [r]: the 9-byte header,
     then the payload, validating the length against [max_size] (default
     [H2.max_frame_size] = 2^24-1) and the per-type constraints. Returns [Error]
     with the unified {!H2_error.t} faithfully to Go's parsers (FRAME_SIZE_ERROR
@@ -142,63 +142,57 @@ val max_frame_size : int
 
 (* ---- writers (each performs exactly one write to the channel) ---- *)
 
-val write_data :
-  ?pad:string -> Lwt_io.output_channel -> int -> bool -> string -> unit Lwt.t
+val write_data : ?pad:string -> Eio.Buf_write.t -> int -> bool -> string -> unit
 (** Mirrors Go's [WriteData]/[WriteDataPadded]. [pad], if given, is appended
     verbatim and its length must be <= 255; passing [Some ""] sets the PADDED
     bit with zero padding. *)
 
 val write_headers :
-  Lwt_io.output_channel ->
+  Eio.Buf_write.t ->
   stream_id:int ->
   ?end_stream:bool ->
   ?end_headers:bool ->
   ?pad_length:int ->
   ?priority:priority_param ->
   string ->
-  unit Lwt.t
+  unit
 (** Mirrors Go's [WriteHeaders] / [HeadersFrameParam]. *)
 
-val write_priority :
-  Lwt_io.output_channel -> int -> priority_param -> unit Lwt.t
+val write_priority : Eio.Buf_write.t -> int -> priority_param -> unit
 (** Mirrors Go's [WritePriority]. *)
 
-val write_rst_stream :
-  Lwt_io.output_channel -> int -> H2_error.err_code -> unit Lwt.t
+val write_rst_stream : Eio.Buf_write.t -> int -> H2_error.err_code -> unit
 (** Mirrors Go's [WriteRSTStream]. *)
 
-val write_settings : Lwt_io.output_channel -> H2.setting list -> unit Lwt.t
+val write_settings : Eio.Buf_write.t -> H2.setting list -> unit
 (** Mirrors Go's [WriteSettings] (ACK bit clear). *)
 
-val write_settings_ack : Lwt_io.output_channel -> unit Lwt.t
+val write_settings_ack : Eio.Buf_write.t -> unit
 (** Mirrors Go's [WriteSettingsAck]. *)
 
-val write_ping : Lwt_io.output_channel -> bool -> string -> unit Lwt.t
+val write_ping : Eio.Buf_write.t -> bool -> string -> unit
 (** Mirrors Go's [WritePing]. [data] must be exactly 8 bytes. *)
 
-val write_goaway :
-  Lwt_io.output_channel -> int -> H2_error.err_code -> string -> unit Lwt.t
+val write_goaway : Eio.Buf_write.t -> int -> H2_error.err_code -> string -> unit
 (** Mirrors Go's [WriteGoAway]. *)
 
-val write_window_update : Lwt_io.output_channel -> int -> int -> unit Lwt.t
+val write_window_update : Eio.Buf_write.t -> int -> int -> unit
 (** Mirrors Go's [WriteWindowUpdate]; [incr] must be in 1..2^31-1. *)
 
-val write_continuation :
-  Lwt_io.output_channel -> int -> bool -> string -> unit Lwt.t
+val write_continuation : Eio.Buf_write.t -> int -> bool -> string -> unit
 (** Mirrors Go's [WriteContinuation]. *)
 
 val write_push_promise :
-  Lwt_io.output_channel ->
+  Eio.Buf_write.t ->
   stream_id:int ->
   promise_id:int ->
   ?end_headers:bool ->
   ?pad_length:int ->
   string ->
-  unit Lwt.t
+  unit
 (** Mirrors Go's [WritePushPromise] / [PushPromiseParam]. *)
 
-val write_raw :
-  Lwt_io.output_channel -> int -> int -> int -> string -> unit Lwt.t
+val write_raw : Eio.Buf_write.t -> int -> int -> int -> string -> unit
 (** Mirrors Go's [WriteRawFrame]: write an arbitrary frame type with the given
     flags, stream id and payload, with no validation. *)
 
@@ -217,8 +211,8 @@ val read_meta_headers :
   ?max_header_list_size:int ->
   Hpack.decoder ->
   frame_header * headers_frame ->
-  Lwt_io.input_channel ->
-  (meta_headers_frame, H2_error.t) result Lwt.t
+  Eio.Buf_read.t ->
+  (meta_headers_frame, H2_error.t) result
 (** [read_meta_headers ?max_size ?max_header_list_size dec hf ic] consumes the
     HEADERS frame [hf] (already read from [ic]) plus zero or more CONTINUATION
     frames until END_HEADERS, decoding the assembled block via [dec]

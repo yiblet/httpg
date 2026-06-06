@@ -73,7 +73,7 @@ already shipped) and the separately-tracked `Body`-as-`io.ReadCloser` gap (see "
 Add Go's four duration knobs so a slow/idle/incomplete client can't pin a fiber forever. New optional
 `create` args; default off (zero = no timeout, like Go); document that production should set them.
 - `Server.create : … -> ?read_timeout:float -> ?read_header_timeout:float -> ?write_timeout:float -> ?idle_timeout:float -> …` (seconds; `read_header_timeout`/`idle_timeout` fall back to `read_timeout` as in Go). Fields on `Server.t` (`server.ml:644`) + `.mli`.
-- In `serve_conn`/`serve_tls_conn` (`server.ml:699`,`:841`): wrap `Io.read_request` with the header deadline; the between-requests next-read (Go's `Peek(4)`) with the idle deadline; body-stream pulls with the whole-request deadline; response writes with the write deadline. Use `Net.with_timeout` / `Lwt.pick`. On header timeout, close with no reply (Go hangs up). The body is a lazily-pulled `Body.Stream`, so the header deadline cleanly separates from the whole-request deadline.
+- In `serve_conn`/`serve_tls_conn` (`server.ml:699`,`:841`): wrap `Io.read_request` with the header deadline; the between-requests next-read (Go's `Peek(4)`) with the idle deadline; body-stream pulls with the whole-request deadline; response writes with the write deadline. Use `Net.with_timeout` (an `Eio.Time` deadline). On header timeout, close with no reply (Go hangs up). The body is a lazily-pulled `Body.Stream`, so the header deadline cleanly separates from the whole-request deadline.
 - Ref: `server.go:1007-1022`, `:1074-1076`, `:2145-2149`, `:3717-3724`.
 - Tests: `TestServerSlowlorisHeaderTimeout` (send `"GET / HTTP/1.1\r\n"` and nothing more with `~read_header_timeout:0.2`; assert close <~1s, no fiber leak); `TestServerIdleTimeout` (complete one request, hold kept-alive idle, assert close within `~idle_timeout`).
 
@@ -81,7 +81,7 @@ Add Go's four duration knobs so a slow/idle/incomplete client can't pin a fiber 
 Bound request-line + header block; answer `431 Request Header Fields Too Large` + close. Introduces the
 shared bounded-read primitive T3/T6 reuse. Budget spans request-line + all header lines cumulatively
 (Go counts the whole head against one limit).
-- `io.ml`: `read_line : ?limit:int -> Lwt_io.input_channel -> string Lwt.t` raising `Request_too_large` when the line would exceed the remaining budget; a mutable budget (`int ref`) decremented per byte across the request line + every header line in `read_mime_header_raising`. `read_request ?max_header_bytes`.
+- `io.ml`: `read_line : ?limit:int -> Eio.Buf_read.t -> string` raising `Request_too_large` when the line would exceed the remaining budget; a mutable budget (`int ref`) decremented per byte across the request line + every header line in `read_mime_header_raising`. `read_request ?max_header_bytes`.
 - New `Io.error` variant `Request_too_large` (+ `.mli`); map in `Server.write_read_error_response` (`server.ml:677`) to `431` + `Connection: close` (Go `server.go:2053-2062`, `errTooLarge` `:998`). `initial_read_limit = max_header_bytes + 4096` (Go `server.go:929`). `Server.t`/`create` gain `?max_header_bytes` (default `1 lsl 20`).
 - Ref: `server.go:920-929`, `:1024`, `:803-818`.
 - Tests: `TestServerRequestHeaderTooLarge` (`~max_header_bytes:8192`, header block >8 KiB → 431 + close); `TestServerRequestLineTooLong` (single line > limit → 431); `TestServerHeadersUnderLimitOk` (just under → 200, no false positive).
@@ -210,8 +210,8 @@ divergence.
   loop (`server.ml:967-969`, `:634-640`). The pre-response discard exists to avoid
   a TCP deadlock: a client that writes its whole request body and *then* reads the
   response can deadlock against a server that starts writing a (large) response
-  while the request body is still unconsumed and both send buffers fill. Lwt's
-  channel buffering shifts the exact window vs Go's blocking sockets, but the
+  while the request body is still unconsumed and both send buffers fill. Eio's
+  buffering shifts the exact window vs Go's blocking sockets, but the
   deadlock is still reachable for a handler that emits a large response without
   reading a large request body. There is also no `fullDuplex` opt-out
   (`ResponseController.EnableFullDuplex`) to *disable* the pre-drain when a handler
@@ -225,7 +225,7 @@ divergence.
   `Connection: close` injection on the too-big path). Ref: `server.go:1404-1463`,
   `:1690-1711`; Go Issue 15527.
 - `Request.Clone` (`clone.go`); `Header.clone` already exists.
-- Multipart: enforce `max_memory` (temp-file spill) + a streaming `MultipartReader`; currently the `multipart_form-lwt` stand-in.
+- Multipart: enforce `max_memory` (temp-file spill) + a streaming `MultipartReader`; currently the `multipart_form` stand-in.
 - `mime.TypeByExtension` database (today a small built-in table + `Sniff` fallback).
 - `Uri.t` vs `url.URL` divergences: `RawPath`/opaque/scheme-relative URIs, `ParseRequestURI` semantics (a few `request_test.go` rows skipped).
 

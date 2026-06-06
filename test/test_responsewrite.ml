@@ -1,17 +1,9 @@
 (* Ported from go/src/net/http/responsewrite_test.go (respWriteTests). *)
 
-let capture (f : Lwt_io.output_channel -> unit Lwt.t) : string =
-  Lwt_main.run
-    (let buf = Buffer.create 256 in
-     let oc =
-       Lwt_io.make ~mode:Lwt_io.output (fun bytes off len ->
-           let b = Bytes.create len in
-           Lwt_bytes.blit_to_bytes bytes off b 0 len;
-           Buffer.add_bytes buf b;
-           Lwt.return len)
-     in
-     Lwt.bind (f oc) (fun () ->
-         Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
+let capture (f : Eio.Buf_write.t -> unit) : string =
+  let w = Eio.Buf_write.create 256 in
+  f w;
+  Eio.Buf_write.serialize_to_string w
 
 let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
     Httpg.Body.t Httpg.Request.t =
@@ -33,7 +25,6 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Httpg.Context.background;
   }
 
 let header pairs =

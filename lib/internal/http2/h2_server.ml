@@ -1,26 +1,41 @@
 (* Port of the HTTP/2 subset of go/src/net/http/internal/http2/server.go.
-   See h2_server.mli for the Go -> Lwt concurrency mapping. *)
+   See h2_server.mli for the Go goroutine -> Eio fiber concurrency mapping. *)
 
 module Body = Api.Body
 module Header = Api.Header
-module Context = Httpg_base.Context
 
-(* The handler-facing ResponseWriter and Handler now live in Api (Go's api.go). *)
 type response_writer = Api.response_writer
 type handler = Api.handler
+
+(* Re-raise unhandleable exceptions per the project error policy: programming
+   bugs (Assert_failure, Match_failure, Invalid_argument, Stack_overflow,
+   Out_of_memory) and Eio fiber cancellation must propagate, never be recovered.
+   Used to narrow the broad recover()-style catch-alls below so they only swallow
+   genuinely-handleable handler failures (Go's runHandler recover()), not bugs. *)
+let reraise_unhandleable : exn -> unit = function
+  | ( Assert_failure _ | Match_failure _ | Invalid_argument _ | Stack_overflow
+    | Out_of_memory | Eio.Cancel.Cancelled _ ) as e ->
+      raise e
+  | _ -> ()
 
 (* Go: defaultMaxStreams = 250 *)
 let default_max_concurrent_streams = 250
 
-(* Go's handlerChunkWriteSize (server.go:60): the size of the [bufio.Writer]
-   wrapping the [chunkWriter]. A handler [Write] buffers into this writer; once
-   it fills, the writer flushes whole chunks down to [chunkWriter.Write], which
-   frames a DATA frame. So DATA is emitted as the handler writes (every ~4 KiB
-   without an explicit Flush), not held until the handler returns. *)
+(* Go's handlerChunkWriteSize (server.go:60): a handler [Write] buffers into a
+   [bufio.Writer] of this size; once it fills, whole chunks flush down to
+   [chunkWriter.Write], framing DATA as the handler writes (every ~4 KiB without
+   an explicit Flush), not held until the handler returns. *)
 let handler_chunk_write_size = 4 * 1024
 
 (* Go: maxQueuedControlFrames *)
 let max_queued_control_frames = 10000
+
+(* Go's serve-loop timer durations (server.go:58-59, :1331). [first_settings] /
+   [preface] bound the initial handshake; [go_away] is the post-GOAWAY linger
+   before close (~1 RTT so the peer can read the GOAWAY before the FIN). *)
+let first_settings_timeout = 2.0
+let preface_timeout = 10.0
+let go_away_timeout = 1.0
 
 (* stream state (Go's streamState). *)
 type stream_state =
@@ -35,7 +50,6 @@ type stream_state =
 type stream = {
   st_id : int;
   sched : H2_writesched.stream;
-      (* carries id + outbound flow + max_frame_size *)
   mutable body : H2_pipe.t option; (* non-nil if expecting DATA *)
   mutable inflow : H2_flow.inflow; (* what the client may POST to us *)
   mutable body_bytes : int64;
@@ -45,9 +59,6 @@ type stream = {
   mutable got_trailer_header : bool;
   mutable wrote_headers : bool;
   mutable close_err : exn option;
-  (* closed when the stream transitions to closed (Go's stream.cw). *)
-  cw : unit Lwt_condition.t;
-  mutable cw_closed : bool;
   mutable trailer : Header.t; (* accumulated trailers *)
   mutable req_trailer : Header.t option; (* handler's Request.Trailer *)
 }
@@ -57,16 +68,15 @@ type stream = {
 type write_result = (unit, exn) result
 
 (* A frame-write request as queued through the serve loop. Mirrors the parts of
-   Go's FrameWriteRequest the loop needs, plus the handler's reply condition. *)
+   Go's FrameWriteRequest the loop needs, plus the handler's reply mailbox (a
+   cap-1 Eio.Stream standing in for Go's wr.done channel). *)
 type frame_write_req = {
   fw : H2_writesched.frame_write_request;
-  (* reply, if a handler is blocked waiting for this frame to be written *)
-  reply : write_result Lwt_condition.t option;
+  reply : write_result Eio.Stream.t option;
 }
 
-(* Events posted to the serve loop. This is the Lwt analogue of Go's serve()
-   select over readFrameCh / wantWriteFrameCh / wroteFrameCh / bodyReadCh /
-   serveMsgCh. *)
+(* Events posted to the serve loop. The Eio analogue of Go's serve() select over
+   readFrameCh / wantWriteFrameCh / wroteFrameCh / bodyReadCh / serveMsgCh. *)
 type event =
   | Read_frame of H2_frame.frame
   | Read_meta of H2_frame.meta_headers_frame
@@ -74,23 +84,32 @@ type event =
   | Want_write_frame of frame_write_req
   | Body_read of stream * int (* handler read n bytes of stream body *)
   | Handler_done
+  (* serveMsgCh timer/shutdown messages (server.go:943-956,1313). *)
+  | Settings_timer (* firstSettingsTimeout fired: no SETTINGS in time *)
+  | Idle_timer (* IdleTimeout fired: graceful GOAWAY *)
+  | Read_timer (* ReadTimeout fired: close the connection *)
+  | Shutdown_timer (* goAwayTimeout linger elapsed: close *)
+  | Graceful_shutdown (* Server.Shutdown: start graceful GOAWAY drain *)
+
+(* A re-armable serve-loop timer (Go's time.Timer used with Reset/Stop). A
+   dedicated fiber sleeps until [deadline] then posts an event; [reset] bumps the
+   deadline and wakes the fiber, [stop] disarms it. Deadline [infinity] parks. *)
+type timer = { mutable deadline : float; wake : Eio.Condition.t }
 
 type server_conn = {
-  ic : Lwt_io.input_channel;
-  oc : Lwt_io.output_channel;
+  r : Eio.Buf_read.t;
+  w : Eio.Buf_write.t;
+  sw : Eio.Switch.t; (* connection switch; reader + handler fibers fork here *)
   handler : handler;
   enc : Hpack.encoder; (* response header encoder; owned by serve loop *)
   dec : Hpack.decoder; (* request header decoder; used by reader fiber *)
-  events : event Lwt_stream.t;
-  push_event : event option -> unit;
+  events : event Eio.Stream.t;
   flow : H2_flow.outflow; (* conn-wide outbound flow *)
   mutable conn_inflow : H2_flow.inflow; (* conn-wide inbound flow *)
   write_sched : H2_writesched.t;
   streams : (int, stream) Hashtbl.t;
   adv_max_streams : int;
   adv_max_header_list_size : int;
-      (* advertised SETTINGS_MAX_HEADER_LIST_SIZE; also the HPACK decode budget.
-       Go's sc.maxHeaderListSize() (server.go:499-505). *)
   mutable saw_first_settings : bool;
   mutable need_to_send_settings_ack : bool;
   mutable unacked_settings : int;
@@ -107,19 +126,76 @@ type server_conn = {
   mutable need_to_send_goaway : bool;
   mutable goaway_code : H2_error.err_code;
   mutable serving_done : bool; (* serve loop has ended; unblocks handlers *)
-  done_serving : unit Lwt_condition.t;
-  (* unstarted handlers queued when over MAX_CONCURRENT_STREAMS.
-     A Queue (FIFO) rather than a list with O(n) [@ [..]] append, since under
-     a rapid-reset flood this churns hot (CVE-2023-44487). *)
-  unstarted : (int * (unit -> unit Lwt.t)) Queue.t;
+  done_serving : Eio.Condition.t;
+  (* serveMsgCh timer state (server.go:469-472,1352): a clock (None disables all
+     timers, like Go's zero IdleTimeout/ReadTimeout), the configured durations,
+     and re-armable timers driving Idle/Read; [shutdown_timer] is the one-shot
+     goAwayTimeout linger. [shutdown_once] makes a graceful stop idempotent. *)
+  clock : float Eio.Time.clock_ty Eio.Resource.t option;
+  idle_timeout : float; (* 0. = off *)
+  read_timeout : float; (* 0. = off (Go's ReadTimeout/SendPingTimeout shape) *)
+  mutable idle_timer : timer option;
+  mutable read_timer : timer option;
+  mutable shutdown_timer_armed : bool;
+  mutable shutdown_once : bool;
+  (* Queued writers awaiting a write result, keyed by physical identity (writer
+     values are freshly allocated per request, so [==] is reliable). Per-conn,
+     not a module global, so concurrent connections don't share state. *)
+  mutable pending_replies :
+    (H2_write.write_framer * write_result Eio.Stream.t) list;
+  (* unstarted handlers queued when over MAX_CONCURRENT_STREAMS. A FIFO Queue:
+     under a rapid-reset flood this churns hot (CVE-2023-44487). *)
+  unstarted : (int * (unit -> unit)) Queue.t;
 }
+
+(* Post an event to the serve loop. *)
+let push sc ev = Eio.Stream.add sc.events ev
+
+(* curOpenStreams (server.go:507): no push streams, so just client streams. *)
+let cur_open_streams sc = sc.cur_client_streams
+
+(* ---- serve-loop timers (Go's time.AfterFunc + Reset/Stop on serveMsgCh) ---- *)
+
+(* Re-arm [t] to fire [secs] from now (Go's timer.Reset). *)
+let timer_reset sc t secs =
+  (match sc.clock with
+  | Some clock -> t.deadline <- Eio.Time.now clock +. secs
+  | None -> ());
+  Eio.Condition.broadcast t.wake
+
+(* Disarm [t] (Go's timer.Stop): park until reset. *)
+let timer_stop t =
+  t.deadline <- infinity;
+  Eio.Condition.broadcast t.wake
+
+(* The timer fiber: sleep until [deadline], then [post]; re-arm on [wake]. Loops
+   so Reset/Stop just adjust the deadline. Bounded by the conn switch. *)
+let run_timer sc t (post : unit -> unit) : [ `Stop_daemon ] =
+  match sc.clock with
+  | None -> `Stop_daemon (* no clock: timer inert, like Go's zero timeout *)
+  | Some clock ->
+      let rec loop () =
+        if sc.serving_done then `Stop_daemon
+        else begin
+          if t.deadline = infinity then Eio.Condition.await_no_mutex t.wake
+          else
+            Eio.Fiber.first
+              (fun () -> Eio.Time.sleep_until clock t.deadline)
+              (fun () -> Eio.Condition.await_no_mutex t.wake);
+          (* Fire only if the (possibly reset) deadline has actually passed. *)
+          if (not sc.serving_done) && Eio.Time.now clock >= t.deadline then begin
+            t.deadline <- infinity;
+            post ()
+          end;
+          loop ()
+        end
+      in
+      loop ()
 
 (* ---- helpers ---- *)
 
 let is_pseudo name = String.length name > 0 && name.[0] = ':'
 
-(* The originating HEADERS frame's END_STREAM flag (the meta frame keeps the
-   originating frame_header in [fh]). *)
 let meta_end_stream (mf : H2_frame.meta_headers_frame) =
   mf.fh.flags land H2.flag_end_stream <> 0
 
@@ -143,8 +219,24 @@ let stream_state sc id =
 
 (* ---- writing path (serve loop only) ---- *)
 
-(* Schedule a frame write. Go's serverConn.writeFrame: push onto the scheduler
-   (unless writing to a closed stream), then drive scheduleFrameWrite. *)
+(* Deliver a write result to a waiting handler (Go's wr.done). Cap-1 mailbox,
+   added exactly once, so never blocks the serve loop. *)
+let reply_to_writer sc (w : H2_write.write_framer) (r : write_result) =
+  let rec extract acc = function
+    | [] -> (None, List.rev acc)
+    | (w', c) :: tl ->
+        if w' == w then (Some c, List.rev_append acc tl)
+        else extract ((w', c) :: acc) tl
+  in
+  let found, rest = extract [] sc.pending_replies in
+  match found with
+  | Some c ->
+      sc.pending_replies <- rest;
+      Eio.Stream.add c r
+  | None -> ()
+
+(* Go's serverConn.writeFrame: push onto the scheduler (unless writing to a
+   closed stream), then drive scheduleFrameWrite. *)
 let rec write_frame sc (req : frame_write_req) =
   let wr = req.fw in
   let sid = H2_writesched.stream_id wr in
@@ -172,63 +264,34 @@ let rec write_frame sc (req : frame_write_req) =
         | _ -> ignore_write)
     | _ -> ignore_write
   in
-  if ignore_write then (
-    (* Notify the waiter so it doesn't hang. *)
-    (match req.reply with
-    | Some c -> Lwt_condition.broadcast c (Error End_of_file)
-    | None -> ());
-    Lwt.return_unit)
+  if ignore_write then
+    match req.reply with
+    | Some c -> Eio.Stream.add c (Error End_of_file)
+    | None -> ()
   else begin
-    if H2_writesched.is_control wr then begin
-      sc.queued_control_frames <- sc.queued_control_frames + 1
-    end;
+    if H2_writesched.is_control wr then
+      sc.queued_control_frames <- sc.queued_control_frames + 1;
     H2_writesched.push sc.write_sched wr;
-    (* remember the reply for this writer, keyed by physical identity (writer
-       values are freshly allocated per request, so [==] is reliable). *)
     (match req.reply with
-    | Some c -> pending_replies := (wr.write, c) :: !pending_replies
+    | Some c -> sc.pending_replies <- (wr.write, c) :: sc.pending_replies
     | None -> ());
     schedule_frame_write sc
   end
 
-(* Associates a queued writer (by physical identity) with the handler's reply
-   condition, so wroteFrame can unblock the handler. Mirrors Go's wr.done. *)
-and pending_replies :
-    (H2_write.write_framer * write_result Lwt_condition.t) list ref =
-  ref []
-
-and reply_to_writer (w : H2_write.write_framer) (r : write_result) =
-  let rec extract acc = function
-    | [] -> (None, List.rev acc)
-    | (w', c) :: tl ->
-        if w' == w then (Some c, List.rev_append acc tl)
-        else extract ((w', c) :: acc) tl
-  in
-  let found, rest = extract [] !pending_replies in
-  match found with
-  | Some c ->
-      pending_replies := rest;
-      Lwt_condition.broadcast c r
-  | None -> ()
-
-(* scheduleFrameWrite: pull the next frame and write it. Because Lwt_io writes
-   are awaited inline here (the serve loop is the single writer), this both
-   "starts" and "completes" the write before looping, then runs wroteFrame
-   bookkeeping. *)
-and schedule_frame_write sc : unit Lwt.t =
-  let open Lwt.Syntax in
+(* scheduleFrameWrite: pull the next frame and write it. Buf_write writes are
+   synchronous, so this both starts and completes each write before looping,
+   then runs wroteFrame bookkeeping. *)
+and schedule_frame_write sc : unit =
   if sc.need_to_send_goaway then begin
     sc.need_to_send_goaway <- false;
-    let* () =
-      H2_frame.write_goaway sc.oc sc.max_client_stream_id sc.goaway_code ""
-    in
-    let* () = Lwt_io.flush sc.oc in
+    H2_frame.write_goaway sc.w sc.max_client_stream_id sc.goaway_code "";
+    Eio.Buf_write.flush sc.w;
     schedule_frame_write sc
   end
   else if sc.need_to_send_settings_ack then begin
     sc.need_to_send_settings_ack <- false;
-    let* () = H2_frame.write_settings_ack sc.oc in
-    let* () = Lwt_io.flush sc.oc in
+    H2_frame.write_settings_ack sc.w;
+    Eio.Buf_write.flush sc.w;
     schedule_frame_write sc
   end
   else if (not sc.in_goaway) || sc.goaway_code = H2_error.NoError then
@@ -236,24 +299,25 @@ and schedule_frame_write sc : unit Lwt.t =
     | Some wr ->
         if H2_writesched.is_control wr then
           sc.queued_control_frames <- sc.queued_control_frames - 1;
-        let* () = start_frame_write sc wr in
+        start_frame_write sc wr;
         schedule_frame_write sc
-    | None -> Lwt_io.flush sc.oc
-  else Lwt_io.flush sc.oc
+    | None -> Eio.Buf_write.flush sc.w
+  else Eio.Buf_write.flush sc.w
 
 (* startFrameWrite + wroteFrame fused: serialize wr to the wire, then do the
    stream-state bookkeeping wroteFrame performs. *)
-and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit Lwt.t =
-  let open Lwt.Syntax in
-  let* result =
-    Lwt.catch
-      (fun () ->
-        let+ () = H2_write.write_frame ~enc:sc.enc sc.oc wr.write in
-        Ok ())
-      (fun exn -> Lwt.return (Error exn))
+and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit =
+  let result =
+    try
+      H2_write.write_frame ~enc:sc.enc sc.w wr.write;
+      Ok ()
+    with exn ->
+      (* server.go: a write err is fatal to the conn (forwarded); bug-class
+         exns / Cancelled propagate rather than being repackaged as a result. *)
+      reraise_unhandleable exn;
+      sc.serving_done <- true;
+      Error exn
   in
-  (match result with Error _ -> sc.serving_done <- true | Ok () -> ());
-  (* wroteFrame stream-state transitions *)
   (if H2_write.write_ends_stream wr.write then
      match wr.stream with
      | Some s -> (
@@ -284,8 +348,7 @@ and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit Lwt.t =
          | Some st -> close_stream sc st None
          | None -> ())
      | _ -> ());
-  reply_to_writer wr.write result;
-  Lwt.return_unit
+  reply_to_writer sc wr.write result
 
 (* resetStream: queue a RST_STREAM (Go's serverConn.resetStream). *)
 and reset_stream sc (st : stream) (code : H2_error.err_code) =
@@ -304,6 +367,11 @@ and close_stream sc (st : stream) (err : exn option) =
   st.state <- State_closed;
   if st.st_id mod 2 = 1 then sc.cur_client_streams <- sc.cur_client_streams - 1;
   Hashtbl.remove sc.streams st.st_id;
+  (* last stream done: re-arm the idle timer (server.go:1576-1578). *)
+  (if cur_open_streams sc = 0 then
+     match sc.idle_timer with
+     | Some t when sc.idle_timeout > 0. -> timer_reset sc t sc.idle_timeout
+     | _ -> ());
   (match st.body with
   | Some p ->
       (* return buffered unread conn-level flow control *)
@@ -313,10 +381,6 @@ and close_stream sc (st : stream) (err : exn option) =
       H2_pipe.close_with_error p e
   | None -> ());
   st.close_err <- err;
-  if not st.cw_closed then begin
-    st.cw_closed <- true;
-    Lwt_condition.broadcast st.cw ()
-  end;
   H2_writesched.close_stream sc.write_sched st.st_id
 
 (* sendWindowUpdate for the connection-level inflow. *)
@@ -350,13 +414,20 @@ let send_window_update_stream sc (st : stream) n =
     sc.queued_control_frames <- sc.queued_control_frames + 1
   end
 
-(* goAway (Go's serverConn.goAway). *)
+(* goAway (server.go:1339): if already in GOAWAY, only upgrade a prior NO_ERROR
+   (graceful) to the new error code; otherwise begin the GOAWAY. *)
 let go_away sc code =
-  if not sc.in_goaway then begin
+  if sc.in_goaway then
+    begin if sc.goaway_code = H2_error.NoError then sc.goaway_code <- code
+    end
+  else begin
     sc.in_goaway <- true;
     sc.need_to_send_goaway <- true;
     sc.goaway_code <- code
   end
+
+(* startGracefulShutdownInternal (server.go:1334): GOAWAY with NO_ERROR. *)
+let start_graceful_shutdown_internal sc = go_away sc H2_error.NoError
 
 (* ---- response writer construction ---- *)
 
@@ -364,34 +435,29 @@ let go_away sc code =
    requestBody.Read + noteBodyReadFromHandler. *)
 let body_of_pipe sc (st : stream) : Body.t =
   let saw_eof = ref false in
-  let next () : string option Lwt.t =
+  let next () : string option =
     match st.body with
-    | None -> Lwt.return None
-    | Some p ->
-        if !saw_eof then Lwt.return None
+    | None -> None
+    | Some p -> (
+        if !saw_eof then None
         else
-          Lwt.catch
-            (fun () ->
-              let open Lwt.Syntax in
-              let* chunk = H2_pipe.read p (1 lsl 16) in
+          match H2_pipe.read p (1 lsl 16) with
+          | chunk ->
               let n = String.length chunk in
               (* note body read -> schedule window updates on the serve loop *)
-              if n > 0 then sc.push_event (Some (Body_read (st, n)));
+              if n > 0 then push sc (Body_read (st, n));
               if n = 0 then (
                 saw_eof := true;
-                Lwt.return None)
-              else Lwt.return (Some chunk))
-            (fun exn ->
-              match exn with
-              | End_of_file ->
-                  saw_eof := true;
-                  Lwt.return None
-              | e -> Lwt.fail e)
+                None)
+              else Some chunk
+          | exception End_of_file ->
+              saw_eof := true;
+              None)
   in
   Body.of_stream next
 
 (* The response writer state. The serve loop frames everything; the handler
-   fiber posts Want_write_frame events and blocks on reply conditions. *)
+   fiber posts Want_write_frame events and blocks on its reply mailbox. *)
 type rws = {
   rws_stream : stream;
   rws_req : Api.server_request;
@@ -403,21 +469,22 @@ type rws = {
   buf : Buffer.t; (* buffered body bytes between flushes *)
 }
 
-(* Send a frame request through the serve loop and block until written. *)
-let write_via_loop sc (fw : H2_writesched.frame_write_request) : unit Lwt.t =
-  if sc.serving_done then Lwt.fail End_of_file
+(* Send a frame request through the serve loop and block until written, racing
+   the reply against the serve loop ending (Go's select over wr.done / done
+   serving). [Fiber.first] cancels the loser. *)
+let write_via_loop sc (fw : H2_writesched.frame_write_request) : unit =
+  if sc.serving_done then raise End_of_file
   else begin
-    let reply = Lwt_condition.create () in
-    sc.push_event (Some (Want_write_frame { fw; reply = Some reply }));
-    let open Lwt.Syntax in
-    (* race the reply against the serve loop ending *)
-    let wait_reply = Lwt_condition.wait reply in
-    let wait_done =
-      let+ () = Lwt_condition.wait sc.done_serving in
-      Error End_of_file
+    let reply = Eio.Stream.create 1 in
+    push sc (Want_write_frame { fw; reply = Some reply });
+    let r =
+      Eio.Fiber.first
+        (fun () -> Eio.Stream.take reply)
+        (fun () ->
+          Eio.Condition.await_no_mutex sc.done_serving;
+          Error End_of_file)
     in
-    let* r = Lwt.pick [ wait_reply; wait_done ] in
-    match r with Ok () -> Lwt.return_unit | Error e -> Lwt.fail e
+    match r with Ok () -> () | Error e -> raise e
   end
 
 (* writeHeaders from the handler. *)
@@ -455,14 +522,13 @@ let write_data_from_handler sc (st : stream) (data : string) ~end_stream =
 (* writeChunk: on first chunk, send HEADERS; then DATA. Mirrors
    responseWriterState.writeChunk (subset: HEAD, content-length/type, and
    END_STREAM handling; mid-stream trailers are out of scope). *)
-let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
-  let open Lwt.Syntax in
+let write_chunk sc (rws : rws) (p : string) : unit =
   if not rws.wrote_header then begin
     rws.wrote_header <- true;
     rws.status <- 200
   end;
   let is_head = rws.rws_req.sreq_meth = "HEAD" in
-  let* header_ended_stream =
+  let header_ended_stream =
     if not rws.sent_header then begin
       rws.sent_header <- true;
       let snap = rws.handler_header in
@@ -495,22 +561,19 @@ let write_chunk sc (rws : rws) (p : string) : unit Lwt.t =
         else ""
       in
       let end_stream = (rws.handler_done && String.length p = 0) || is_head in
-      let* () =
-        write_res_headers sc rws ~end_stream ~content_type:ctype
-          ~content_length:clen
-      in
-      Lwt.return end_stream
+      write_res_headers sc rws ~end_stream ~content_type:ctype
+        ~content_length:clen;
+      end_stream
     end
-    else Lwt.return false
+    else false
   in
-  if header_ended_stream then Lwt.return_unit
-  else if is_head then Lwt.return_unit
-  else if String.length p = 0 && not rws.handler_done then Lwt.return_unit
+  if header_ended_stream then ()
+  else if is_head then ()
+  else if String.length p = 0 && not rws.handler_done then ()
   else
     let end_stream = rws.handler_done in
     if String.length p > 0 || end_stream then
       write_data_from_handler sc rws.rws_stream p ~end_stream
-    else Lwt.return_unit
 
 let new_response_writer sc (st : stream) (req : Api.server_request) :
     response_writer * rws =
@@ -536,9 +599,9 @@ let new_response_writer sc (st : stream) (req : Api.server_request) :
   (* Mirror Go's [bufio.Writer.Write] over the [chunkWriter] of size
      [handler_chunk_write_size]: append to the buffer, then while it holds a full
      chunk, frame that chunk's worth of DATA (via [write_chunk]) and keep the
-     remainder buffered. This emits DATA as the handler writes (flow-controlled,
+     remainder buffered. Emits DATA as the handler writes (flow-controlled,
      END_STREAM only at handler completion) rather than buffering the whole body. *)
-  let rec drain_full_chunks () : unit Lwt.t =
+  let rec drain_full_chunks () : unit =
     if Buffer.length rws.buf >= handler_chunk_write_size then begin
       let all = Buffer.contents rws.buf in
       let chunk = String.sub all 0 handler_chunk_write_size in
@@ -548,17 +611,15 @@ let new_response_writer sc (st : stream) (req : Api.server_request) :
       in
       Buffer.clear rws.buf;
       Buffer.add_string rws.buf rest;
-      let open Lwt.Syntax in
-      let* () = write_chunk sc rws chunk in
+      write_chunk sc rws chunk;
       drain_full_chunks ()
     end
-    else Lwt.return_unit
   in
-  let write (data : string) : unit Lwt.t =
+  let write (data : string) : unit =
     Buffer.add_string rws.buf data;
     drain_full_chunks ()
   in
-  let flush () : unit Lwt.t =
+  let flush () : unit =
     let p = Buffer.contents rws.buf in
     Buffer.clear rws.buf;
     write_chunk sc rws p
@@ -574,50 +635,54 @@ let new_response_writer sc (st : stream) (req : Api.server_request) :
 (* runHandler: run the handler, then flush the buffered response and end the
    stream. Mirrors runHandler + handlerDone. *)
 let run_handler sc (st : stream) (req : Api.server_request)
-    (rw : response_writer) (rws : rws) (h : handler) : unit Lwt.t =
-  let open Lwt.Syntax in
+    (rw : response_writer) (rws : rws) (h : handler) : unit =
   let finish () =
     rws.handler_done <- true;
-    (* writeChunk on the remaining buffered bytes, ending the stream. *)
     let p = Buffer.contents rws.buf in
     Buffer.clear rws.buf;
-    Lwt.catch (fun () -> write_chunk sc rws p) (fun _ -> Lwt.return_unit)
+    try write_chunk sc rws p with e -> reraise_unhandleable e
   in
-  let* () =
-    Lwt.catch
-      (fun () ->
-        let* () = h rw req in
-        finish ())
-      (fun exn ->
-        match exn with
-        | End_of_file -> Lwt.return_unit (* stream/conn gone *)
-        | _ ->
-            (* handler panic -> RST_STREAM *)
-            let fw : H2_writesched.frame_write_request =
-              {
-                write = H2_write.Write_handler_panic_rst st.st_id;
-                stream = Some st.sched;
-              }
-            in
-            Lwt.catch
-              (fun () -> write_via_loop sc fw)
-              (fun _ -> Lwt.return_unit))
-  in
-  sc.push_event (Some Handler_done);
-  Lwt.return_unit
+  (try
+     h rw req;
+     finish ()
+   with
+  | End_of_file -> () (* stream/conn gone *)
+  | e -> (
+      (* Bugs and cancellation must propagate (error policy); only a genuinely
+         handleable handler failure becomes RST_STREAM (Go's runHandler
+         recover()). *)
+      reraise_unhandleable e;
+      let fw : H2_writesched.frame_write_request =
+        {
+          write = H2_write.Write_handler_panic_rst st.st_id;
+          stream = Some st.sched;
+        }
+      in
+      try write_via_loop sc fw with e -> reraise_unhandleable e));
+  push sc Handler_done
 
 (* ---- frame processing (serve loop) ---- *)
 
-(* scheduleHandler: start a handler fiber, or queue one to start as soon as an
+(* scheduleHandler: fork a handler fiber, or queue one to start as soon as an
    existing handler finishes (server.go:2254-2273). Over the backlog cap
    (4*advMaxStreams) this trips ENHANCE_YOUR_CALM, defending against the
    open+RST_STREAM rapid-reset flood (CVE-2023-44487, server.go:2263). *)
+(* Fork a handler as a daemon so that when the serve loop ends, an in-flight
+   handler still blocked on a write (waiting for a serve-loop reply that will
+   never come, because the loop has wound down) is cancelled rather than
+   deadlocking the connection switch. A handler that completes returns
+   [`Stop_daemon] and simply stops. *)
+let fork_handler sc start =
+  Eio.Fiber.fork_daemon ~sw:sc.sw (fun () ->
+      start ();
+      `Stop_daemon)
+
 let schedule_handler sc (st : stream) (req : Api.server_request)
     (rw : response_writer) (rws : rws) : (unit, H2_error.err_code) result =
   let start () = run_handler sc st req rw rws sc.handler in
   if sc.cur_handlers < sc.adv_max_streams then begin
     sc.cur_handlers <- sc.cur_handlers + 1;
-    Lwt.async start;
+    fork_handler sc start;
     Ok ()
   end
   else if Queue.length sc.unstarted > 4 * sc.adv_max_streams then
@@ -645,7 +710,7 @@ let handler_done_serve sc =
         else begin
           ignore (Queue.pop sc.unstarted);
           sc.cur_handlers <- sc.cur_handlers + 1;
-          Lwt.async start;
+          fork_handler sc start;
           drain ()
         end
   in
@@ -654,7 +719,6 @@ let handler_done_serve sc =
 (* newStream + register with the scheduler. *)
 let new_stream sc id state : stream =
   let sched = H2_writesched.make_stream ~max_frame_size:sc.max_frame_size id in
-  (* link stream outflow to conn outflow and seed with the send window *)
   H2_flow.set_conn_flow sched.H2_writesched.flow sc.flow;
   ignore
     (H2_flow.add sched.H2_writesched.flow
@@ -674,8 +738,6 @@ let new_stream sc id state : stream =
       got_trailer_header = false;
       wrote_headers = false;
       close_err = None;
-      cw = Lwt_condition.create ();
-      cw_closed = false;
       trailer = Header.create ();
       req_trailer = None;
     }
@@ -683,12 +745,15 @@ let new_stream sc id state : stream =
   Hashtbl.replace sc.streams id st;
   H2_writesched.open_stream sc.write_sched id;
   sc.cur_client_streams <- sc.cur_client_streams + 1;
+  (* a new stream is in flight: stop the idle timer (server.go:1903). *)
+  (match sc.idle_timer with
+  | Some t -> timer_stop t
+  | None -> ());
   st
 
-(* Build the Request.t from the meta-headers frame (subset of
-   newWriterAndRequest). The http2-level pseudo-header validation stays here;
-   the Cookie/Expect/Trailer/userinfo/:path handling is httpcommon's
-   NewServerRequest. *)
+(* Build the Request from the meta-headers frame (subset of newWriterAndRequest).
+   The http2-level pseudo-header validation stays here; Cookie/Expect/Trailer/
+   userinfo/:path handling is httpcommon's NewServerRequest. *)
 let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
     (Api.server_request * bool, H2_error.err_code) result =
   let fields = mf.fields in
@@ -728,14 +793,12 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
     if result.sr_invalid_reason <> "" then Error H2_error.ProtocolError
     else begin
       let body_open = not (meta_end_stream mf) in
-      (* content-length *)
       let content_length =
         match Header.values header "Content-Length" with
         | v :: _ -> (
             match Int64.of_string_opt v with Some cl -> cl | None -> 0L)
         | [] -> if body_open then -1L else 0L
       in
-      (* build URL: use path as request-uri; authority is host. *)
       let url =
         let raw =
           if
@@ -764,7 +827,6 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
             | None -> Header.create ());
           sreq_request_uri = result.sr_request_uri;
           sreq_remote_addr = "";
-          sreq_ctx = Context.background;
         }
       in
       if body_open then begin
@@ -786,11 +848,8 @@ let process_headers sc (mf : H2_frame.meta_headers_frame) :
   else
     match Hashtbl.find_opt sc.streams id with
     | Some st ->
-        (* trailers or invalid; we accept trailers minimally by marking
-           got_trailer_header and ending the stream's body. *)
         if st.reset_queued then Ok ()
         else if st.state = State_half_closed_remote then begin
-          (* STREAM_CLOSED stream error -> RST *)
           reset_stream sc st H2_error.StreamClosed;
           Ok ()
         end
@@ -858,9 +917,6 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
           Error H2_error.FlowControlError
         else begin
           send_window_update_conn sc length;
-          (* stream error STREAM_CLOSED, but no stream object to reset cleanly;
-             we just return ok (frame-level), mirroring Go's countError path is
-             a stream error -> resetStream. Send RST. *)
           let wr : H2_writesched.frame_write_request =
             {
               write =
@@ -1039,13 +1095,32 @@ let process_goaway sc (_gf : H2_frame.goaway_frame) :
   sc.in_goaway <- true;
   Ok ()
 
-(* processFrame dispatch (serve loop). Returns Ok () or the connection-error
-   code to GOAWAY with, or `Stream_err for a stream error. *)
+(* processFrame dispatch (serve loop). Ok_frame or the connection-error code to
+   GOAWAY with. *)
 type frame_outcome = Ok_frame | Conn_error of H2_error.err_code
 
 let outcome_of_result = function
   | Ok () -> Ok_frame
   | Error code -> Conn_error code
+
+(* server.go:1438-1450: discard frames for streams started after the GOAWAY
+   last-stream-id (or all frames after an error GOAWAY), still returning
+   conn-level flow control for DATA. [Some outcome] means handled (discarded). *)
+let discard_after_goaway sc (f : H2_frame.frame) : frame_outcome option =
+  let fh = H2_frame.header_of_frame f in
+  if
+    sc.in_goaway
+    && (sc.goaway_code <> H2_error.NoError
+       || fh.stream_id > sc.max_client_stream_id)
+  then begin
+    (match f with
+    | H2_frame.Data (fh, _) ->
+        if H2_flow.inflow_take sc.conn_inflow fh.length then
+          send_window_update_conn sc fh.length
+    | _ -> ());
+    Some Ok_frame
+  end
+  else None
 
 let process_frame sc (f : H2_frame.frame) : frame_outcome =
   (* first frame must be SETTINGS *)
@@ -1060,199 +1135,233 @@ let process_frame sc (f : H2_frame.frame) : frame_outcome =
   in
   if not first_ok then Conn_error H2_error.ProtocolError
   else
-    match f with
-    | H2_frame.Settings (_, sf) -> outcome_of_result (process_settings sc sf)
-    | H2_frame.Window_update (fh, wf) ->
-        outcome_of_result (process_window_update sc fh wf)
-    | H2_frame.Ping (fh, pf) -> outcome_of_result (process_ping sc fh pf)
-    | H2_frame.Data (fh, df) -> (
-        match process_data sc fh df with
-        | Ok () -> Ok_frame
-        | Error code -> Conn_error code)
-    | H2_frame.RST_stream (fh, rf) ->
-        outcome_of_result (process_reset_stream sc fh rf)
-    | H2_frame.GoAway (_, gf) -> outcome_of_result (process_goaway sc gf)
-    | H2_frame.Push_promise _ -> Conn_error H2_error.ProtocolError
-    | H2_frame.Priority _ -> Ok_frame
-    | H2_frame.Continuation _ -> Ok_frame (* assembled by read_meta_headers *)
-    | H2_frame.Headers _ -> Ok_frame (* handled via Read_meta *)
-    | H2_frame.Unknown _ -> Ok_frame
+    match discard_after_goaway sc f with
+    | Some o -> o
+    | None -> (
+        match f with
+        | H2_frame.Settings (_, sf) ->
+            outcome_of_result (process_settings sc sf)
+        | H2_frame.Window_update (fh, wf) ->
+            outcome_of_result (process_window_update sc fh wf)
+        | H2_frame.Ping (fh, pf) -> outcome_of_result (process_ping sc fh pf)
+        | H2_frame.Data (fh, df) -> outcome_of_result (process_data sc fh df)
+        | H2_frame.RST_stream (fh, rf) ->
+            outcome_of_result (process_reset_stream sc fh rf)
+        | H2_frame.GoAway (_, gf) -> outcome_of_result (process_goaway sc gf)
+        | H2_frame.Push_promise _ -> Conn_error H2_error.ProtocolError
+        | H2_frame.Priority _ -> Ok_frame
+        | H2_frame.Continuation _ ->
+            Ok_frame (* assembled by read_meta_headers *)
+        | H2_frame.Headers _ -> Ok_frame (* handled via Read_meta *)
+        | H2_frame.Unknown _ -> Ok_frame)
 
 (* ---- reader fiber ---- *)
 
 (* Reads frames from the wire, assembling HEADERS+CONTINUATION into a
-   meta-headers frame (Go's readFrames + readMetaFrame). Posts events. *)
-let rec read_loop sc : unit Lwt.t =
-  let open Lwt.Syntax in
-  Lwt.catch
-    (fun () ->
-      (* Boundary returns [result]; the reader fiber drives GOAWAY/RST by
-         raising (caught below and posted as [Read_error]), so convert an
-         [Error] back to the raising exception via {!H2_error.to_exception}
-         (Resolution #2 — boundary-only conversion; internal loop unchanged). *)
-      let* f =
-        Lwt.map
-          (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
-          (H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.ic)
-      in
-      match f with
-      | H2_frame.Headers (fh, hf) ->
-          (* assemble meta headers; reader owns the decoder *)
-          let* mf =
-            Lwt.map
-              (function
-                | Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
-              (H2_frame.read_meta_headers
-                 ~max_header_list_size:sc.adv_max_header_list_size sc.dec
-                 (fh, hf) sc.ic)
-          in
-          sc.push_event (Some (Read_meta mf));
-          read_loop sc
-      | _ ->
-          sc.push_event (Some (Read_frame f));
-          read_loop sc)
-    (fun exn ->
-      sc.push_event (Some (Read_error exn));
-      Lwt.return_unit)
+   meta-headers frame (Go's readFrames + readMetaFrame). Posts events, then stops
+   the daemon. The boundary returns [result]; the loop converts [Error] to the
+   raising exception (posted as [Read_error]). A Buf_read [Buffer_limit_exceeded]
+   (a frame larger than the buffer cap can hold) is mapped to a FRAME_SIZE
+   connection error rather than escaping unmapped (F019; in practice [read_frame]
+   rejects an over-[max_size] frame first). Runs as a daemon fiber so it is
+   auto-cancelled when the serve loop finishes. *)
+let read_loop sc : [ `Stop_daemon ] =
+  let unwrap = function
+    | Ok x -> x
+    | Error e -> raise (H2_error.to_exception e)
+  in
+  let rec loop () =
+    let f =
+      unwrap (H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.r)
+    in
+    (match f with
+    | H2_frame.Headers (fh, hf) ->
+        let mf =
+          unwrap
+            (H2_frame.read_meta_headers
+               ~max_header_list_size:sc.adv_max_header_list_size sc.dec (fh, hf)
+               sc.r)
+        in
+        push sc (Read_meta mf)
+    | _ -> push sc (Read_frame f));
+    loop ()
+  in
+  (try loop () with
+  | Eio.Buf_read.Buffer_limit_exceeded ->
+      push sc (Read_error H2_frame.Frame_too_large)
+  (* server.go:692-711: forward the framer err as a connection read error; but
+     bug-class exns / Cancelled propagate (Go's reader has no panic recovery). *)
+  | exn ->
+      reraise_unhandleable exn;
+      push sc (Read_error exn));
+  `Stop_daemon
 
 (* ---- serve loop ---- *)
 
 let handle_meta sc (mf : H2_frame.meta_headers_frame) : frame_outcome =
-  let first_ok = if not sc.saw_first_settings then false else true in
-  if not first_ok then Conn_error H2_error.ProtocolError
+  if not sc.saw_first_settings then Conn_error H2_error.ProtocolError
+  else if
+    (* refuse new streams after GOAWAY (server.go:1441). *)
+    sc.in_goaway
+    && (sc.goaway_code <> H2_error.NoError
+       || mf.fh.stream_id > sc.max_client_stream_id)
+  then Ok_frame
   else
     match process_headers sc mf with
     | Ok () -> Ok_frame
     | Error code -> Conn_error code
 
-let rec serve_loop sc : unit Lwt.t =
-  let open Lwt.Syntax in
-  if sc.serving_done then Lwt.return_unit
-  else if sc.queued_control_frames > max_queued_control_frames then
-    Lwt.return_unit
-  else begin
-    let* ev = Lwt_stream.get sc.events in
-    match ev with
-    | None -> Lwt.return_unit
-    | Some ev -> (
-        match ev with
-        | Read_error exn -> (
-            match exn with
-            | H2_frame.Frame_too_large ->
-                go_away sc H2_error.FrameSizeError;
-                let* () = schedule_frame_write sc in
-                finish_or_continue sc
-            | H2_error.Connection_error code ->
-                go_away sc code;
-                let* () = schedule_frame_write sc in
-                finish_or_continue sc
-            | H2_error.Stream_error se ->
-                (match Hashtbl.find_opt sc.streams se.stream_id with
-                | Some st -> reset_stream sc st se.code
-                | None ->
-                    let wr : H2_writesched.frame_write_request =
-                      {
-                        write =
-                          H2_write.Write_rst_stream
-                            { stream_id = se.stream_id; code = se.code };
-                        stream = None;
-                      }
-                    in
-                    H2_writesched.push sc.write_sched wr;
-                    sc.queued_control_frames <- sc.queued_control_frames + 1);
-                let* () = schedule_frame_write sc in
-                serve_loop sc
-            | _ ->
-                (* EOF / client gone *)
-                sc.serving_done <- true;
-                Lwt.return_unit)
-        | Read_frame f -> (
-            (* A synchronous flow-control overflow in inflow_add (e.g. while
-               returning conn-level window for this DATA frame) raises a
-               modeled Connection_error; catch it here so it routes to GOAWAY
-               via the same Conn_error path rather than crashing the fiber. *)
-            let outcome =
-              try process_frame sc f
-              with H2_error.Connection_error code -> Conn_error code
-            in
-            match outcome with
-            | Ok_frame ->
-                let* () = schedule_frame_write sc in
-                serve_loop sc
-            | Conn_error code ->
-                go_away sc code;
-                let* () = schedule_frame_write sc in
-                finish_or_continue sc)
-        | Read_meta mf -> (
-            match handle_meta sc mf with
-            | Ok_frame ->
-                let* () = schedule_frame_write sc in
-                serve_loop sc
-            | Conn_error code ->
-                go_away sc code;
-                let* () = schedule_frame_write sc in
-                finish_or_continue sc)
-        | Want_write_frame req ->
-            let* () = write_frame sc req in
-            serve_loop sc
-        | Body_read (st, n) -> (
-            (* noteBodyRead: conn-level window update, and stream-level unless
-               half-closed/closed. An inflow_add overflow here raises a modeled
-               Connection_error; route it to GOAWAY instead of crashing. *)
-            let outcome =
-              try
-                send_window_update_conn sc n;
-                if
-                  st.state <> State_half_closed_remote
-                  && st.state <> State_closed
-                then send_window_update_stream sc st n;
-                Ok_frame
-              with H2_error.Connection_error code -> Conn_error code
-            in
-            match outcome with
-            | Ok_frame ->
-                let* () = schedule_frame_write sc in
-                serve_loop sc
-            | Conn_error code ->
-                go_away sc code;
-                let* () = schedule_frame_write sc in
-                finish_or_continue sc)
-        | Handler_done ->
-            handler_done_serve sc;
-            let* () = schedule_frame_write sc in
-            finish_or_continue sc)
-  end
+(* server.go:903-907, run after every loop iteration: once a GOAWAY has been
+   written, arm the goAwayTimeout linger — immediately for an error code, but for
+   a graceful NO_ERROR only once all open streams have drained. With no clock the
+   linger is inert, so close as soon as the GOAWAY is flushed (preserving the
+   pre-timer behaviour). [maybe_finish] returns whether the loop should end. *)
+let maybe_finish sc : bool =
+  let sent_goaway = sc.in_goaway && not sc.need_to_send_goaway in
+  let graceful_complete =
+    sc.goaway_code = H2_error.NoError && cur_open_streams sc = 0
+  in
+  if sent_goaway && (sc.goaway_code <> H2_error.NoError || graceful_complete)
+  then
+    begin match (sc.clock, sc.shutdown_timer_armed) with
+    | Some clock, false ->
+        sc.shutdown_timer_armed <- true;
+        let t =
+          {
+            deadline = Eio.Time.now clock +. go_away_timeout;
+            wake = Eio.Condition.create ();
+          }
+        in
+        Eio.Fiber.fork_daemon ~sw:sc.sw (fun () ->
+            run_timer sc t (fun () -> push sc Shutdown_timer));
+        false (* keep serving until the linger fires *)
+    | None, _ -> true (* no clock: close once flushed *)
+    | Some _, true -> false (* linger already armed *)
+    end
+  else false
 
-(* After GOAWAY or handler completion: if we've drained everything (GOAWAY sent
-   and no open streams under graceful), end; otherwise keep serving. *)
-and finish_or_continue sc : unit Lwt.t =
-  if sc.serving_done then Lwt.return_unit
-  else if
-    sc.in_goaway
-    && sc.goaway_code <> H2_error.NoError
-    && not sc.need_to_send_goaway
-  then begin
-    (* a connection error GOAWAY has been sent; close once writes flushed. *)
-    sc.serving_done <- true;
-    Lwt.return_unit
+let rec serve_loop sc : unit =
+  if sc.serving_done then ()
+  else if sc.queued_control_frames > max_queued_control_frames then ()
+  else begin
+    let keep_serving =
+      match Eio.Stream.take sc.events with
+      | Read_error exn -> (
+          match exn with
+          | H2_frame.Frame_too_large ->
+              go_away sc H2_error.FrameSizeError;
+              true
+          | H2_error.Connection_error code ->
+              go_away sc code;
+              true
+          | H2_error.Stream_error se ->
+              (match Hashtbl.find_opt sc.streams se.stream_id with
+              | Some st -> reset_stream sc st se.code
+              | None ->
+                  let wr : H2_writesched.frame_write_request =
+                    {
+                      write =
+                        H2_write.Write_rst_stream
+                          { stream_id = se.stream_id; code = se.code };
+                      stream = None;
+                    }
+                  in
+                  H2_writesched.push sc.write_sched wr;
+                  sc.queued_control_frames <- sc.queued_control_frames + 1);
+              true
+          | _ ->
+              (* EOF / client gone *)
+              sc.serving_done <- true;
+              false)
+      | Read_frame f -> (
+          (* read timer resets on every received frame (server.go:858). *)
+          (match sc.read_timer with
+          | Some t when sc.read_timeout > 0. -> timer_reset sc t sc.read_timeout
+          | _ -> ());
+          (* A synchronous flow-control overflow in inflow_add raises a modeled
+             Connection_error; route it to GOAWAY rather than crashing. *)
+          let outcome =
+            try process_frame sc f
+            with H2_error.Connection_error code -> Conn_error code
+          in
+          match outcome with
+          | Ok_frame -> true
+          | Conn_error code ->
+              go_away sc code;
+              true)
+      | Read_meta mf -> (
+          (match sc.read_timer with
+          | Some t when sc.read_timeout > 0. -> timer_reset sc t sc.read_timeout
+          | _ -> ());
+          match handle_meta sc mf with
+          | Ok_frame -> true
+          | Conn_error code ->
+              go_away sc code;
+              true)
+      | Want_write_frame req ->
+          write_frame sc req;
+          true
+      | Body_read (st, n) -> (
+          (* noteBodyRead: conn-level window update, and stream-level unless
+             half-closed/closed. An inflow_add overflow routes to GOAWAY. *)
+          let outcome =
+            try
+              send_window_update_conn sc n;
+              if
+                st.state <> State_half_closed_remote && st.state <> State_closed
+              then send_window_update_stream sc st n;
+              Ok_frame
+            with H2_error.Connection_error code -> Conn_error code
+          in
+          match outcome with
+          | Ok_frame -> true
+          | Conn_error code ->
+              go_away sc code;
+              true)
+      | Handler_done ->
+          handler_done_serve sc;
+          true
+      | Settings_timer ->
+          (* server.go:865-867: no SETTINGS in time -> close. *)
+          if not sc.saw_first_settings then sc.serving_done <- true;
+          true
+      | Idle_timer ->
+          (* server.go:868-870: idle -> graceful GOAWAY. *)
+          start_graceful_shutdown_internal sc;
+          true
+      | Read_timer ->
+          (* server.go:871-872 handlePingTimer fallback: we don't send PINGs, so
+             a read-idle timeout closes the connection. *)
+          sc.serving_done <- true;
+          true
+      | Shutdown_timer ->
+          (* server.go:873-875: GOAWAY linger elapsed -> close. *)
+          sc.serving_done <- true;
+          true
+      | Graceful_shutdown ->
+          (* server.go:876-877: Server.Shutdown reached this conn. *)
+          if not sc.shutdown_once then begin
+            sc.shutdown_once <- true;
+            start_graceful_shutdown_internal sc
+          end;
+          true
+    in
+    if keep_serving && not sc.serving_done then begin
+      schedule_frame_write sc;
+      if not (maybe_finish sc) then serve_loop sc
+    end
   end
-  else serve_loop sc
 
 (* readPreface: read exactly the client preface bytes and compare. *)
-let read_preface sc : bool Lwt.t =
-  let open Lwt.Syntax in
-  let buf = Bytes.create H2.client_preface_len in
-  Lwt.catch
-    (fun () ->
-      let* () = Lwt_io.read_into_exactly sc.ic buf 0 H2.client_preface_len in
-      Lwt.return (Bytes.to_string buf = H2.client_preface))
-    (fun _ -> Lwt.return false)
+let read_preface sc : bool =
+  match Eio.Buf_read.take H2.client_preface_len sc.r with
+  | s -> s = H2.client_preface
+  | exception _ -> false
 
 let serve ?(max_concurrent_streams = default_max_concurrent_streams)
-    ?(max_header_bytes = H2.default_max_header_bytes) ic oc ~handler :
-    unit Lwt.t =
-  let open Lwt.Syntax in
-  let events, push_event = Lwt_stream.create () in
+    ?(max_header_bytes = H2.default_max_header_bytes) ?clock
+    ?(idle_timeout = 0.) ?(read_timeout = 0.) ?graceful r w ~handler : unit =
+  Eio.Switch.run @@ fun sw ->
   let flow = H2_flow.create_outflow () in
   ignore (H2_flow.add flow (Int32.of_int H2.initial_window_size));
   let conn_inflow = H2_flow.create_inflow () in
@@ -1260,13 +1369,13 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams)
   let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
   let sc =
     {
-      ic;
-      oc;
+      r;
+      w;
+      sw;
       handler;
       enc = Hpack.new_encoder ();
       dec;
-      events;
-      push_event;
+      events = Eio.Stream.create max_int;
       flow;
       conn_inflow;
       write_sched = H2_writesched.create ();
@@ -1289,12 +1398,22 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams)
       need_to_send_goaway = false;
       goaway_code = H2_error.NoError;
       serving_done = false;
-      done_serving = Lwt_condition.create ();
+      done_serving = Eio.Condition.create ();
+      clock =
+        Option.map
+          (fun c -> (c :> float Eio.Time.clock_ty Eio.Resource.t))
+          clock;
+      idle_timeout;
+      read_timeout;
+      idle_timer = None;
+      read_timer = None;
+      shutdown_timer_armed = false;
+      shutdown_once = false;
+      pending_replies = [];
       unstarted = Queue.create ();
     }
   in
-  (* Send server's initial SETTINGS first (Go sends before reading preface, but
-     reading the preface first is also valid; we send then read). *)
+  (* Send the server's initial SETTINGS, then read the client preface. *)
   let settings =
     [
       {
@@ -1319,32 +1438,81 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams)
       };
     ]
   in
-  let* () = H2_frame.write_settings sc.oc settings in
-  let* () = Lwt_io.flush sc.oc in
+  H2_frame.write_settings sc.w settings;
+  Eio.Buf_write.flush sc.w;
   sc.unacked_settings <- sc.unacked_settings + 1;
-  let* ok = read_preface sc in
-  if not ok then Lwt.return_unit
-  else begin
-    (* spawn the reader fiber *)
-    Lwt.async (fun () -> read_loop sc);
-    let* () =
-      Lwt.finalize
-        (fun () -> serve_loop sc)
-        (fun () ->
-          (* doneServing: unblock handlers; close all streams. *)
-          sc.serving_done <- true;
-          Lwt_condition.broadcast sc.done_serving ();
-          Hashtbl.iter
-            (fun _ (st : stream) ->
-              (match st.body with
-              | Some p -> H2_pipe.break_with_error p End_of_file
-              | None -> ());
-              if not st.cw_closed then begin
-                st.cw_closed <- true;
-                Lwt_condition.broadcast st.cw ()
-              end)
-            sc.streams;
-          Lwt.return_unit)
-    in
-    Lwt.return_unit
+  (* readPreface under prefaceTimeout (server.go:798,:1029); no clock -> unbounded. *)
+  let preface_ok =
+    match sc.clock with
+    | Some clock -> (
+        try
+          Eio.Time.with_timeout_exn clock preface_timeout (fun () ->
+              read_preface sc)
+        with Eio.Time.Timeout -> false)
+    | None -> read_preface sc
+  in
+  if preface_ok then begin
+    (* Arm the serve-loop timers (server.go:809-823). Each runs in a fiber under
+       the conn switch, posting a serveMsgCh-style event; auto-cancelled when the
+       switch exits. firstSettings is one-shot; idle/read are re-armable. *)
+    (match sc.clock with
+    | Some clock ->
+        let st =
+          {
+            deadline = Eio.Time.now clock +. first_settings_timeout;
+            wake = Eio.Condition.create ();
+          }
+        in
+        Eio.Fiber.fork_daemon ~sw (fun () ->
+            run_timer sc st (fun () ->
+                if not sc.saw_first_settings then push sc Settings_timer));
+        if idle_timeout > 0. then begin
+          let it =
+            {
+              deadline = Eio.Time.now clock +. idle_timeout;
+              wake = Eio.Condition.create ();
+            }
+          in
+          sc.idle_timer <- Some it;
+          Eio.Fiber.fork_daemon ~sw (fun () ->
+              run_timer sc it (fun () -> push sc Idle_timer))
+        end;
+        if read_timeout > 0. then begin
+          let rt =
+            {
+              deadline = Eio.Time.now clock +. read_timeout;
+              wake = Eio.Condition.create ();
+            }
+          in
+          sc.read_timer <- Some rt;
+          Eio.Fiber.fork_daemon ~sw (fun () ->
+              run_timer sc rt (fun () -> push sc Read_timer))
+        end
+    | None -> ());
+    (* startGracefulShutdown (server.go:1311): a resolved [graceful] promise
+       posts the gracefulShutdownMsg to the serve loop, idempotently. *)
+    (match graceful with
+    | Some p ->
+        Eio.Fiber.fork_daemon ~sw (fun () ->
+            Eio.Promise.await p;
+            if not sc.serving_done then push sc Graceful_shutdown;
+            `Stop_daemon)
+    | None -> ());
+    (* The reader is a daemon: when the serve loop and all handler fibers
+       finish, it is auto-cancelled (interrupting its blocked Buf_read) and the
+       switch exits — Go's doneServing. *)
+    Eio.Fiber.fork_daemon ~sw (fun () -> read_loop sc);
+    Fun.protect
+      (fun () -> serve_loop sc)
+      ~finally:(fun () ->
+        (* doneServing: unblock handlers blocked on a write, then break all
+           request pipes so a handler reading a body sees EOF immediately. *)
+        sc.serving_done <- true;
+        Eio.Condition.broadcast sc.done_serving;
+        Hashtbl.iter
+          (fun _ (st : stream) ->
+            match st.body with
+            | Some p -> H2_pipe.break_with_error p End_of_file
+            | None -> ())
+          sc.streams)
   end

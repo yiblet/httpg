@@ -7,16 +7,21 @@ type file_header = {
   filename : string;
   fh_header : (string * string) list;
   content : string;
+  tmpfile : string option;
 }
-(** A multipart file part, the analogue of Go's [multipart.FileHeader]. The
-    contents are held in memory (the multipart_form-lwt stand-in materializes
-    parts as strings). *)
+(** A multipart file part, the analogue of Go's [multipart.FileHeader]. A part
+    within the [max_memory] budget is held in [content]; an oversized part is
+    spilled to disk at [tmpfile] (and [content] is [""]). *)
 
 type multipart_form = {
   value : Values.t;
   file : (string, file_header list) Hashtbl.t;
 }
 (** The analogue of Go's [*multipart.Form]: named text values and file parts. *)
+
+val remove_multipart_files : (string, file_header list) Hashtbl.t -> unit
+(** Go's [Form.RemoveAll]: unlink any spilled temp files referenced by the table
+    and clear their [tmpfile]. Idempotent. *)
 
 type 'body t = {
   mutable meth : string;  (** Go [Method]; "" means GET for client requests *)
@@ -37,13 +42,15 @@ type 'body t = {
       (** Go [Form]: query + urlencoded body params; [None] until parsed. *)
   mutable post_form : Values.t option;  (** Go [PostForm]: body params only. *)
   mutable multipart_form : multipart_form option;  (** Go [MultipartForm]. *)
-  mutable ctx : Context.t;
-      (** Go [Request.ctx]: the request context (deadline/cancellation),
-          defaulting to {!Context.background}. *)
 }
 (** A request mirroring Go's [Request] struct. The body field is parametric so
     the type carries no IO dependency; {!Io} instantiates ['body] to {!Body.t}.
 *)
+
+val remove_multipart_temp_files : 'a t -> unit
+(** Remove any temp files spilled by multipart parsing on [r] (Go's
+    [Request.MultipartForm.RemoveAll]). Idempotent; no-op if nothing spilled.
+    The serve loop wires this to a per-request switch. *)
 
 val default_user_agent : string
 (** [defaultUserAgent]. *)
@@ -86,10 +93,3 @@ val basic_auth_encode : string -> string -> string
 
 val set_basic_auth : 'a t -> string -> string -> unit
 (** [Request.SetBasicAuth]: set the "Authorization" header. *)
-
-val context : 'a t -> Context.t
-(** [Request.Context]: the request's context (never nil; defaults to
-    {!Context.background}). *)
-
-val with_context : 'a t -> Context.t -> 'a t
-(** [Request.WithContext]: a shallow copy of the request carrying [ctx]. *)

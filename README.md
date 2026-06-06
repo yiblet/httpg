@@ -10,15 +10,19 @@ behave the same way, so Go's documentation doubles as a reference and you don't
 need a background in functional programming to get going.
 
 ```ocaml
-open Lwt.Infix
 open Httpg
 
 (* Fetch a URL. *)
 let () =
-  Lwt_main.run
-    (Client.get Client.default_client "http://example.com/" >>= fun resp ->
-     Body.read_all resp.body >|= fun body ->
-     Printf.printf "%d\n%s" resp.status_code body)
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let client =
+    Client.create ~net:(Eio.Stdenv.net env)
+      ~clock:(Eio.Stdenv.clock env) ()
+  in
+  let resp = Client.get ~sw client "http://example.com/" in
+  Printf.printf "%d\n%s" resp.Response.status_code
+    (Body.read_all resp.Response.body)
 ```
 
 ## Why httpg exists
@@ -56,8 +60,9 @@ functional but not "advanced and functional".
 opam install . --deps-only --with-test
 ```
 
-`httpg` is built on [Lwt](https://github.com/ocsigen/lwt) for concurrency and
-[tls](https://github.com/mirleft/ocaml-tls) for HTTPS.
+`httpg` is built on [Eio](https://github.com/ocaml-multicore/eio) for concurrency
+(direct-style, multicore-capable) and [tls](https://github.com/mirleft/ocaml-tls)
+for HTTPS.
 
 ## A first server
 
@@ -65,7 +70,6 @@ Handlers receive a writer (`w`) and the request. You set a status and write a
 body — that's it.
 
 ```ocaml
-open Lwt.Infix
 open Httpg
 
 let () =
@@ -74,23 +78,28 @@ let () =
     (Server.handle_func mux "/hello" (fun w _req ->
          w.write_header 200;
          w.write "Hello, world\n"));
-  Lwt_main.run
-    (Server.listen_and_serve ~addr:"127.0.0.1" ~port:8080
-       (Server.serve_mux_handler mux))
+  Eio_main.run @@ fun env ->
+  Server.listen_and_serve ~net:(Eio.Stdenv.net env)
+    ~clock:(Eio.Stdenv.clock env) ~addr:"127.0.0.1" ~port:8080
+    (Server.serve_mux_handler mux)
 ```
 
 ## Making a request
 
 ```ocaml
-open Lwt.Infix
 open Httpg
 
 let () =
-  Lwt_main.run
-    (Client.get Client.default_client "http://example.com/" >>= fun resp ->
-     (* Bodies stream in; read to the end to free the connection for reuse. *)
-     Body.read_all resp.body >|= fun body ->
-     Printf.printf "%d\n%s" resp.status_code body)
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let client =
+    Client.create ~net:(Eio.Stdenv.net env)
+      ~clock:(Eio.Stdenv.clock env) ()
+  in
+  let resp = Client.get ~sw client "http://example.com/" in
+  (* Bodies stream in; read to the end to free the connection for reuse. *)
+  Printf.printf "%d\n%s" resp.Response.status_code
+    (Body.read_all resp.Response.body)
 ```
 
 There's more — POSTs and form posts, custom clients and servers (timeouts,

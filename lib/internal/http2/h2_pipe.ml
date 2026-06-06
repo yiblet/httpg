@@ -7,33 +7,32 @@ exception Uninitialized_pipe_write
 let closed_pipe_write_msg = "write on closed buffer"
 let uninitialized_pipe_write_msg = "write on uninitialized buffer"
 
-(* pipe is a goroutine-safe (here: fiber-safe) Reader/Writer pair. It's like
-   io.Pipe except there are no PipeReader/PipeWriter halves, and the underlying
-   buffer is held internally. Go uses a sync.Cond to block Read; here a blocked
-   Read awaits an Lwt_condition that Write/CloseWithError/BreakWithError
-   broadcast. *)
+(* A fiber-safe Reader/Writer pair (Go's sync.Cond-guarded pipe). A blocked
+   [read] awaits [cond]; [write]/[close]/[break] broadcast it. The pipe lives in
+   a single domain (one per connection), so the state checks before suspending
+   never switch fibers and [Eio.Condition.await_no_mutex] is correct — no mutex
+   is needed. *)
 type t = {
-  cond : unit Lwt_condition.t; (* mirrors Go's sync.Cond *)
+  cond : Eio.Condition.t; (* Go's sync.Cond *)
   mutable b : H2_databuffer.t option; (* None when done reading *)
   mutable unread : int; (* bytes unread when done *)
   mutable err : exn option; (* read error once empty; Some means closed *)
   mutable break_err : exn option;
       (* immediate read error (caller doesn't see rest of b) *)
-  mutable donec : unit Lwt.t option; (* resolved on error *)
-  mutable donec_wake : unit Lwt.u option;
+  mutable done_p : (unit Eio.Promise.t * unit Eio.Promise.u) option;
+      (* resolved on error *)
   mutable read_fn : (unit -> unit) option;
       (* optional code to run before error *)
 }
 
 let create () =
   {
-    cond = Lwt_condition.create ();
+    cond = Eio.Condition.create ();
     b = None;
     unread = 0;
     err = None;
     break_err = None;
-    donec = None;
-    donec_wake = None;
+    done_p = None;
     read_fn = None;
   }
 
@@ -46,13 +45,12 @@ let len p = match p.b with None -> p.unread | Some b -> H2_databuffer.len b
    buffer, returning them as a string. On close-with-error, after all buffered
    data is drained, the error is raised; on break, the error is raised
    immediately. Mirrors pipe.Read. *)
-let rec read p (max : int) : string Lwt.t =
+let rec read p (max : int) : string =
   match p.break_err with
-  | Some e -> Lwt.fail e
+  | Some e -> raise e
   | None -> (
       match p.b with
-      | Some b when H2_databuffer.len b > 0 ->
-          Lwt.return (H2_databuffer.read_string b max)
+      | Some b when H2_databuffer.len b > 0 -> H2_databuffer.read_string b max
       | _ -> (
           match p.err with
           | Some e ->
@@ -62,36 +60,34 @@ let rec read p (max : int) : string Lwt.t =
                   p.read_fn <- None (* not sticky like p.err *)
               | None -> ());
               p.b <- None;
-              Lwt.fail e
+              raise e
           | None ->
               (* Wait for a Write / Close / Break to wake us. *)
-              Lwt.bind (Lwt_condition.wait p.cond) (fun () -> read p max)))
+              Eio.Condition.await_no_mutex p.cond;
+              read p max))
 
 (* Write copies bytes into the buffer and wakes a reader. It is an error to
    write more data than the buffer can hold. Returns the number written. *)
 let write p (d : string) : int =
   Fun.protect
-    ~finally:(fun () -> Lwt_condition.broadcast p.cond ())
+    ~finally:(fun () -> Eio.Condition.broadcast p.cond)
     (fun () ->
       if p.err <> None || p.break_err <> None then raise Closed_pipe_write;
-      (* setBuffer may never have been invoked, leaving the buffer
-         uninitialized. *)
       match p.b with
       | None -> raise Uninitialized_pipe_write
       | Some b -> H2_databuffer.write_string b d)
 
-(* requires nothing held; resolves donec if present and unresolved. *)
-let close_done_locked p =
-  match (p.donec, p.donec_wake) with
-  | Some _, Some u ->
-      p.donec_wake <- None;
-      Lwt.wakeup_later u ()
+(* resolves done if present and unresolved. *)
+let close_done p =
+  match p.done_p with
+  | Some (pr, u) when not (Eio.Promise.is_resolved pr) ->
+      Eio.Promise.resolve u ()
   | _ -> ()
 
 (* closeWithError into the given target. *)
 let close_with_error_into ~is_break p (err : exn) (fn : (unit -> unit) option) =
   Fun.protect
-    ~finally:(fun () -> Lwt_condition.broadcast p.cond ())
+    ~finally:(fun () -> Eio.Condition.broadcast p.cond)
     (fun () ->
       let already = if is_break then p.break_err <> None else p.err <> None in
       if already then () (* Already been done. *)
@@ -104,12 +100,11 @@ let close_with_error_into ~is_break p (err : exn) (fn : (unit -> unit) option) =
           p.b <- None
         end;
         if is_break then p.break_err <- Some err else p.err <- Some err;
-        close_done_locked p
+        close_done p
       end)
 
 (* CloseWithError causes the next Read (waking a blocked Read if needed) to
-   return the provided err after all data has been read. The error must be
-   non-nil. *)
+   return the provided err after all data has been read. *)
 let close_with_error p err = close_with_error_into ~is_break:false p err None
 
 (* BreakWithError causes the next Read to return err immediately, without
@@ -128,13 +123,10 @@ let err p = match p.break_err with Some _ as e -> e | None -> p.err
 (* Done returns a promise which resolves if and when this pipe is closed with
    CloseWithError (or BreakWithError). *)
 let done_ p =
-  match p.donec with
-  | Some d -> d
+  match p.done_p with
+  | Some (pr, _) -> pr
   | None ->
-      let d, u = Lwt.wait () in
-      p.donec <- Some d;
-      p.donec_wake <- Some u;
-      if p.err <> None || p.break_err <> None then
-        (* Already hit an error. *)
-        close_done_locked p;
-      d
+      let pr, u = Eio.Promise.create () in
+      p.done_p <- Some (pr, u);
+      if p.err <> None || p.break_err <> None then close_done p;
+      pr

@@ -3,9 +3,9 @@
    This is a meta/regression test that locks in the project's error-handling
    philosophy (see [plans/error-handling-audit.md] and [CLAUDE.md]/[AGENTS.md]):
 
-   - Handleable errors are surfaced as values: pure [('a, error) result] /
-     Lwt-IO [('a, error) result Lwt.t], with each module owning a typed
-     [type error] (or, for the HTTP/2 frame layer, the unified [H2_error.t]).
+   - Handleable errors are surfaced as values: [('a, error) result] (direct
+     style under Eio), with each module owning a typed [type error] (or, for the
+     HTTP/2 frame layer, the unified [H2_error.t]).
    - Unhandleable errors (programmer bugs, invariant violations, internal
      control-flow sentinels) stay as exceptions, documented in their [.mli].
 
@@ -111,7 +111,9 @@ let unhandleable_allowlist =
     "h2_writesched";
     (* Failure: scheduler invariant *)
     "net";
-    (* Failure: bound_port + TLS/csr setup misuse *)
+    (* Failure: bound_port + TLS/csr setup misuse (write-before-handshake, bad
+       config). Note: a TLS handshake/auth/protocol failure is the typed,
+       handleable [Net.Tls_error] carrier (F006), not a bare Failure. *)
     "hpack_tables";
     (* Invalid_argument: table-index invariant (evict_oldest) *)
     "hpack";
@@ -126,8 +128,6 @@ let unhandleable_allowlist =
     (* raise Exit: String.iter early-exit *)
     "h2_frame";
     (* Invalid_argument "illegal window increment": write-side invariant *)
-    "context";
-    (* exception Canceled / Deadline_exceeded: the context contract *)
     "httptest";
     (* invalid_arg "invalid WriteHeader code": precondition *)
     "routing_tree";
@@ -208,7 +208,6 @@ let test_unhandleable_allowlisted () =
       "hpack";
       "pattern";
       "mapping";
-      "context";
       "h2_pipe";
       "h2_databuffer";
       "routing_tree";

@@ -1,7 +1,6 @@
 (* Port of the client subset of go/src/net/http/internal/http2/transport.go and
-   client_conn_pool.go. See h2_transport.mli for the goroutine -> Lwt mapping. *)
-
-let ( let* ) = Lwt.bind
+   client_conn_pool.go. See h2_transport.mli for the goroutine -> Eio fiber
+   mapping. *)
 
 module F = H2_frame
 module Body = Api.Body
@@ -10,51 +9,62 @@ module Header = Api.Header
 (* errClientConnClosed / errClientConnGotGoAway / aborts, as exceptions. *)
 exception Client_conn_closed
 exception Conn_got_goaway of H2_error.err_code
+
+(* errClientConnUnusable (transport.go:530): a pooled conn raced into
+   closed/closing before this request wrote anything to the wire. Distinct so the
+   transport pool can evict + retry on a fresh dial (Go's shouldRetryRequest),
+   knowing the request is unmodified. *)
+exception Conn_unusable
 exception Stream_aborted of exn
 exception Malformed_response of string
+
+(* errRequestCanceled (transport.go): the caller abandoned the request (early
+   return / undrained response / cancelled scope) before a clean close. *)
+exception Request_canceled
 
 (* ---- clientStream (mirrors Go's clientStream) ---- *)
 
 type client_stream = {
   id : int;
-  (* response payload pipe, fed by DATA frames (Go cs.bufPipe). *)
-  buf_pipe : H2_pipe.t;
-  (* per-stream outbound + inbound flow control (Go cs.flow / cs.inflow). *)
-  flow : H2_flow.outflow;
-  inflow : H2_flow.inflow;
-  mutable bytes_remain : int; (* -1 means unknown; declared Content-Length. *)
-  (* response: set when headers received, resolves resp_recv. *)
+  buf_pipe : H2_pipe.t; (* response payload (Go cs.bufPipe) *)
+  flow : H2_flow.outflow; (* per-stream outbound flow (Go cs.flow) *)
+  inflow : H2_flow.inflow; (* per-stream inbound flow (Go cs.inflow) *)
+  mutable bytes_remain : int; (* -1 unknown; declared Content-Length *)
   mutable res : Api.client_response option;
-  resp_recv : unit Lwt_condition.t; (* broadcast when [res] is set *)
   mutable resp_recv_done : bool;
-  peer_closed : unit Lwt_condition.t; (* broadcast on END_STREAM *)
   mutable peer_closed_done : bool;
-  (* abort: set + broadcast on stream error / RST / GOAWAY. *)
-  mutable abort_err : exn option;
-  abort : unit Lwt_condition.t;
+  mutable abort_err : exn option; (* set on stream error / RST / GOAWAY *)
   mutable past_headers : bool; (* got the first MetaHeadersFrame *)
   mutable read_closed : bool; (* peer sent END_STREAM *)
   mutable read_aborted : bool; (* read loop reset the stream *)
   mutable is_head : bool;
+  mutable sent_end_stream : bool;
+      (* writer sent our END_STREAM (Go sentEndStream) *)
+  mutable cleaned : bool; (* cleanup_write_request ran (idempotency guard) *)
+  mutable body_is_stream : bool;
+      (* response body is a drainable Stream whose EOF frees the slot; if false
+         (Empty body) end_stream frees the slot directly *)
 }
 
 (* ---- ClientConn (mirrors Go's ClientConn) ---- *)
 
 type client_conn = {
-  ic : Lwt_io.input_channel;
-  oc : Lwt_io.output_channel;
-  (* write mutex (Go cc.wmu); held while writing to [oc]. *)
-  wmu : Lwt_mutex.t;
-  (* HPACK request encoder; reused across requests (Go cc.henc). *)
-  henc : Hpack.encoder;
-  (* HPACK response decoder, shared by read_meta_headers (Go cc.fr.ReadMetaHeaders). *)
-  hdec : Hpack.decoder;
-  (* conn-level flow control (Go cc.flow / cc.inflow). *)
-  conn_flow : H2_flow.outflow;
-  conn_inflow : H2_flow.inflow;
-  (* broadcast on flow / closed changes (Go cc.cond). *)
-  cond : unit Lwt_condition.t;
+  r : Eio.Buf_read.t;
+  w : Eio.Buf_write.t;
+  sw : Eio.Switch.t; (* reader + body-writer fibers fork here *)
+  wmu : Eio.Mutex.t; (* held while writing to [w] (Go cc.wmu) *)
+  henc : Hpack.encoder; (* request encoder (Go cc.henc) *)
+  hdec : Hpack.decoder; (* response decoder, used by read loop *)
+  conn_flow : H2_flow.outflow; (* conn-level flow (Go cc.flow) *)
+  conn_inflow : H2_flow.inflow; (* conn-level inflow (Go cc.inflow) *)
+  (* Single condition broadcast on every state change (flow, response, abort,
+     closed). Waiters re-check predicates after each wake (Go cc.cond). *)
+  cond : Eio.Condition.t;
   streams : (int, client_stream) Hashtbl.t;
+  mutable streams_reserved : int;
+      (* slots reserved before id assignment (transport.go:161) *)
+  mutable pending_resets : int;
+      (* RST_STREAMs awaiting PING ACK (transport.go:196) *)
   mutable next_stream_id : int;
   mutable max_frame_size : int;
   mutable max_concurrent_streams : int;
@@ -66,43 +76,70 @@ type client_conn = {
   mutable goaway : F.goaway_frame option;
   mutable want_settings_ack : bool;
   mutable seen_settings : bool;
-  seen_settings_cond : unit Lwt_condition.t;
-  (* resolved when the read loop ends (Go cc.readerDone). *)
-  mutable reader_err : exn option;
-  reader_done : unit Lwt_condition.t;
-  mutable reader_done_set : bool;
-  (* serializes new-request stream-id allocation + HEADERS write (Go reqHeaderMu). *)
-  req_header_mu : Lwt_mutex.t;
+  mutable reader_err : exn option; (* set when the read loop ends *)
+  req_header_mu : Eio.Mutex.t; (* serializes stream-id alloc + HEADERS write *)
 }
 
 let default_max_concurrent_streams = 250
 
 (* ---- small helpers ---- *)
 
-let broadcast_done c flag set =
-  if not flag then (
-    set ();
-    Lwt_condition.broadcast c ())
+(* currentRequestCountLocked (transport.go:885): concurrency slots in use =
+   live streams + reserved slots + reset streams awaiting a PING ACK. *)
+let current_request_count cc =
+  Hashtbl.length cc.streams + cc.streams_reserved + cc.pending_resets
 
-(* abort a stream: set abort_err once, broadcast abort + cond. *)
+(* forgetStreamID (transport.go:1875): drop the stream from the table, freeing a
+   concurrency slot, and wake any request fiber waiting for one. *)
+let forget_stream cc id =
+  if Hashtbl.mem cc.streams id then begin
+    Hashtbl.remove cc.streams id;
+    Eio.Condition.broadcast cc.cond
+  end
+
+(* abort a stream: set abort_err once, forget it, wake waiters. *)
 let abort_stream cc cs err =
-  (match cs.abort_err with
-  | Some _ -> ()
-  | None ->
-      cs.abort_err <- Some err;
-      Lwt_condition.broadcast cs.abort ());
-  Lwt_condition.broadcast cc.cond ()
+  (match cs.abort_err with Some _ -> () | None -> cs.abort_err <- Some err);
+  forget_stream cc cs.id;
+  Eio.Condition.broadcast cc.cond
 
-(* resolve the response-headers-received signal. *)
-let signal_resp_recv cs =
-  broadcast_done cs.resp_recv cs.resp_recv_done (fun () ->
-      cs.resp_recv_done <- true)
+(* cleanupWriteRequest (transport.go:1217): the caller is done with the stream
+   (response drained, abandoned early, or its scope cancelled). Idempotent. If
+   the exchange did not close cleanly (we never sent END_STREAM, or the peer has
+   not), abort the stream — this unblocks a body-writer parked in
+   await_flow_control (it re-checks abort_err) and breaks the response pipe — and
+   forget it. A cleanly half-closed stream was already forgotten by [end_stream];
+   here we only drop any straggling table entry. *)
+let cleanup_write_request cc cs =
+  if not cs.cleaned then begin
+    cs.cleaned <- true;
+    let clean = cs.sent_end_stream && cs.read_closed in
+    (match (clean, cs.abort_err) with
+    | false, None ->
+        let err = Stream_aborted Request_canceled in
+        cs.abort_err <- Some err;
+        H2_pipe.break_with_error cs.buf_pipe err (* no-op if already closed *)
+    | _ -> ());
+    (* An unclean teardown is the analogue of Go's RST_STREAM-with-PING path: we
+       keep the slot counted against the limit (as a pending reset) until a PING
+       ACK confirms the peer is alive, throttling requests on a dead conn
+       (transport.go:1494-1510). A clean exchange frees its slot outright. *)
+    if not clean then cc.pending_resets <- cc.pending_resets + 1;
+    forget_stream cc cs.id;
+    Eio.Condition.broadcast cc.cond
+  end
 
-let signal_peer_closed cs =
-  broadcast_done cs.peer_closed cs.peer_closed_done (fun () ->
-      cs.peer_closed_done <- true)
+let signal_resp_recv cc cs =
+  if not cs.resp_recv_done then (
+    cs.resp_recv_done <- true;
+    Eio.Condition.broadcast cc.cond)
 
-(* ---- writing (Go cc.wmu-guarded helpers; we serialize with Lwt_mutex) ---- *)
+let signal_peer_closed cc cs =
+  if not cs.peer_closed_done then (
+    cs.peer_closed_done <- true;
+    Eio.Condition.broadcast cc.cond)
+
+(* ---- writing (Go cc.wmu-guarded helpers; serialized with [wmu]) ---- *)
 
 (* write the HEADERS block, splitting into CONTINUATION frames by max_frame_size
    (Go cc.writeHeaders). Caller holds [wmu]. *)
@@ -110,21 +147,19 @@ let write_headers_block cc ~stream_id ~end_stream (hdrs : string) =
   let max = cc.max_frame_size in
   let len = String.length hdrs in
   let rec loop pos first =
-    if pos >= len then Lwt.return_unit
-    else
+    if pos < len then begin
       let chunk_len = min max (len - pos) in
       let chunk = String.sub hdrs pos chunk_len in
       let next = pos + chunk_len in
       let end_headers = next >= len in
-      let* () =
-        if first then
-          F.write_headers cc.oc ~stream_id ~end_stream ~end_headers chunk
-        else F.write_continuation cc.oc stream_id end_headers chunk
-      in
+      if first then
+        F.write_headers cc.w ~stream_id ~end_stream ~end_headers chunk
+      else F.write_continuation cc.w stream_id end_headers chunk;
       loop next false
+    end
   in
-  let* () = loop 0 true in
-  Lwt_io.flush cc.oc
+  loop 0 true;
+  Eio.Buf_write.flush cc.w
 
 (* ---- request header encoding (Go httpcommon.EncodeHeaders) ---- *)
 
@@ -136,16 +171,15 @@ let request_uri_of (u : Uri.t) : string =
   let path = if path = "" then "/" else path in
   match Uri.verbatim_query u with Some q -> path ^ "?" ^ q | None -> path
 
-(* actualContentLength: Body.String -> its length; Empty -> 0; Stream -> the
-   request's declared content_length (-1 unknown). *)
+(* actualContentLength: String -> length; Empty -> 0; Stream -> declared. *)
 let actual_content_length (req : Api.client_request) =
   match req.creq_body with
   | Body.Empty -> 0
   | Body.String s -> String.length s
   | Body.Stream _ -> Int64.to_int req.creq_content_length
 
-(* encode the request headers into a single HPACK block (Go encodeAndWriteHeaders
-   without the wmu plumbing), via httpcommon.EncodeHeaders. *)
+(* encode the request headers into a single HPACK block via
+   httpcommon.EncodeHeaders (Go encodeAndWriteHeaders, sans wmu plumbing). *)
 let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
   let url = req.creq_url in
   let host =
@@ -158,7 +192,6 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
           | None -> h)
       | None -> ""
   in
-  let trailer = req.creq_trailer in
   let hc_req : HC.request =
     {
       url_scheme = (match Uri.scheme url with Some s -> s | None -> "");
@@ -168,16 +201,14 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
       meth = req.creq_meth;
       host = req.creq_host;
       header = req.creq_header;
-      trailer;
+      trailer = req.creq_trailer;
       actual_content_length = Int64.of_int acl;
     }
   in
   let param : HC.encode_headers_param =
     {
       request = hc_req;
-      (* our client does not do transparent gzip decoding, so never request it
-         (Go's IsRequestGzip path); the peer's MAX_HEADER_LIST_SIZE is not yet
-         tracked, so the size pre-pass stays disabled as it was inline. *)
+      (* no transparent gzip; peer MAX_HEADER_LIST_SIZE not tracked yet. *)
       add_gzip_header = false;
       peer_max_header_list_size = 0L;
       default_user_agent = Api.default_user_agent;
@@ -188,7 +219,6 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
   let (_ : HC.encode_headers_result) =
     HC.encode_headers ~canonical:Header.canonical_header_key param
       (fun name value ->
-        (* httpcommon already lower-cased and validated [name]. *)
         Hpack.write_field cc.henc { name; value; sensitive = false })
   in
   Buffer.contents buf
@@ -196,86 +226,75 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
 (* ---- request body writing (Go writeRequestBody + awaitFlowControl) ---- *)
 
 (* await [1, min(maxBytes, maxFrameSize)] flow control tokens. *)
-let rec await_flow_control cc cs max_bytes : int Lwt.t =
-  if cc.closed then Lwt.fail Client_conn_closed
+let rec await_flow_control cc cs max_bytes : int =
+  if cc.closed then raise Client_conn_closed
   else
     match cs.abort_err with
-    | Some e -> Lwt.fail e
+    | Some e -> raise e
     | None ->
         let avail = Int32.to_int (H2_flow.available cs.flow) in
         if avail > 0 then begin
-          let take = min avail max_bytes in
-          let take = min take cc.max_frame_size in
+          let take = min (min avail max_bytes) cc.max_frame_size in
           H2_flow.take cs.flow (Int32.of_int take);
-          Lwt.return take
+          take
         end
-        else
-          let* () = Lwt_condition.wait cc.cond in
-          await_flow_control cc cs max_bytes
+        else (
+          Eio.Condition.await_no_mutex cc.cond;
+          await_flow_control cc cs max_bytes)
 
 (* write a chunk of the request body honoring flow control. *)
-let write_data_chunk cc cs ~end_stream (data : string) : unit Lwt.t =
+let write_data_chunk cc cs ~end_stream (data : string) : unit =
   let len = String.length data in
   let rec loop pos =
-    if pos >= len then
-      (* the whole chunk is sent; END_STREAM is attached on the final byte run,
-         but if data was empty we still may need an empty END_STREAM frame. *)
-      Lwt.return_unit
-    else
-      let* allowed = await_flow_control cc cs (len - pos) in
+    if pos < len then begin
+      let allowed = await_flow_control cc cs (len - pos) in
       let next = pos + allowed in
-      let last = next >= len in
-      let send_end = end_stream && last in
+      let send_end = end_stream && next >= len in
       let piece = String.sub data pos allowed in
-      let* () =
-        Lwt_mutex.with_lock cc.wmu (fun () ->
-            let* () = F.write_data cc.oc cs.id send_end piece in
-            Lwt_io.flush cc.oc)
-      in
+      Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+          F.write_data cc.w cs.id send_end piece;
+          Eio.Buf_write.flush cc.w);
       loop next
+    end
   in
-  if len = 0 then Lwt.return_unit else loop 0
+  if len > 0 then loop 0
 
 (* send the request body then the terminating END_STREAM. *)
-let write_request_body cc cs (req : Api.client_request) : unit Lwt.t =
+let write_request_body cc cs (req : Api.client_request) : unit =
   let send_empty_end () =
-    Lwt_mutex.with_lock cc.wmu (fun () ->
-        let* () = F.write_data cc.oc cs.id true "" in
-        Lwt_io.flush cc.oc)
+    Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+        F.write_data cc.w cs.id true "";
+        Eio.Buf_write.flush cc.w)
   in
-  match req.creq_body with
-  | Body.Empty -> Lwt.return_unit (* END_STREAM already on HEADERS *)
+  (match req.creq_body with
+  | Body.Empty -> () (* END_STREAM already on HEADERS *)
   | Body.String s ->
-      if String.length s = 0 then Lwt.return_unit
-      else write_data_chunk cc cs ~end_stream:true s
+      if String.length s > 0 then write_data_chunk cc cs ~end_stream:true s
   | Body.Stream next ->
       let rec pump () =
-        let* chunk = next () in
-        match chunk with
+        match next () with
         | None -> send_empty_end ()
         | Some "" -> pump ()
         | Some data ->
-            (* peek ahead: we don't know if this is the last chunk, so never set
-               END_STREAM on a streamed chunk; send a trailing empty DATA. *)
-            let* () = write_data_chunk cc cs ~end_stream:false data in
+            (* never set END_STREAM on a streamed chunk; send a trailing empty
+               DATA frame to terminate. *)
+            write_data_chunk cc cs ~end_stream:false data;
             pump ()
       in
-      pump ()
+      pump ());
+  cs.sent_end_stream <- true
 
 (* ---- response construction (Go handleResponse) ---- *)
 
 let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
     Api.client_response =
-  ignore cc;
   let status = ref "" in
   let header = Header.create () in
   List.iter
     (fun (hf : Hpack.header_field) ->
       if String.length hf.name > 0 && hf.name.[0] = ':' then (
         if hf.name = ":status" then status := hf.value)
-      else
-        let key = Header.canonical_header_key hf.name in
-        Header.add header key hf.value)
+      else Header.add header (Header.canonical_header_key hf.name) hf.value)
     mf.fields;
   if !status = "" then raise (Malformed_response "missing status pseudo header");
   let status_code =
@@ -284,7 +303,6 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
     | None ->
         raise (Malformed_response "malformed non-numeric status pseudo header")
   in
-  (* Content-Length. *)
   let content_length =
     match Header.values header "Content-Length" with
     | [ cl ] -> ( match Int64.of_string_opt cl with Some n -> n | None -> -1L)
@@ -295,19 +313,25 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
   let body =
     if cs.is_head || stream_ended then Body.Empty
     else begin
-      (* streaming body fed by DATA frames via buf_pipe. *)
+      cs.body_is_stream <- true;
       H2_pipe.set_buffer cs.buf_pipe
         (H2_databuffer.create ~expected:content_length ());
+      (* free the concurrency slot only once the body is fully read (EOF) — Go's
+         forgetStreamID runs in cleanupWriteRequest after the body close, not at
+         peer END_STREAM (transport.go:1523). *)
       Body.of_stream (fun () ->
-          Lwt.catch
-            (fun () ->
-              let* s = H2_pipe.read cs.buf_pipe 4096 in
-              if s = "" then Lwt.return None else Lwt.return (Some s))
-            (function End_of_file -> Lwt.return None | e -> Lwt.fail e))
+          match H2_pipe.read cs.buf_pipe 4096 with
+          | "" ->
+              cleanup_write_request cc cs;
+              None
+          | s -> Some s
+          | exception End_of_file ->
+              cleanup_write_request cc cs;
+              None)
     end
   in
-  (* Api.client_response: the status text, proto, and request back-pointer are
-     filled in by the public Transport shim (Go's http2RoundTrip). *)
+  (* status text, proto, and request back-pointer are filled by the public
+     Transport shim (Go's http2RoundTrip). *)
   {
     Api.cres_status_code = status_code;
     cres_content_length = content_length;
@@ -328,8 +352,14 @@ let end_stream cc cs =
   if not cs.read_closed then begin
     cs.read_closed <- true;
     H2_pipe.close_with_error cs.buf_pipe End_of_file;
-    signal_peer_closed cs;
-    Lwt_condition.broadcast cc.cond ()
+    signal_peer_closed cc cs;
+    (* Peer half-closed (response fully received). For a streaming body the slot
+       frees when the body reaches EOF (build_response); an Empty-body response
+       (HEAD / stream-ended-on-headers) has nothing to drain, so its slot frees
+       here — both routes end in cleanupWriteRequest's forgetStreamID
+       (transport.go:1523). *)
+    if not cs.body_is_stream then cleanup_write_request cc cs;
+    Eio.Condition.broadcast cc.cond
   end
 
 let end_stream_error cc cs err =
@@ -339,121 +369,93 @@ let end_stream_error cc cs err =
 (* WINDOW_UPDATE writer (Go cc.fr.WriteWindowUpdate under wmu). *)
 let send_window_update cc ~stream_id ~incr =
   if incr > 0 then
-    Lwt_mutex.with_lock cc.wmu (fun () ->
-        let* () = F.write_window_update cc.oc stream_id incr in
-        Lwt_io.flush cc.oc)
-  else Lwt.return_unit
+    Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+        F.write_window_update cc.w stream_id incr;
+        Eio.Buf_write.flush cc.w)
 
-let process_headers cc (mf : F.meta_headers_frame) : unit Lwt.t =
+let process_headers cc (mf : F.meta_headers_frame) : unit =
   let id = mf.fh.stream_id in
   match stream_by_id cc id with
-  | None -> Lwt.return_unit (* canceled/unknown stream; ignore *)
+  | None -> () (* canceled/unknown stream; ignore *)
   | Some cs ->
-      if cs.read_closed then (
+      if cs.read_closed then
         end_stream_error cc cs
-          (Stream_aborted (Failure "headers after END_STREAM"));
-        Lwt.return_unit)
-      else if mf.truncated then (
+          (Stream_aborted (Failure "headers after END_STREAM"))
+      else if mf.truncated then
         end_stream_error cc cs
-          (Stream_aborted (Failure "response header list too large"));
-        Lwt.return_unit)
+          (Stream_aborted (Failure "response header list too large"))
       else if cs.past_headers then
-        (* trailers: just end the stream (we don't surface trailers here). *)
-        let stream_ended =
-          (* a HEADERS marking trailers must carry END_STREAM *)
-          true
-        in
-        let () = ignore stream_ended in
-        let () = end_stream cc cs in
-        Lwt.return_unit
+        (* trailers: a HEADERS marking trailers carries END_STREAM. *)
+        end_stream cc cs
       else begin
         cs.past_headers <- true;
-        (* Did the HEADERS frame carry END_STREAM? read_meta_headers preserves
-           the original HEADERS flags in mf.fh; END_STREAM is flag 0x1. *)
+        (* read_meta_headers preserves the HEADERS flags in mf.fh. *)
         let stream_ended = mf.fh.flags land H2.flag_end_stream <> 0 in
-        match
-          try Ok (build_response cc cs mf ~stream_ended) with e -> Error e
-        with
-        | Error e ->
-            end_stream_error cc cs (Stream_aborted e);
-            Lwt.return_unit
-        | Ok res ->
+        match build_response cc cs mf ~stream_ended with
+        | exception e -> end_stream_error cc cs (Stream_aborted e)
+        | res ->
             let status_code = res.Api.cres_status_code in
-            if status_code >= 100 && status_code <= 199 then begin
-              (* 1xx informational: ignore and wait for the real headers. *)
-              cs.past_headers <- false;
-              Lwt.return_unit
-            end
+            if status_code >= 100 && status_code <= 199 then
+              (* 1xx informational: ignore and await the real headers. *)
+              cs.past_headers <- false
             else begin
               cs.res <- Some res;
-              signal_resp_recv cs;
-              if stream_ended then end_stream cc cs;
-              Lwt.return_unit
+              signal_resp_recv cc cs;
+              if stream_ended then end_stream cc cs
             end
       end
 
-let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit Lwt.t =
+let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit =
   let id = fh.stream_id in
   let length = fh.length in
   match stream_by_id cc id with
   | None ->
       if id >= cc.next_stream_id then
-        Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
+        raise (H2_error.Connection_error H2_error.FlowControlError)
       else if length > 0 then begin
         (* return flow control for a canceled stream. *)
         let ok = H2_flow.inflow_take cc.conn_inflow length in
         let conn_add = H2_flow.inflow_add cc.conn_inflow length in
         if not ok then
-          Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
+          raise (H2_error.Connection_error H2_error.FlowControlError)
         else send_window_update cc ~stream_id:0 ~incr:(Int32.to_int conn_add)
       end
-      else Lwt.return_unit
   | Some cs ->
-      if cs.read_closed then (
+      if cs.read_closed then
         end_stream_error cc cs
-          (Stream_aborted (Failure "DATA after END_STREAM"));
-        Lwt.return_unit)
-      else if not cs.past_headers then (
-        end_stream_error cc cs (Stream_aborted (Failure "DATA before HEADERS"));
-        Lwt.return_unit)
+          (Stream_aborted (Failure "DATA after END_STREAM"))
+      else if not cs.past_headers then
+        end_stream_error cc cs (Stream_aborted (Failure "DATA before HEADERS"))
       else begin
         let data = df.data in
-        let* () =
-          if length > 0 then
-            begin if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length)
-            then Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
-            else begin
-              (* padding refund: length includes padding stripped from [data]. *)
-              let refund = ref (length - String.length data) in
-              let did_reset = ref false in
-              if String.length data > 0 then (
-                try ignore (H2_pipe.write cs.buf_pipe data)
-                with _ ->
-                  did_reset := true;
-                  refund := !refund + String.length data);
-              let send_conn =
-                Int32.to_int (H2_flow.inflow_add cc.conn_inflow !refund)
-              in
-              let send_stream =
-                if !did_reset then 0
-                else Int32.to_int (H2_flow.inflow_add cs.inflow !refund)
-              in
-              let* () = send_window_update cc ~stream_id:0 ~incr:send_conn in
-              send_window_update cc ~stream_id:id ~incr:send_stream
-            end
-            end
-          else Lwt.return_unit
-        in
-        if df.end_stream then end_stream cc cs;
-        Lwt.return_unit
+        if length > 0 then begin
+          if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length) then
+            raise (H2_error.Connection_error H2_error.FlowControlError);
+          (* padding refund: length includes padding stripped from [data]. *)
+          let refund = ref (length - String.length data) in
+          let did_reset = ref false in
+          if String.length data > 0 then (
+            try ignore (H2_pipe.write cs.buf_pipe data)
+            with _ ->
+              did_reset := true;
+              refund := !refund + String.length data);
+          let send_conn =
+            Int32.to_int (H2_flow.inflow_add cc.conn_inflow !refund)
+          in
+          let send_stream =
+            if !did_reset then 0
+            else Int32.to_int (H2_flow.inflow_add cs.inflow !refund)
+          in
+          send_window_update cc ~stream_id:0 ~incr:send_conn;
+          send_window_update cc ~stream_id:id ~incr:send_stream
+        end;
+        if df.end_stream then end_stream cc cs
       end
 
-let process_settings cc (sf : F.settings_frame) : unit Lwt.t =
+let process_settings cc (sf : F.settings_frame) : unit =
   if sf.ack then
-    begin if cc.want_settings_ack then (
-      cc.want_settings_ack <- false;
-      Lwt.return_unit)
-    else Lwt.fail (H2_error.Connection_error H2_error.ProtocolError)
+    begin if cc.want_settings_ack then cc.want_settings_ack <- false
+    else raise (H2_error.Connection_error H2_error.ProtocolError)
     end
   else begin
     let seen_mcs = ref false in
@@ -471,7 +473,7 @@ let process_settings cc (sf : F.settings_frame) : unit Lwt.t =
               (fun _ cs -> ignore (H2_flow.add cs.flow (Int32.of_int delta)))
               cc.streams;
             cc.initial_window_size <- v;
-            Lwt_condition.broadcast cc.cond ()
+            Eio.Condition.broadcast cc.cond
         | H2.Header_table_size ->
             Hpack.set_max_dynamic_table_size cc.henc (Int32.to_int s.value)
         | H2.Enable_push | H2.Max_header_list_size -> ())
@@ -480,39 +482,33 @@ let process_settings cc (sf : F.settings_frame) : unit Lwt.t =
       if not !seen_mcs then
         cc.max_concurrent_streams <- default_max_concurrent_streams;
       cc.seen_settings <- true;
-      Lwt_condition.broadcast cc.seen_settings_cond ()
+      Eio.Condition.broadcast cc.cond
     end;
-    (* ACK the SETTINGS. *)
-    Lwt_mutex.with_lock cc.wmu (fun () ->
-        let* () = F.write_settings_ack cc.oc in
-        Lwt_io.flush cc.oc)
+    Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+        F.write_settings_ack cc.w;
+        Eio.Buf_write.flush cc.w)
   end
 
 let process_window_update cc (fh : F.frame_header) (wf : F.window_update_frame)
-    : unit Lwt.t =
+    : unit =
   let id = fh.stream_id in
   if id = 0 then
     begin if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
-      Lwt.fail (H2_error.Connection_error H2_error.FlowControlError)
-    else (
-      Lwt_condition.broadcast cc.cond ();
-      Lwt.return_unit)
+      raise (H2_error.Connection_error H2_error.FlowControlError)
+    else Eio.Condition.broadcast cc.cond
     end
   else
     match stream_by_id cc id with
-    | None -> Lwt.return_unit
+    | None -> ()
     | Some cs ->
-        if not (H2_flow.add cs.flow (Int32.of_int wf.increment)) then (
-          end_stream_error cc cs (Stream_aborted (Failure "flow control"));
-          Lwt.return_unit)
-        else (
-          Lwt_condition.broadcast cc.cond ();
-          Lwt.return_unit)
+        if not (H2_flow.add cs.flow (Int32.of_int wf.increment)) then
+          end_stream_error cc cs (Stream_aborted (Failure "flow control"))
+        else Eio.Condition.broadcast cc.cond
 
 let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
-    unit Lwt.t =
+    unit =
   match stream_by_id cc fh.stream_id with
-  | None -> Lwt.return_unit
+  | None -> ()
   | Some cs ->
       let serr =
         Stream_aborted
@@ -521,129 +517,112 @@ let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
       in
       abort_stream cc cs serr;
       cs.read_aborted <- true;
-      H2_pipe.close_with_error cs.buf_pipe serr;
-      Lwt.return_unit
+      H2_pipe.close_with_error cs.buf_pipe serr
 
-let process_ping cc (pf : F.ping_frame) : unit Lwt.t =
-  if pf.ack then Lwt.return_unit
+let process_ping cc (pf : F.ping_frame) : unit =
+  if pf.ack then
+    (* clear pendingResets on any PING ACK (transport.go:1500-1502 comment). *)
+    begin if cc.pending_resets > 0 then begin
+      cc.pending_resets <- 0;
+      Eio.Condition.broadcast cc.cond
+    end
+    end
   else
-    Lwt_mutex.with_lock cc.wmu (fun () ->
-        let* () = F.write_ping cc.oc true pf.data in
-        Lwt_io.flush cc.oc)
+    Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+        F.write_ping cc.w true pf.data;
+        Eio.Buf_write.flush cc.w)
 
-let process_goaway cc (gf : F.goaway_frame) : unit Lwt.t =
+let process_goaway cc (gf : F.goaway_frame) : unit =
   cc.goaway <- Some gf;
   let last = gf.last_stream_id in
-  Hashtbl.iter
-    (fun sid cs ->
-      if sid > last then
-        let err =
-          if sid = 1 && gf.error_code <> H2_error.NoError then
-            Stream_aborted (Conn_got_goaway gf.error_code)
-          else Stream_aborted (Conn_got_goaway gf.error_code)
-        in
-        abort_stream cc cs err)
-    cc.streams;
-  Lwt.return_unit
+  (* snapshot: abort_stream mutates cc.streams via forget_stream. *)
+  let victims =
+    Hashtbl.fold
+      (fun sid cs acc -> if sid > last then cs :: acc else acc)
+      cc.streams []
+  in
+  List.iter
+    (fun cs ->
+      abort_stream cc cs (Stream_aborted (Conn_got_goaway gf.error_code)))
+    victims
 
+(* mark the conn closed, record the reader error, abort pending streams. *)
 let signal_reader_done cc err =
   cc.reader_err <- err;
   cc.closed <- true;
-  if not cc.reader_done_set then (
-    cc.reader_done_set <- true;
-    Lwt_condition.broadcast cc.reader_done ());
-  (* unblock all flow waiters / abort pending streams. *)
   let e = match err with Some e -> e | None -> Client_conn_closed in
-  Hashtbl.iter (fun _ cs -> abort_stream cc cs (Stream_aborted e)) cc.streams;
-  Lwt_condition.broadcast cc.cond ()
+  (* snapshot: abort_stream mutates cc.streams via forget_stream. *)
+  let all = Hashtbl.fold (fun _ cs acc -> cs :: acc) cc.streams [] in
+  List.iter (fun cs -> abort_stream cc cs (Stream_aborted e)) all;
+  Eio.Condition.broadcast cc.cond
 
-(* the read loop fiber: read frames, dispatch. Mirrors Go's readLoop+run. *)
-let rec read_loop cc ~got_settings : unit Lwt.t =
-  let* result =
-    Lwt.catch
-      (fun () ->
-        (* HEADERS need read_meta_headers assembly; peek the frame header by
-           reading a full frame, then for HEADERS assemble continuations. The
-           boundary returns [result]; the conn loop drives stream-abort / GOAWAY
-           by raising, so convert [Error] back via [to_exception] (Resolution #2
-           — boundary-only). *)
-        let* f =
-          Lwt.map
-            (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
-            (F.read_frame cc.ic)
-        in
-        Lwt.return (`Frame f))
-      (fun e -> Lwt.return (`Error e))
-  in
-  match result with
-  | `Error End_of_file ->
-      signal_reader_done cc None;
-      Lwt.return_unit
-  | `Error (H2_error.Stream_error se) ->
-      (* stream-level frame error: reset that stream, keep going. *)
-      (match stream_by_id cc se.stream_id with
-      | Some cs ->
-          end_stream_error cc cs (Stream_aborted (H2_error.Stream_error se))
-      | None -> ());
-      read_loop cc ~got_settings
-  | `Error e ->
-      signal_reader_done cc (Some e);
-      Lwt.return_unit
-  | `Frame f -> (
-      (* enforce: first frame must be SETTINGS. *)
-      let is_settings = match f with F.Settings _ -> true | _ -> false in
-      if (not got_settings) && not is_settings then (
+(* dispatch one frame (transport.go clientConnReadLoop.processFrame). *)
+let process_frame cc (f : F.frame) : unit =
+  match f with
+  | F.Headers (fh, hf) ->
+      (* assemble HEADERS+CONTINUATION; preserve the HEADERS flags. *)
+      let mf =
+        match F.read_meta_headers cc.hdec (fh, hf) cc.r with
+        | Ok mf -> mf
+        | Error e -> raise (H2_error.to_exception e)
+      in
+      let mf = { mf with F.fh = { mf.F.fh with flags = fh.flags } } in
+      process_headers cc mf
+  | F.Data (fh, df) -> process_data cc fh df
+  | F.Settings (_, sf) -> process_settings cc sf
+  | F.Window_update (fh, wf) -> process_window_update cc fh wf
+  | F.RST_stream (fh, rf) -> process_reset_stream cc fh rf
+  | F.Ping (_, pf) -> process_ping cc pf
+  | F.GoAway (_, gf) -> process_goaway cc gf
+  | F.Push_promise _ -> raise (H2_error.Connection_error H2_error.ProtocolError)
+  | F.Priority _ | F.Continuation _ | F.Unknown _ -> ()
+
+(* the read-loop fiber: read frames, dispatch. Mirrors Go's readLoop+run.
+   Returns once the conn is closed (EOF or fatal error); the caller forks it
+   into [cc.sw] and signals reader-done. *)
+let read_loop cc : unit =
+  let got_settings = ref false in
+  let rec loop () =
+    match
+      match F.read_frame ~max_size:H2.default_max_read_frame_size cc.r with
+      | Ok f -> f
+      | Error e -> raise (H2_error.to_exception e)
+    with
+    | exception End_of_file -> signal_reader_done cc None
+    (* F019: an over-cap frame escaping read_frame as Buffer_limit_exceeded maps
+       to a FRAME_SIZE connection error. *)
+    | exception Eio.Buf_read.Buffer_limit_exceeded ->
         signal_reader_done cc
-          (Some (H2_error.Connection_error H2_error.ProtocolError));
-        Lwt.return_unit)
-      else
-        let got_settings = got_settings || is_settings in
-        let* proc =
-          Lwt.catch
-            (fun () ->
-              let* () =
-                match f with
-                | F.Headers (fh, hf) ->
-                    (* assemble HEADERS (+CONTINUATION) via read_meta_headers
-                       (boundary returns [result]; convert via [to_exception]). *)
-                    let* mf =
-                      Lwt.map
-                        (function
-                          | Ok mf -> mf
-                          | Error e -> raise (H2_error.to_exception e))
-                        (F.read_meta_headers cc.hdec (fh, hf) cc.ic)
-                    in
-                    (* preserve END_STREAM flag from the HEADERS frame. *)
-                    let mf =
-                      { mf with F.fh = { mf.F.fh with flags = fh.flags } }
-                    in
-                    process_headers cc mf
-                | F.Data (fh, df) -> process_data cc fh df
-                | F.Settings (_, sf) -> process_settings cc sf
-                | F.Window_update (fh, wf) -> process_window_update cc fh wf
-                | F.RST_stream (fh, rf) -> process_reset_stream cc fh rf
-                | F.Ping (_, pf) -> process_ping cc pf
-                | F.GoAway (_, gf) -> process_goaway cc gf
-                | F.Push_promise _ ->
-                    Lwt.fail (H2_error.Connection_error H2_error.ProtocolError)
-                | F.Priority _ | F.Continuation _ | F.Unknown _ ->
-                    Lwt.return_unit
-              in
-              Lwt.return (Ok ()))
-            (fun e -> Lwt.return (Error e))
-        in
-        match proc with
-        | Ok () -> read_loop cc ~got_settings
-        | Error (H2_error.Connection_error _ as e) ->
-            signal_reader_done cc (Some e);
-            Lwt.return_unit
-        | Error e ->
-            signal_reader_done cc (Some e);
-            Lwt.return_unit)
+          (Some (H2_error.Connection_error H2_error.FrameSizeError))
+    | exception H2_error.Stream_error se ->
+        (* stream-level frame error: reset that stream, keep going. *)
+        (match stream_by_id cc se.stream_id with
+        | Some cs ->
+            end_stream_error cc cs (Stream_aborted (H2_error.Stream_error se))
+        | None -> ());
+        loop ()
+    | exception e -> signal_reader_done cc (Some e)
+    | f ->
+        (* enforce: first frame must be SETTINGS. *)
+        let is_settings = match f with F.Settings _ -> true | _ -> false in
+        if (not !got_settings) && not is_settings then
+          signal_reader_done cc
+            (Some (H2_error.Connection_error H2_error.ProtocolError))
+        else begin
+          got_settings := !got_settings || is_settings;
+          match process_frame cc f with
+          | () -> loop ()
+          | exception Eio.Buf_read.Buffer_limit_exceeded ->
+              signal_reader_done cc
+                (Some (H2_error.Connection_error H2_error.FrameSizeError))
+          | exception e -> signal_reader_done cc (Some e)
+        end
+  in
+  loop ()
 
 (* ---- new_client_conn ---- *)
 
-let new_client_conn ic oc : client_conn Lwt.t =
+let new_client_conn ~sw r w : client_conn =
   let initial_stream_recv_window =
     4 lsl 20
     (* 4 MiB, Go default per-stream *)
@@ -652,9 +631,6 @@ let new_client_conn ic oc : client_conn Lwt.t =
     1 lsl 30
     (* 1 GiB, Go MaxReceiveBufferPerConnection *)
   in
-  let henc = Hpack.new_encoder () in
-  (* response decoder: emit is replaced by read_meta_headers per call. *)
-  let hdec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
   let conn_flow = H2_flow.create_outflow () in
   ignore (H2_flow.add conn_flow (Int32.of_int H2.initial_window_size));
   let conn_inflow = H2_flow.create_inflow () in
@@ -662,15 +638,19 @@ let new_client_conn ic oc : client_conn Lwt.t =
     (Int32.of_int (conn_recv_window + H2.initial_window_size));
   let cc =
     {
-      ic;
-      oc;
-      wmu = Lwt_mutex.create ();
-      henc;
-      hdec;
+      r;
+      w;
+      sw;
+      wmu = Eio.Mutex.create ();
+      henc = Hpack.new_encoder ();
+      (* response decoder: emit replaced by read_meta_headers per call. *)
+      hdec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ());
       conn_flow;
       conn_inflow;
-      cond = Lwt_condition.create ();
+      cond = Eio.Condition.create ();
       streams = Hashtbl.create 16;
+      streams_reserved = 0;
+      pending_resets = 0;
       next_stream_id = 1;
       max_frame_size = 16 lsl 10;
       max_concurrent_streams = 100;
@@ -681,11 +661,8 @@ let new_client_conn ic oc : client_conn Lwt.t =
       goaway = None;
       want_settings_ack = true;
       seen_settings = false;
-      seen_settings_cond = Lwt_condition.create ();
       reader_err = None;
-      reader_done = Lwt_condition.create ();
-      reader_done_set = false;
-      req_header_mu = Lwt_mutex.create ();
+      req_header_mu = Eio.Mutex.create ();
     }
   in
   (* write preface + initial SETTINGS + WINDOW_UPDATE (Go newClientConn). *)
@@ -699,31 +676,28 @@ let new_client_conn ic oc : client_conn Lwt.t =
       { H2.id = H2.Max_frame_size; value = Int32.of_int (1 lsl 20) };
     ]
   in
-  let* () = Lwt_io.write oc H2.client_preface in
-  let* () = F.write_settings oc initial_settings in
-  let* () = F.write_window_update oc 0 conn_recv_window in
-  let* () = Lwt_io.flush oc in
-  (* start the read loop. *)
-  Lwt.async (fun () ->
-      Lwt.catch
-        (fun () -> read_loop cc ~got_settings:false)
-        (fun e ->
-          signal_reader_done cc (Some e);
-          Lwt.return_unit));
-  (* wait until we've seen the server's SETTINGS (or the reader died). *)
+  Eio.Buf_write.string w H2.client_preface;
+  F.write_settings w initial_settings;
+  F.write_window_update w 0 conn_recv_window;
+  Eio.Buf_write.flush w;
+  (* start the read loop as a daemon: cancelled when the conn switch ends. *)
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+      (try read_loop cc with
+      | Eio.Cancel.Cancelled _ as e -> raise e
+      | e -> signal_reader_done cc (Some e));
+      `Stop_daemon);
+  (* wait until the server's SETTINGS is seen (or the reader died). *)
   let rec wait_seen () =
-    if cc.seen_settings then Lwt.return_unit
+    if cc.seen_settings then ()
     else if cc.closed then
-      Lwt.fail
+      raise
         (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
-    else
-      let p1 = Lwt_condition.wait cc.seen_settings_cond in
-      let p2 = Lwt_condition.wait cc.reader_done in
-      let* () = Lwt.choose [ p1; p2 ] in
-      wait_seen ()
+    else (
+      Eio.Condition.await_no_mutex cc.cond;
+      wait_seen ())
   in
-  let* () = wait_seen () in
-  Lwt.return cc
+  wait_seen ();
+  cc
 
 (* ---- round_trip ---- *)
 
@@ -739,126 +713,126 @@ let make_stream cc id ~is_head =
     inflow;
     bytes_remain = -1;
     res = None;
-    resp_recv = Lwt_condition.create ();
     resp_recv_done = false;
-    peer_closed = Lwt_condition.create ();
     peer_closed_done = false;
     abort_err = None;
-    abort = Lwt_condition.create ();
     past_headers = false;
     read_closed = false;
     read_aborted = false;
     is_head;
+    sent_end_stream = false;
+    cleaned = false;
+    body_is_stream = false;
   }
 
-(* wait for either the response headers, an abort, or the reader to die. *)
-let await_response cc cs : Api.client_response Lwt.t =
+(* wait for the response headers, an abort, or the reader to die. *)
+let await_response cc cs : Api.client_response =
   let rec loop () =
     match cs.res with
-    | Some res -> Lwt.return res
+    | Some res -> res
     | None -> (
         match cs.abort_err with
-        | Some e -> Lwt.fail e
+        | Some e -> raise e
         | None ->
             if cc.closed then
-              Lwt.fail
+              raise
                 (match cc.reader_err with
                 | Some e -> e
                 | None -> Client_conn_closed)
-            else
-              let* () =
-                Lwt.choose
-                  [
-                    Lwt_condition.wait cs.resp_recv;
-                    Lwt_condition.wait cs.abort;
-                    Lwt_condition.wait cc.reader_done;
-                  ]
-              in
-              loop ())
+            else (
+              Eio.Condition.await_no_mutex cc.cond;
+              loop ()))
   in
   loop ()
 
-let round_trip cc (req : Api.client_request) : Api.client_response Lwt.t =
-  if cc.closed || cc.closing then
-    Lwt.fail
-      (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
+(* awaitOpenSlotForStreamLocked (transport.go:1537): block until the concurrency
+   count is below the peer's MAX_CONCURRENT_STREAMS. Caller holds req_header_mu,
+   so the count check and the table insert that follows are switch-free between
+   waiters (slots free via the read loop's forget_stream broadcast). *)
+let rec await_open_slot cc =
+  (* Conn died while we waited for a slot; nothing written yet (transport.go
+     :530 errClientConnUnusable). *)
+  if cc.closed || cc.closing then raise Conn_unusable
+  else if current_request_count cc < cc.max_concurrent_streams then ()
+  else (
+    Eio.Condition.await_no_mutex cc.cond;
+    await_open_slot cc)
+
+(* ReserveNewRequest (transport.go:744): reserve a concurrency slot so a pooled
+   conn can be handed out without overshooting MAX_CONCURRENT_STREAMS. The
+   reservation is decremented by the next [round_trip]. Returns false if the conn
+   can't take a new request. *)
+let reserve_new_request cc =
+  if cc.closed || cc.closing then false
+  else if current_request_count cc >= cc.max_concurrent_streams then false
+  else begin
+    cc.streams_reserved <- cc.streams_reserved + 1;
+    true
+  end
+
+(* decrStreamReservationsLocked (transport.go:1093). *)
+let decr_stream_reservations cc =
+  if cc.streams_reserved > 0 then cc.streams_reserved <- cc.streams_reserved - 1
+
+let round_trip ?sw cc (req : Api.client_request) : Api.client_response =
+  (* errClientConnUnusable (transport.go:530): conn dead before we wrote
+     anything, so the request is untouched and replayable on a fresh dial. *)
+  if cc.closed || cc.closing then raise Conn_unusable
   else begin
     let is_head = req.creq_meth = "HEAD" in
     let acl = actual_content_length req in
     let has_body = acl <> 0 in
-    (* allocate stream id + write HEADERS under req_header_mu (Go reqHeaderMu). *)
-    let* cs =
-      Lwt_mutex.with_lock cc.req_header_mu (fun () ->
+    (* await a slot + allocate stream id + write HEADERS under req_header_mu (Go
+       reqHeaderMu); the slot wait + table insert are atomic per waiter. *)
+    let cs =
+      Eio.Mutex.use_rw ~protect:false cc.req_header_mu (fun () ->
+          (* consume any reservation made by [reserve_new_request] before the
+             slot wait, mirroring decrStreamReservationsLocked (transport.go
+             :1270). *)
+          decr_stream_reservations cc;
+          await_open_slot cc;
           let id = cc.next_stream_id in
           cc.next_stream_id <- cc.next_stream_id + 2;
           let cs = make_stream cc id ~is_head in
           Hashtbl.replace cc.streams id cs;
+          (* wire caller-done teardown the instant the stream exists, before any
+             cancellation point (the HEADERS flush below), so an early cancel
+             still forgets it (transport.go:1217). *)
+          (match sw with
+          | Some s ->
+              Eio.Switch.on_release s (fun () -> cleanup_write_request cc cs)
+          | None -> ());
           let hdrs = encode_request_headers cc req acl in
           let end_stream = not has_body in
-          let* () =
-            Lwt_mutex.with_lock cc.wmu (fun () ->
-                write_headers_block cc ~stream_id:id ~end_stream hdrs)
-          in
-          Lwt.return cs)
+          if end_stream then cs.sent_end_stream <- true;
+          Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+              write_headers_block cc ~stream_id:id ~end_stream hdrs);
+          cs)
     in
-    (* write the request body (if any), in a separate fiber so we can read the
-       response concurrently (Go runs doRequest in its own goroutine). *)
+    (* Fork the request-body pump so the response can be read concurrently (Go's
+       doRequest goroutine); it lives on the conn switch. It must NOT fork onto
+       the caller's [sw], or [Switch.run sw] would block waiting for a parked
+       writer to finish. Instead cleanup_write_request, run on [sw] release
+       (caller done: early return / undrained body / cancel — F020), aborts the
+       stream: that sets abort_err, so a writer parked in await_flow_control wakes
+       and exits, and forgets the stream — no writer fiber or table entry lingers
+       past the caller's interest (transport.go:1217 cleanupWriteRequest). *)
     if has_body then
-      Lwt.async (fun () ->
-          Lwt.catch
-            (fun () -> write_request_body cc cs req)
-            (fun e ->
-              abort_stream cc cs (Stream_aborted e);
-              Lwt.return_unit));
-    (* await the response headers. *)
-    let* res = await_response cc cs in
-    Lwt.return res
+      Eio.Fiber.fork ~sw:cc.sw (fun () ->
+          try write_request_body cc cs req with
+          | Eio.Cancel.Cancelled _ -> ()
+          | e -> abort_stream cc cs (Stream_aborted e));
+    await_response cc cs
   end
 
-let close cc : unit Lwt.t =
+let close cc : unit =
   cc.closing <- true;
-  signal_reader_done cc None;
-  Lwt.catch (fun () -> Lwt_io.close cc.oc) (fun _ -> Lwt.return_unit)
+  signal_reader_done cc None
 
-(* Whether the connection is closed / no longer usable (Go's [closed] / the
-   negation of [canTakeNewRequest]). Exposed so a transport pool can drop dead
-   connections. *)
+(* Whether the conn is closed / no longer usable (Go [closed] / negation of
+   canTakeNewRequest). Exposed so a transport pool can drop dead conns. *)
 let is_closed cc = cc.closed || cc.closing
 
-(* ---- minimal connection pool (client_conn_pool.go subset) ---- *)
-
-type t = { conns : (string, client_conn list) Hashtbl.t }
-
-let create () = { conns = Hashtbl.create 8 }
-
-(* authority key for a request: host[:port] (Go authorityAddr). *)
-let authority_of (req : Api.client_request) =
-  let url = req.creq_url in
-  let host = match Uri.host url with Some h -> h | None -> req.creq_host in
-  match Uri.port url with
-  | Some p -> Printf.sprintf "%s:%d" host p
-  | None -> host
-
-let get_usable t authority =
-  match Hashtbl.find_opt t.conns authority with
-  | None -> None
-  | Some conns -> List.find_opt (fun cc -> not (cc.closed || cc.closing)) conns
-
-let round_trip_pooled t ~connect (req : Api.client_request) :
-    Api.client_response Lwt.t =
-  let authority = authority_of req in
-  let* cc =
-    match get_usable t authority with
-    | Some cc -> Lwt.return cc
-    | None ->
-        let* ic, oc = connect authority in
-        let* cc = new_client_conn ic oc in
-        let existing =
-          match Hashtbl.find_opt t.conns authority with
-          | Some l -> l
-          | None -> []
-        in
-        Hashtbl.replace t.conns authority (cc :: existing);
-        Lwt.return cc
-  in
-  round_trip cc req
+(* Number of live streams in the table (Go's len(cc.streams)); for tests
+   asserting cleanup/forget leaves no entry lingering. *)
+let live_stream_count cc = Hashtbl.length cc.streams

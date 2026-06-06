@@ -70,7 +70,6 @@ let dummy_req () : Httpg.Body.t Httpg.Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Httpg.Context.background;
   }
 
 let basic_auth_roundtrip () =

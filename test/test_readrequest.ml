@@ -1,16 +1,11 @@
 (* Ported from go/src/net/http/readrequest_test.go (representative rows). *)
 
-let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
+let read s =
+  match Httpg.Io.read_request (Eio.Buf_read.of_string s) with
+  | Ok r -> r
+  | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let read_ok ic =
-  Lwt.bind (Httpg.Io.read_request ic) (function
-    | Ok r -> Lwt.return r
-    | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e)))
-
-let read s = Lwt_main.run (read_ok (ic_of_string s))
-
-let body_of (r : Httpg.Body.t Httpg.Request.t) =
-  Lwt_main.run (Httpg.Body.read_all r.body)
+let body_of (r : Httpg.Body.t Httpg.Request.t) = Httpg.Body.read_all r.body
 
 (* Baseline: all fields included. *)
 let baseline () =

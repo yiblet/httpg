@@ -1,51 +1,37 @@
-(* Port of go/src/net/http/internal/chunked.go: the wire protocol for HTTP's
-   "chunked" Transfer-Encoding. This is the private [internal] package analogue
-   ([Httpg_internal.Chunked]); see net/http/internal. *)
+(* Port of go/src/net/http/internal/chunked.go: the "chunked" Transfer-Encoding
+   wire protocol ([Httpg_internal.Chunked]; see net/http/internal). *)
 
 exception Err_line_too_long
-(** [internal.ErrLineTooLong]: a chunk header / line exceeded [max_line_length].
-    Retained for the {b mid-stream} reader thunk, which keeps raising per the
-    Result-migration mid-stream policy. *)
+(** [internal.ErrLineTooLong]: a chunk line exceeded [max_line_length]. Raised
+    {b mid-stream} from the reader thunk. *)
 
 exception Chunk_error of string
-(** A malformed-chunk or framing error, carrying Go's message text (the various
-    [errors.New(...)] values in chunked.go). Retained for the {b mid-stream}
-    reader thunk (see {!error}). *)
+(** A malformed-chunk / framing error carrying Go's message text. Raised
+    {b mid-stream} from the reader thunk (see {!error}). *)
 
-(** Handleable framing error at the {b header / initial-parse} boundary. The
-    exceptions above are the {b mid-stream} analogue (raised from inside the
-    {!new_chunked_reader} thunk after init has returned [Ok], mirroring Go's "a
-    later [Read] returns an error"). *)
+(** Handleable framing error at the {b header / initial-parse} boundary; the
+    exceptions above are the {b mid-stream} analogue. *)
 type error = Line_too_long | Chunk of string
 
 val error_to_string : error -> string
-(** Render an {!error} as its Go message text. *)
 
 val max_line_length : int
 (** [internal.maxLineLength] (4096). *)
 
 val parse_hex_uint : string -> (int64, error) result
-(** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] on bad
-    input (header/initial-parse boundary). The mid-stream reader thunk uses a
-    private raising helper internally, per the mid-stream policy below. *)
+(** [parseHexUint]: parse a hex chunk length; [Error (Chunk _)] on bad input. *)
 
-val new_chunked_reader : Lwt_io.input_channel -> unit -> string option Lwt.t
-(** [new_chunked_reader ic] is [internal.NewChunkedReader]: a pull function
-    returning successive decoded chunk payloads and finally [None] at the
-    terminating 0-length chunk. Like Go's [chunkedReader], it does not consume
-    the trailing CRLF / trailers after the 0-chunk.
+val new_chunked_reader : Eio.Buf_read.t -> unit -> string option
+(** [internal.NewChunkedReader]: a pull function returning successive decoded
+    chunk payloads and finally [None] at the terminating 0-length chunk. Like
+    Go's [chunkedReader] it does not consume the trailing CRLF / trailers.
 
-    {b Mid-stream policy:} the reader thunk {b raises} {!Chunk_error} /
-    {!Err_line_too_long} on malformed input discovered after init (the faithful
-    analogue of Go's later-[Read]-error). Only the initial-parse boundary
-    surfaces {!error} (via {!parse_hex_uint}). *)
+    {b Mid-stream policy:} the thunk {b raises} {!Chunk_error} /
+    {!Err_line_too_long} on malformed input discovered after init. *)
 
-val chunked_writer_write : Lwt_io.output_channel -> string -> unit Lwt.t
-(** [chunked_writer_write oc data] is [internal.chunkedWriter.Write]: writes
-    [data] as one chunk (hex-length CRLF data CRLF). Empty [data] writes nothing
-    (it would look like EOF). *)
+val chunked_writer_write : Eio.Buf_write.t -> string -> unit
+(** [internal.chunkedWriter.Write]: write [data] as one chunk (hex-length CRLF
+    data CRLF). Empty [data] writes nothing. *)
 
-val chunked_writer_close : Lwt_io.output_channel -> unit Lwt.t
-(** [chunked_writer_close oc] is [internal.chunkedWriter.Close]: writes the
-    final ["0\r\n"] chunk; it does not write the trailing CRLF after trailers.
-*)
+val chunked_writer_close : Eio.Buf_write.t -> unit
+(** [internal.chunkedWriter.Close]: write the final ["0\r\n"] chunk. *)

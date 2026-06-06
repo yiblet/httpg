@@ -8,11 +8,15 @@ depends: [
   "ocaml" {>= "5.0"}
   "dune" {>= "3.0"}
   "uri"
-  "lwt"
-  "tls-lwt"
+  "eio"
+  "eio_main"
+  "tls"
+  "x509"
+  "mirage-crypto-rng"
   "ca-certs"
   "base64"
-  "multipart_form-lwt"
+  "multipart_form"
+  "ptime"
   "fmt" {with-test}
   "alcotest" {with-test}
 ]

@@ -43,23 +43,23 @@ end
 (* The http2 body abstraction (Go's io.ReadCloser body), mirroring the public
    Body.t variant so the shim maps the two with a trivial case split. *)
 module Body = struct
-  type t = Empty | String of string | Stream of (unit -> string option Lwt.t)
+  type t = Empty | String of string | Stream of (unit -> string option)
 
   let empty = Empty
   let of_string s = String s
   let of_stream next = Stream next
 
   let read_all = function
-    | Empty -> Lwt.return ""
-    | String s -> Lwt.return s
+    | Empty -> ""
+    | String s -> s
     | Stream next ->
         let buf = Buffer.create 256 in
         let rec pump () =
-          Lwt.bind (next ()) (function
-            | None -> Lwt.return (Buffer.contents buf)
-            | Some s ->
-                Buffer.add_string buf s;
-                pump ())
+          match next () with
+          | None -> Buffer.contents buf
+          | Some s ->
+              Buffer.add_string buf s;
+              pump ()
         in
         pump ()
 end
@@ -67,9 +67,10 @@ end
 (* Go http2 transport's defaultUserAgent. *)
 let default_user_agent = "Go-http-client/1.1"
 
-(* A ClientRequest is a Request used by the HTTP/2 client (Transport). *)
+(* A ClientRequest is a Request used by the HTTP/2 client (Transport).
+   Deadline/cancel travel via Eio (Switch/Time) threaded at the call site, not a
+   ctx field. *)
 type client_request = {
-  creq_ctx : Httpg_base.Context.t;
   creq_meth : string;
   creq_url : Uri.t;
   creq_header : header;
@@ -93,7 +94,6 @@ type client_response = {
 
 (* A ServerRequest is a Request used by the HTTP/2 server. *)
 type server_request = {
-  sreq_ctx : Httpg_base.Context.t;
   sreq_proto : string;
   sreq_proto_major : int;
   sreq_proto_minor : int;
@@ -111,8 +111,8 @@ type server_request = {
 type response_writer = {
   rw_header : unit -> header;
   rw_write_header : int -> unit;
-  rw_write : string -> unit Lwt.t;
-  rw_flush : unit -> unit Lwt.t;
+  rw_write : string -> unit;
+  rw_flush : unit -> unit;
 }
 
-type handler = response_writer -> server_request -> unit Lwt.t
+type handler = response_writer -> server_request -> unit

@@ -1,8 +1,5 @@
 (* Port of the core file-serving path of go/src/net/http/fs.go. See fs.mli for
-   the surface and the list of branches stubbed for Tickets 4 (preconditions)
-   and 5 (ranges). *)
-
-open Lwt.Infix
+   the surface. Direct-style over Eio: file IO uses the [Eio.Path] capability. *)
 
 (* [path_clean] (Go's path.Clean) lives with the routing internals. *)
 module Pattern = Httpg_internal.Pattern
@@ -15,10 +12,10 @@ type file_info = {
 }
 
 type file = {
-  stat : unit -> file_info Lwt.t;
-  read_window : off:int64 -> len:int -> string Lwt.t;
-  readdir : unit -> file_info list Lwt.t;
-  close : unit -> unit Lwt.t;
+  stat : unit -> file_info;
+  read_window : off:int64 -> len:int -> string;
+  readdir : unit -> file_info list;
+  close : unit -> unit;
 }
 
 type error =
@@ -37,7 +34,7 @@ let error_to_string = function
   | No_overlap -> "invalid range: failed to overlap"
   | Invalid_range s -> if s = "" then "invalid range" else s
 
-type file_system = { open_ : string -> (file, error) result Lwt.t }
+type file_system = { open_ : sw:Eio.Switch.t -> string -> (file, error) result }
 
 (* Internal sentinel: [parse_range] raises this on a malformed Range header and
    [parse_range] maps it back to [Error (Invalid_range _)] at the boundary. *)
@@ -64,7 +61,6 @@ let contains_dot_dot v =
     let found = ref false in
     let i = ref 0 in
     while !i < n && not !found do
-      (* skip separators *)
       while !i < n && is_slash_rune v.[!i] do
         incr i
       done;
@@ -77,99 +73,89 @@ let contains_dot_dot v =
     !found
   end
 
-(* ---- Dir (native filesystem) ---- *)
+(* ---- Dir (Eio filesystem capability) ---- *)
 
-(* Window read of a regular file: seek to [off], read up to [len] bytes. *)
-let read_window_of_fd fd ~off ~len =
-  Lwt_unix.LargeFile.lseek fd off Unix.SEEK_SET >>= fun _ ->
-  let buf = Bytes.create len in
-  let rec loop got =
-    if got >= len then Lwt.return got
-    else
-      Lwt_unix.read fd buf got (len - got) >>= fun n ->
-      if n = 0 then Lwt.return got else loop (got + n)
-  in
-  loop 0 >>= fun got -> Lwt.return (Bytes.sub_string buf 0 got)
-
-let file_info_of_stat name (st : Lwt_unix.stats) =
+let file_info_of_stat name (st : Eio.File.Stat.t) =
   {
     fi_name = name;
-    fi_size = Int64.of_int st.Lwt_unix.st_size;
-    fi_mod_time = st.Lwt_unix.st_mtime;
-    fi_is_dir = st.Lwt_unix.st_kind = Unix.S_DIR;
+    fi_size = Int64.of_int (Optint.Int63.to_int st.Eio.File.Stat.size);
+    fi_mod_time = st.Eio.File.Stat.mtime;
+    fi_is_dir = st.Eio.File.Stat.kind = `Directory;
   }
 
-(* Build a {!file} over an opened native path. We keep the open fd for content
-   reads and re-open the directory on demand for listings. *)
-let file_of_path full_name : (file, error) result Lwt.t =
-  Lwt.catch
-    (fun () ->
-      Lwt_unix.stat full_name >>= fun st ->
-      let base = Filename.basename full_name in
-      let info = file_info_of_stat base st in
-      if info.fi_is_dir then begin
-        (* directory: no fd; readdir reads entries with their own stats *)
-        let readdir () =
-          Lwt_unix.opendir full_name >>= fun dh ->
-          let rec loop acc =
-            Lwt.catch
-              (fun () -> Lwt_unix.readdir dh >>= fun n -> Lwt.return (Some n))
-              (function End_of_file -> Lwt.return None | e -> Lwt.fail e)
-            >>= function
-            | None -> Lwt.return (List.rev acc)
-            | Some "." | Some ".." -> loop acc
-            | Some name ->
-                Lwt.catch
-                  (fun () ->
-                    Lwt_unix.stat (Filename.concat full_name name)
-                    >>= fun est -> Lwt.return (file_info_of_stat name est :: acc))
-                  (* Pretend it doesn't exist, like os.File Readdir does. *)
-                  (fun _ -> Lwt.return acc)
-                >>= fun acc -> loop acc
-          in
-          Lwt.finalize (fun () -> loop []) (fun () -> Lwt_unix.closedir dh)
-        in
-        Lwt.return
-          (Ok
-             {
-               stat = (fun () -> Lwt.return info);
-               read_window = (fun ~off:_ ~len:_ -> Lwt.return "");
-               readdir;
-               close = (fun () -> Lwt.return_unit);
-             })
-      end
-      else begin
-        Lwt_unix.openfile full_name [ Unix.O_RDONLY ] 0 >>= fun fd ->
-        let closed = ref false in
-        let close () =
-          if !closed then Lwt.return_unit
-          else begin
-            closed := true;
-            Lwt_unix.close fd
-          end
-        in
-        Lwt.return
-          (Ok
-             {
-               stat = (fun () -> Lwt.return info);
-               read_window = read_window_of_fd fd;
-               readdir =
-                 (fun () ->
-                   (* Readdir on a non-directory: like os, an error. *)
-                   Lwt.fail (Failure "not a directory"));
-               close;
-             })
-      end)
-    (fun exn ->
-      match exn with
-      | Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) ->
-          Lwt.return (Error Not_exist)
-      | Unix.Unix_error ((Unix.EACCES | Unix.EPERM), _, _) ->
-          Lwt.return (Error Permission)
-      | e -> Lwt.return (Error (Other (Printexc.to_string e))))
+(* Map an Eio IO failure to a handleable {!error}, mirroring Go's
+   os.IsNotExist / os.IsPermission classification. *)
+let error_of_exn = function
+  | Eio.Io (Eio.Fs.E (Eio.Fs.Not_found _), _) -> Not_exist
+  | Eio.Io (Eio.Fs.E (Eio.Fs.Permission_denied _), _) -> Permission
+  | e -> Other (Printexc.to_string e)
 
-let dir root =
-  let open_ name =
+(* Build a {!file} over a path under the root capability. A regular file is
+   opened ONCE under [sw] (Go's os.Open at fs.go:92); each [read_window] is a
+   pread into the single handle (Go's Seek+CopyN, fs.go:360,387,430). [close]
+   releases the handle and [sw] teardown is the backstop, so the fd never
+   outlives the serve on any path (EOF, abandon, error, cancel). Directories
+   carry no handle. *)
+let file_of_path ~sw (path : _ Eio.Path.t) base : (file, error) result =
+  try
+    let st = Eio.Path.stat ~follow:true path in
+    let info = file_info_of_stat base st in
+    if info.fi_is_dir then begin
+      let readdir () =
+        Eio.Path.read_dir path
+        |> List.filter_map (fun name ->
+            match Eio.Path.stat ~follow:true Eio.Path.(path / name) with
+            | st -> Some (file_info_of_stat name st)
+            (* like os.File.Readdir: skip entries that vanish. *)
+            | exception _ -> None)
+      in
+      Ok
+        {
+          stat = (fun () -> info);
+          read_window = (fun ~off:_ ~len:_ -> "");
+          readdir;
+          close = (fun () -> ());
+        }
+    end
+    else begin
+      let flow = Eio.Path.open_in ~sw path in
+      let closed = ref false in
+      let read_window ~off ~len =
+        let buf = Cstruct.create len in
+        let rec loop got =
+          if got >= len then got
+          else
+            match
+              Eio.File.pread flow
+                ~file_offset:
+                  (Optint.Int63.of_int64 (Int64.add off (Int64.of_int got)))
+                [ Cstruct.sub buf got (len - got) ]
+            with
+            | 0 -> got
+            | n -> loop (got + n)
+            | exception End_of_file -> got
+        in
+        let got = loop 0 in
+        Cstruct.to_string (Cstruct.sub buf 0 got)
+      in
+      let close () =
+        if not !closed then begin
+          closed := true;
+          Eio.Resource.close flow
+        end
+      in
+      Ok
+        {
+          stat = (fun () -> info);
+          read_window;
+          readdir = (fun () -> failwith "not a directory");
+          close;
+        }
+    end
+  with e -> Error (error_of_exn e)
+
+let dir (root : Eio.Fs.dir_ty Eio.Path.t) =
+  let open_ ~sw name =
     (* path.Clean("/" + name)[1:] *)
     let cleaned = Pattern.path_clean ("/" ^ name) in
     let path =
@@ -178,14 +164,9 @@ let dir root =
       else ""
     in
     let path = if path = "" then "." else path in
-    (* filepath.Localize rejects paths that escape (".." element). On POSIX a
-       clean rooted path can't contain "..", but guard like Go's Localize. *)
-    if contains_dot_dot path then Lwt.return (Error Invalid_unsafe_path)
-    else begin
-      let dir = if root = "" then "." else root in
-      let full_name = Filename.concat dir path in
-      file_of_path full_name
-    end
+    (* filepath.Localize rejects paths that escape (".." element). *)
+    if contains_dot_dot path then Error Invalid_unsafe_path
+    else file_of_path ~sw Eio.Path.(root / path) (Filename.basename path)
   in
   { open_ }
 
@@ -206,8 +187,7 @@ let local_redirect w (r : Body.t Request.t) new_path =
   in
   let h = w.Server.header () in
   Header.set h "Location" new_path;
-  w.Server.write_header Status.status_moved_permanently;
-  Lwt.return_unit
+  w.Server.write_header Status.status_moved_permanently
 
 (* ---- dirList ---- *)
 
@@ -215,8 +195,7 @@ let local_redirect w (r : Body.t Request.t) new_path =
    '?'/'#'/etc remain part of the path, not a query/fragment. *)
 let escape_path_href name = Uri.pct_encode ~component:`Path name
 
-(* Go's htmlReplacer (the escaper dirList uses for the link text). Mirrors the
-   server's htmlEscape; kept local since it is not exported. *)
+(* Go's htmlReplacer (the escaper dirList uses for the link text). *)
 let html_escape s =
   let buf = Buffer.create (String.length s) in
   String.iter
@@ -232,32 +211,28 @@ let html_escape s =
   Buffer.contents buf
 
 let dir_list w (r : Body.t Request.t) (f : file) =
-  Lwt.catch
-    (fun () -> f.readdir () >>= fun entries -> Lwt.return (Ok entries))
-    (fun e -> Lwt.return (Error e))
-  >>= function
-  | Error _ ->
+  match f.readdir () with
+  | exception _ ->
       Server.error w "Error reading directory"
         Status.status_internal_server_error
-  | Ok entries ->
+  | entries ->
       let entries =
         List.sort (fun a b -> compare a.fi_name b.fi_name) entries
       in
       let h = w.Server.header () in
       Header.set h "Content-Type" "text/html; charset=utf-8";
       ignore r;
-      w.Server.write "<!doctype html>\n" >>= fun () ->
-      w.Server.write "<meta name=\"viewport\" content=\"width=device-width\">\n"
-      >>= fun () ->
-      w.Server.write "<pre>\n" >>= fun () ->
-      Lwt_list.iter_s
+      w.Server.write "<!doctype html>\n";
+      w.Server.write "<meta name=\"viewport\" content=\"width=device-width\">\n";
+      w.Server.write "<pre>\n";
+      List.iter
         (fun e ->
           let name = if e.fi_is_dir then e.fi_name ^ "/" else e.fi_name in
           let href = escape_path_href name in
           w.Server.write
             ("<a href=\"" ^ href ^ "\">" ^ html_escape name ^ "</a>\n"))
-        entries
-      >>= fun () -> w.Server.write "</pre>\n"
+        entries;
+      w.Server.write "</pre>\n"
 
 (* ---- preconditions (Go fs.go: checkPreconditions + helpers) ---- *)
 
@@ -282,16 +257,14 @@ let trim_string s =
 let has_prefix s p =
   String.length s >= String.length p && String.sub s 0 (String.length p) = p
 
-(* Go scanETag: returns Some (etag, remain) if a syntactically valid ETag is
-   present at the start of [s] (after trimming), else None. An ETag is either
-   W/"text" or "text" (RFC 7232 2.3). *)
+(* Go scanETag: Some (etag, remain) if a syntactically valid ETag (W/"text" or
+   "text", RFC 7232 2.3) is present at the start of [s] (after trimming). *)
 let scan_etag s =
   let s = trim_string s in
   let n = String.length s in
   let start = if n >= 2 && s.[0] = 'W' && s.[1] = '/' then 2 else 0 in
   if n - start < 2 || s.[start] <> '"' then None
   else begin
-    (* scan from start+1 for the closing quote, validating ETag chars *)
     let rec loop i =
       if i >= n then None
       else
@@ -316,7 +289,6 @@ let etag_weak_match a b =
   in
   strip a = strip b
 
-(* condResult. *)
 type cond_result = Cond_none | Cond_true | Cond_false
 
 (* Go checkIfMatch. *)
@@ -422,8 +394,8 @@ let write_not_modified w =
   w.Server.write_header Status.status_not_modified
 
 (* Go checkPreconditions: evaluates request preconditions and reports whether a
-   precondition resulted in 304/412. Returns [(done_, range_header)]. Follows
-   RFC 7232 section 6: If-Match → If-Unmodified-Since → If-None-Match →
+   precondition resulted in 304/412. Returns [(done_, range_header)]. RFC 7232
+   section 6: If-Match → If-Unmodified-Since → If-None-Match →
    If-Modified-Since, then If-Range gates the Range header. *)
 let check_preconditions w (r : Body.t Request.t) ~modtime =
   let ch = check_if_match w r in
@@ -471,7 +443,6 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
 
 (* ---- byte ranges (Go fs.go: httpRange / parseRange / mimeHeader) ---- *)
 
-(* Go's httpRange. *)
 type http_range = { start : int64; length : int64 }
 
 (* Go httpRange.contentRange: "bytes START-END/SIZE". *)
@@ -480,14 +451,12 @@ let content_range ra size =
     (Int64.sub (Int64.add ra.start ra.length) 1L)
     size
 
-(* Go httpRange.mimeHeader: the per-part headers for a multipart/byteranges
-   response. Keys are emitted in sorted order (Content-Range < Content-Type),
-   mirroring multipart.Writer.CreatePart. *)
+(* Go httpRange.mimeHeader: keys emitted in sorted order (Content-Range <
+   Content-Type), mirroring multipart.Writer.CreatePart. *)
 let mime_header ra ~content_type ~size =
   [ ("Content-Range", content_range ra size); ("Content-Type", content_type) ]
 
-(* Go strconv.ParseInt(s, 10, 64) for a non-negative decimal, returning None on
-   any non-digit, empty input, or overflow. *)
+(* Go strconv.ParseInt(s, 10, 64) for a non-negative decimal. *)
 let parse_int64 s =
   if s = "" then None
   else
@@ -496,8 +465,7 @@ let parse_int64 s =
     if not !ok then None
     else match Int64.of_string_opt s with Some _ as r -> r | None -> None
 
-(* Go parseRange: parse a Range header per RFC 7233. Raises [Invalid_range] on a
-   malformed header, [No_overlap] when every range starts past the content. *)
+(* Go parseRange: parse a Range header per RFC 7233. *)
 let parse_range s size =
   if s = "" then Ok []
   else
@@ -517,9 +485,7 @@ let parse_range s size =
               if ra = "" then acc
               else
                 begin match String.index_opt ra '-' with
-                | None ->
-                    raise (Invalid_range_sentinel "")
-                    (* Go strings.Cut: no '-' *)
+                | None -> raise (Invalid_range_sentinel "")
                 | Some dash ->
                     let start = trim_string (String.sub ra 0 dash) in
                     let end_ =
@@ -542,7 +508,6 @@ let parse_range s size =
                       | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
                           if i >= size then begin
-                            (* starts after content: does not overlap *)
                             no_overlap := true;
                             acc
                           end
@@ -577,15 +542,11 @@ let parse_range s size =
 let sum_ranges_size ranges =
   List.fold_left (fun acc ra -> Int64.add acc ra.length) 0L ranges
 
-(* Fixed multipart boundary. Go uses a random 30-hex boundary; we use a fixed,
-   syntactically valid token so responses are deterministic and tests can assert
-   exact framing. *)
+(* Fixed multipart boundary (Go uses a random 30-hex one; a fixed token keeps
+   responses deterministic for tests). *)
 let multipart_boundary = "HTTPG_BYTERANGES_BOUNDARY"
 
-(* Go rangesMIMESize: total encoded size of a multipart/byteranges body — the
-   sum of each part's framing (boundary line + headers + CRLF) plus its bytes,
-   then the closing boundary. Mirrors multipart.Writer byte-for-byte so the
-   Content-Length is exact. *)
+(* Go rangesMIMESize: total encoded size of a multipart/byteranges body. *)
 let ranges_mime_size ranges ~content_type ~size =
   let buf = Buffer.create 256 in
   List.iteri
@@ -605,9 +566,6 @@ let ranges_mime_size ranges ~content_type ~size =
 
 (* ---- MIME by extension (stand-in for mime.TypeByExtension) ---- *)
 
-(* A small built-in extension→type table. This is a deliberate stand-in for
-   Go's mime.TypeByExtension database (we do not port the mime package); the
-   Sniff fallback covers everything not listed here. *)
 let mime_by_ext ext =
   match String.lowercase_ascii ext with
   | ".html" | ".htm" -> Some "text/html; charset=utf-8"
@@ -630,7 +588,6 @@ let mime_by_ext ext =
 let ext_of name =
   match String.rindex_opt name '.' with
   | Some i ->
-      (* extension only if the '.' is in the final path element *)
       let after_slash =
         match String.rindex_opt name '/' with Some s -> s < i | None -> true
       in
@@ -647,25 +604,26 @@ let set_last_modified w modtime =
 (* Sniff probe length, mirroring internal.SniffLen (512). *)
 let sniff_len = 512
 
-(* ---- serveContent (Ticket 3: full 200, no ranges) ---- *)
+(* ---- serveContent ---- *)
 
-(* Stream the byte window [start, start+length) of the content to [w] in
-   bounded chunks (Go's io.CopyN over a seeked reader). *)
+(* Stream the byte window [start, start+length) to [w] in bounded chunks (Go's
+   io.CopyN over a seeked reader). *)
 let stream_window w ~read_window ~start ~length =
   let chunk = 32 * 1024 in
   let rec loop off remaining =
-    if remaining <= 0L then Lwt.return_unit
+    if remaining <= 0L then ()
     else begin
       let len =
         if remaining < Int64.of_int chunk then Int64.to_int remaining else chunk
       in
-      read_window ~off ~len >>= fun data ->
-      if data = "" then Lwt.return_unit
-      else
-        w.Server.write data >>= fun () ->
+      let data = read_window ~off ~len in
+      if data = "" then ()
+      else begin
+        w.Server.write data;
         loop
           (Int64.add off (Int64.of_int (String.length data)))
           (Int64.sub remaining (Int64.of_int (String.length data)))
+      end
     end
   in
   loop start length
@@ -676,35 +634,29 @@ let serve_full w (r : Body.t Request.t) ~h ~size ~read_window =
   if Header.get h "Content-Encoding" = "" then
     Header.set h "Content-Length" (Int64.to_string size);
   w.Server.write_header Status.status_ok;
-  if r.Request.meth = "HEAD" then Lwt.return_unit
+  if r.Request.meth = "HEAD" then ()
   else stream_window w ~read_window ~start:0L ~length:size
 
 let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
   set_last_modified w modtime;
   let done_, range_req = check_preconditions w r ~modtime in
-  (* TICKET 4 HOOK: when [done_], a precondition already wrote 304/412. *)
-  if done_ then Lwt.return_unit
+  if done_ then ()
   else begin
     let h = w.Server.header () in
     (* Content-Type: ext table → Sniff fallback, unless the handler set it. *)
-    let have_type = Header.has h "Content-Type" in
-    (if have_type then Lwt.return_unit
-     else
-       match mime_by_ext (ext_of name) with
-       | Some ctype ->
-           Header.set h "Content-Type" ctype;
-           Lwt.return_unit
-       | None ->
-           let probe =
-             if size < Int64.of_int sniff_len then Int64.to_int size
-             else sniff_len
-           in
-           read_window ~off:0L ~len:probe >>= fun buf ->
-           Header.set h "Content-Type" (Sniff.detect_content_type buf);
-           Lwt.return_unit)
-    >>= fun () ->
+    if not (Header.has h "Content-Type") then
+      begin match mime_by_ext (ext_of name) with
+      | Some ctype -> Header.set h "Content-Type" ctype
+      | None ->
+          let probe =
+            if size < Int64.of_int sniff_len then Int64.to_int size
+            else sniff_len
+          in
+          let buf = read_window ~off:0L ~len:probe in
+          Header.set h "Content-Type" (Sniff.detect_content_type buf)
+      end;
     let ctype = Header.get h "Content-Type" in
-    (* Go serveContent: parse the (If-Range-gated) Range header, then dispatch
+    (* parse the (If-Range-gated) Range header, then dispatch
        full-200 / single-206 / multipart-206 / 416. *)
     match parse_range range_req size with
     | Error No_overlap when size = 0L ->
@@ -731,10 +683,9 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
         | [ ra ] ->
             (* single range → 206 + Content-Range *)
             Header.set h "Content-Range" (content_range ra size);
-            (* Go: for a range request, always set Content-Length. *)
             Header.set h "Content-Length" (Int64.to_string ra.length);
             w.Server.write_header Status.status_partial_content;
-            if r.Request.meth = "HEAD" then Lwt.return_unit
+            if r.Request.meth = "HEAD" then ()
             else stream_window w ~read_window ~start:ra.start ~length:ra.length
         | ranges ->
             (* multiple ranges → 206 multipart/byteranges *)
@@ -743,9 +694,9 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
               ("multipart/byteranges; boundary=" ^ multipart_boundary);
             Header.set h "Content-Length" (Int64.to_string send_size);
             w.Server.write_header Status.status_partial_content;
-            if r.Request.meth = "HEAD" then Lwt.return_unit
+            if r.Request.meth = "HEAD" then ()
             else begin
-              Lwt_list.iteri_s
+              List.iteri
                 (fun idx ra ->
                   let prefix =
                     if idx = 0 then Printf.sprintf "--%s\r\n" multipart_boundary
@@ -757,10 +708,9 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
                       ""
                       (mime_header ra ~content_type:ctype ~size)
                   in
-                  w.Server.write (prefix ^ hdrs ^ "\r\n") >>= fun () ->
+                  w.Server.write (prefix ^ hdrs ^ "\r\n");
                   stream_window w ~read_window ~start:ra.start ~length:ra.length)
-                ranges
-              >>= fun () ->
+                ranges;
               w.Server.write
                 (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary)
             end)
@@ -774,7 +724,6 @@ let path_base p =
   (* path.Base: last element of a '/'-path; "/" or "" → "/" or "." per Go. *)
   if p = "" then "."
   else begin
-    (* strip trailing slashes *)
     let p =
       let n = ref (String.length p) in
       while !n > 0 && p.[!n - 1] = '/' do
@@ -803,14 +752,16 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
   (* redirect .../index.html to .../ *)
   if ends_with upath index_page then local_redirect w r "./"
   else
-    fs.open_ name >>= function
+    (* One switch scopes the open file(s) for the whole serve; teardown closes any
+     still-open fd on every exit (return, error, cancel) — Go's defer f.Close. *)
+    Eio.Switch.run @@ fun sw ->
+    match fs.open_ ~sw name with
     | Error e ->
         let msg, code = to_http_error e in
         Server.error w msg code
     | Ok f ->
-        Lwt.finalize
-          (fun () ->
-            f.stat () >>= fun d ->
+        Fun.protect ~finally:f.close (fun () ->
+            let d = f.stat () in
             (* canonical-path redirects *)
             let redirected =
               if not redirect then None
@@ -845,37 +796,31 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                 then local_redirect w r (path_base upath ^ "/")
                 else begin
                   (* try index.html for a directory *)
-                  (if d.fi_is_dir then begin
-                     let index = trim_suffix name "/" ^ index_page in
-                     fs.open_ index >>= function
-                     | Ok ff ->
-                         ff.stat () >>= fun dd -> Lwt.return (Some (ff, dd))
-                     | Error _ -> Lwt.return None
-                   end
-                   else Lwt.return None)
-                  >>= fun index_opt ->
+                  let index_opt =
+                    if d.fi_is_dir then begin
+                      let index = trim_suffix name "/" ^ index_page in
+                      match fs.open_ ~sw index with
+                      | Ok ff -> Some (ff, ff.stat ())
+                      | Error _ -> None
+                    end
+                    else None
+                  in
                   match index_opt with
                   | Some (ff, dd) when not dd.fi_is_dir ->
-                      Lwt.finalize
-                        (fun () ->
+                      Fun.protect ~finally:ff.close (fun () ->
                           serve_content w r ~name:dd.fi_name
                             ~modtime:dd.fi_mod_time ~size:dd.fi_size
                             ~read_window:ff.read_window)
-                        (fun () -> ff.close ())
                   | index_opt ->
                       (* close an opened-but-unusable index *)
                       (match index_opt with
-                        | Some (ff, _) -> ff.close ()
-                        | None -> Lwt.return_unit)
-                      >>= fun () ->
+                      | Some (ff, _) -> ff.close ()
+                      | None -> ());
                       if d.fi_is_dir then
                         begin if
                           check_if_modified_since r ~modtime:d.fi_mod_time
                           = Cond_false
-                        then begin
-                          write_not_modified w;
-                          Lwt.return_unit
-                        end
+                        then write_not_modified w
                         else begin
                           set_last_modified w d.fi_mod_time;
                           dir_list w r f
@@ -885,7 +830,6 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
                         serve_content w r ~name:d.fi_name ~modtime:d.fi_mod_time
                           ~size:d.fi_size ~read_window:f.read_window
                 end)
-          (fun () -> f.close ())
 
 (* ---- FileServer ---- *)
 

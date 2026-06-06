@@ -4,13 +4,15 @@
    TestParseMultipartFormFilename, TestFormValueCallsParseMultipartForm).
 
    URL-encoded parsing is the faithful port; multipart/form-data parsing goes
-   through the multipart_form-lwt stand-in (the plan's intentional deviation),
+   through the sans-io multipart_form parser (the plan's intentional deviation),
    so a few Go rows that depend on Go's mime/multipart error surface or
    temp-file spill behavior are omitted (see the porting notes in the plan). *)
 
 open Httpg
 
-let run = Lwt_main.run
+(* Form functions are direct-style now; [run] is the identity (kept so the
+   ported call sites read unchanged). *)
+let run x = x
 
 (* Build a Body.t Request.t with the given method, raw URL (query taken from
    it), Content-Type header and urlencoded/multipart body string. *)
@@ -37,7 +39,6 @@ let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Httpg.Context.background;
   }
 
 let values_get r_field key =
@@ -157,7 +158,6 @@ let parse_form_unknown_content_type () =
         form = None;
         post_form = None;
         multipart_form = None;
-        ctx = Httpg.Context.background;
       }
     in
     let res = run (Form.parse_form r) in
@@ -276,6 +276,139 @@ let form_value_lazy () =
   Alcotest.(check string) "FormValue key" "val" v;
   Alcotest.(check bool) "form parsed after" false (r.Request.form = None)
 
+(* ---- F016: a file part larger than max_memory spills to a temp file (not all
+   in RAM), parses correctly, and the temp file is removed by remove_all. *)
+let big_file_contents = String.make 5000 'x'
+
+let spill_body () =
+  String.concat "\r\n"
+    [
+      "--bnd";
+      {|Content-Disposition: form-data; name="big"; filename="big.bin"|};
+      "Content-Type: application/octet-stream";
+      "";
+      big_file_contents;
+      "--bnd--";
+      "";
+    ]
+
+let multipart_spill () =
+  let r =
+    make_req ~meth:"POST" ~url:"http://x/"
+      ~content_type:"multipart/form-data; boundary=bnd" ~body:(spill_body ()) ()
+  in
+  (* Budget far below the 5000-byte part -> must spill to disk. *)
+  (match Form.parse_multipart_form r ~max_memory:100L with
+  | Ok () -> ()
+  | Error e ->
+      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
+  let mf =
+    match r.Request.multipart_form with
+    | Some mf -> mf
+    | None -> Alcotest.fail "multipart_form is None"
+  in
+  let fh =
+    match Hashtbl.find_opt mf.Request.file "big" with
+    | Some (fh :: _) -> fh
+    | _ -> Alcotest.fail "no file part 'big'"
+  in
+  (* Spilled: backed by a temp file on disk, NOT held in [content]. *)
+  let path =
+    match fh.Request.tmpfile with
+    | Some p -> p
+    | None -> Alcotest.fail "expected spill to temp file, got in-memory"
+  in
+  Alcotest.(check string) "spilled content empty in RAM" "" fh.Request.content;
+  Alcotest.(check bool) "temp file exists" true (Sys.file_exists path);
+  (* Content is correct (read back via FormFile / FileHeader.Open). *)
+  (match Form.form_file r "big" with
+  | Some (fn, content) ->
+      Alcotest.(check string) "filename" "big.bin" fn;
+      Alcotest.(check string) "spilled content" big_file_contents content
+  | None -> Alcotest.fail "FormFile big is None");
+  (* Cleanup: remove_all unlinks the temp file (Go's RemoveAll). *)
+  Form.remove_all r;
+  Alcotest.(check bool)
+    "temp file gone after remove_all" false (Sys.file_exists path);
+  Alcotest.(check bool)
+    "remove_all idempotent" true
+    (try
+       Form.remove_all r;
+       true
+     with _ -> false)
+
+(* Small file part (< max_memory) stays in memory: no temp file, common case
+   unchanged. *)
+let multipart_no_spill () =
+  let r =
+    make_req ~meth:"POST" ~url:"http://x/"
+      ~content_type:
+        (Printf.sprintf {|multipart/form-data; boundary="%s"|}
+           multipart_boundary)
+      ~body:(multipart_body ()) ()
+  in
+  (match Form.parse_multipart_form r ~max_memory:10000L with
+  | Ok () -> ()
+  | Error e ->
+      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
+  match r.Request.multipart_form with
+  | None -> Alcotest.fail "multipart_form is None"
+  | Some mf -> (
+      match Hashtbl.find_opt mf.Request.file "file" with
+      | Some (fh :: _) ->
+          Alcotest.(check bool) "no temp file" true (fh.Request.tmpfile = None);
+          Alcotest.(check string)
+            "in-memory content" "file-contents-here" fh.Request.content
+      | _ -> Alcotest.fail "no file part")
+
+(* Leak proof on the ABANDON path: this mirrors the serve loop's per-request
+   switch exactly — a handler parses+spills, then raises (or simply returns)
+   without ever calling remove_all. The [Switch.on_release] hook must still
+   unlink the temp file when the switch closes, so it never outlives the
+   request. Demonstrates the cleanup hook the serve loop wires (server.ml). *)
+let multipart_abandon_switch_cleanup () =
+  let spilled_path = ref None in
+  let run_handler_under_request_switch raise_in_handler =
+    Eio_main.run @@ fun _env ->
+    let r =
+      make_req ~meth:"POST" ~url:"http://x/"
+        ~content_type:"multipart/form-data; boundary=bnd" ~body:(spill_body ())
+        ()
+    in
+    try
+      Eio.Switch.run (fun req_sw ->
+          (* exactly what serve_loop registers *)
+          Eio.Switch.on_release req_sw (fun () ->
+              Request.remove_multipart_temp_files r);
+          (* handler body: parse (spills), record path, then abandon. *)
+          ignore (Form.parse_multipart_form r ~max_memory:100L);
+          (match r.Request.multipart_form with
+          | Some mf -> (
+              match Hashtbl.find_opt mf.Request.file "big" with
+              | Some (fh :: _) -> spilled_path := fh.Request.tmpfile
+              | _ -> ())
+          | None -> ());
+          if raise_in_handler then failwith "handler boom")
+    with Failure _ -> ()
+  in
+  (* (1) handler returns normally without remove_all: switch release cleans up. *)
+  run_handler_under_request_switch false;
+  (match !spilled_path with
+  | Some p ->
+      Alcotest.(check bool)
+        "spilled temp gone after switch (normal return)" false
+        (Sys.file_exists p)
+  | None -> Alcotest.fail "expected a spilled temp file");
+  (* (2) handler raises: switch release still cleans up. *)
+  spilled_path := None;
+  run_handler_under_request_switch true;
+  match !spilled_path with
+  | Some p ->
+      Alcotest.(check bool)
+        "spilled temp gone after switch (handler raised)" false
+        (Sys.file_exists p)
+  | None -> Alcotest.fail "expected a spilled temp file"
+
 (* ---- Values unit: Encode sorts by key (url.Values.Encode). *)
 let values_encode () =
   let v = Values.create () in
@@ -314,6 +447,10 @@ let tests =
       parse_form_unknown_content_type;
     Alcotest.test_case "parse_non_multipart" `Quick parse_non_multipart;
     Alcotest.test_case "multipart" `Quick multipart;
+    Alcotest.test_case "multipart_no_spill" `Quick multipart_no_spill;
+    Alcotest.test_case "multipart_spill" `Quick multipart_spill;
+    Alcotest.test_case "multipart_abandon_switch_cleanup" `Quick
+      multipart_abandon_switch_cleanup;
     Alcotest.test_case "multipart_filename" `Quick multipart_filename;
     Alcotest.test_case "form_value" `Quick form_value_lazy;
     Alcotest.test_case "values_encode" `Quick values_encode;

@@ -2,13 +2,14 @@
    The body field is parametric so the type stays IO-agnostic; io.ml
    instantiates ['body] to {!Body.t}. *)
 
-(* A multipart file part, the analogue of Go's multipart.FileHeader. Contents
-   are held in memory (the multipart_form-lwt stand-in materializes parts as
-   strings; Go spills large parts to temp files). *)
+(* A multipart file part, the analogue of Go's multipart.FileHeader. A part up
+   to the [max_memory] budget is held in [content]; an oversized part is spilled
+   to [tmpfile] (formdata.go:174) and [content] is "". *)
 type file_header = {
   filename : string;
   fh_header : (string * string) list;  (** the part's MIME header fields *)
   content : string;
+  tmpfile : string option;  (** Go FileHeader.tmpfile: spilled-part path. *)
 }
 
 (* The analogue of Go's *multipart.Form: named text values plus file parts. *)
@@ -16,6 +17,24 @@ type multipart_form = {
   value : Values.t;
   file : (string, file_header list) Hashtbl.t;
 }
+
+(* Form.RemoveAll (formdata.go:240): unlink any spilled temp files; idempotent
+   (clears [tmpfile]). Bug-only failures (missing file is fine) are swallowed. *)
+let remove_multipart_files (file : (string, file_header list) Hashtbl.t) : unit
+    =
+  Hashtbl.iter
+    (fun k fhs ->
+      let cleaned =
+        List.map
+          (fun fh ->
+            (match fh.tmpfile with
+            | Some path -> ( try Sys.remove path with Sys_error _ -> ())
+            | None -> ());
+            { fh with tmpfile = None })
+          fhs
+      in
+      Hashtbl.replace file k cleaned)
+    file
 
 type 'body t = {
   mutable meth : string;
@@ -38,11 +57,15 @@ type 'body t = {
   mutable form : Values.t option;
   mutable post_form : Values.t option;
   mutable multipart_form : multipart_form option;
-  (* Go's Request.ctx: the request's context, defaulting to Context.background
-     (Go uses context.Background when r.ctx is nil). Carries the per-request
-     deadline/cancellation (Ticket 12). *)
-  mutable ctx : Context.t;
 }
+
+(* Remove any temp files spilled by multipart parsing on [r]; idempotent. Wired
+   to a per-request switch by the serve loop and exposed publicly (Go's
+   Request.MultipartForm.RemoveAll). Safe to call when nothing spilled. *)
+let remove_multipart_temp_files (r : 'a t) : unit =
+  match r.multipart_form with
+  | Some mf -> remove_multipart_files mf.file
+  | None -> ()
 
 (* defaultUserAgent (request.go). *)
 let default_user_agent = "Go-http-client/1.1"
@@ -148,12 +171,3 @@ let basic_auth_encode username password =
 let set_basic_auth (r : 'a t) username password =
   Header.set r.header "Authorization"
     ("Basic " ^ basic_auth_encode username password)
-
-(* Request.Context: the request's context, never nil (Go returns
-   context.Background for a nil ctx; here the field defaults to that). *)
-let context (r : 'a t) = r.ctx
-
-(* Request.WithContext: a shallow copy of the request with the given context
-   (Go returns *Request with r2.ctx = ctx). All fields are copied; only [ctx]
-   differs. *)
-let with_context (r : 'a t) (ctx : Context.t) : 'a t = { r with ctx }

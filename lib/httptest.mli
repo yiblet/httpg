@@ -28,8 +28,8 @@ module Response_recorder : sig
       header/body. *)
 
   val to_response_writer : t -> Server.response_writer
-  (** Adapt the recorder to a {!Httpg.Server.response_writer} so a handler can run
-      against it unchanged. *)
+  (** Adapt the recorder to a {!Httpg.Server.response_writer} so a handler can
+      run against it unchanged. *)
 
   val result : t -> Body.t Response.t
   (** Go's [ResponseRecorder.Result]: snapshot the handler's response into a
@@ -52,16 +52,17 @@ end
 (** Go's [httptest.Server]: a loopback test server bound to an ephemeral
     [127.0.0.1] port. Only the started, loopback-network path is supported (the
     in-memory "fakenet" network and the [NewUnstartedServer]+[Start] split are
-    omitted, since {!Httpg.Server.listen_and_serve_started} binds and serves in one
-    step). *)
+    omitted). The server runs its accept loop in a fiber forked under the
+    caller-supplied [Eio.Switch]; {!Server.val-close} stops it. *)
 module Server : sig
   type t = {
     url : string;
     port : int;
     tls : bool;
     srv : Server.t;
-    serve : unit Lwt.t;
-    close : unit -> unit Lwt.t;
+    close : unit -> unit;
+    net : [ `Generic ] Eio.Net.ty Eio.Resource.t;
+    clock : float Eio.Time.clock_ty Eio.Resource.t option;
   }
   (** A running test server.
       - [url] is Go's [Server.URL] (["http://127.0.0.1:PORT"], or
@@ -69,8 +70,8 @@ module Server : sig
       - [port] is the bound ephemeral port.
       - [tls] is whether this is a TLS server.
       - [srv] is the underlying running {!Httpg.Server.t} (Go's [Config]).
-      - [serve] is the background serve-loop promise (Go's [goServe]).
-      - [close] stops the server / closes the listener (Go's [Server.Close]). *)
+      - [close] stops the server / closes the listener (Go's [Server.Close]).
+      - [net]/[clock] are the captured capabilities, reused by {!client}. *)
 
   val url : t -> string
   (** [url s] is [s.url]. *)
@@ -78,11 +79,23 @@ module Server : sig
   val port : t -> int
   (** [port s] is [s.port]. *)
 
-  val new_server : Server.handler -> t Lwt.t
-  (** Go's [NewServer]: bind [127.0.0.1:0], build [url], and serve [handler] in
-      the background (does not block). The caller must {!val-close} it when done. *)
+  val new_server :
+    net:_ Eio.Net.t ->
+    ?clock:_ Eio.Time.clock ->
+    sw:Eio.Switch.t ->
+    Server.handler ->
+    t
+  (** Go's [NewServer]: bind [127.0.0.1:0], build [url] and serve [handler] in a
+      fiber forked under [sw] (Go's [goServe]); does not block. The listener and
+      serve fiber live under [sw]; {!val-close} (or [sw] finishing) stops them.
+  *)
 
-  val new_tls_server : Server.handler -> t Lwt.t
+  val new_tls_server :
+    net:_ Eio.Net.t ->
+    ?clock:_ Eio.Time.clock ->
+    sw:Eio.Switch.t ->
+    Server.handler ->
+    t
   (** Go's [NewTLSServer]: like {!new_server} but over TLS using the self-signed
       {!Net.test_server_certificate} (Go's [testcert.LocalhostCert]); [url] is
       ["https://..."]. The matching {!client} trusts the cert via [~insecure].
@@ -94,6 +107,6 @@ module Server : sig
       Go pre-loading the server's self-signed certificate into the client's
       [RootCAs]); for an HTTP server it is a plain default-shaped client. *)
 
-  val close : t -> unit Lwt.t
+  val close : t -> unit
   (** Go's [Server.Close]: stop accepting and close the listening socket. *)
 end

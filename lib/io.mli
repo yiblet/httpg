@@ -1,6 +1,6 @@
-(* Port of the read/write halves of request.go and response.go, over Lwt_io
-   channels: readRequest / ReadRequest, Request.Write, ReadResponse,
-   Response.Write.
+(* Port of the read/write halves of request.go and response.go, over
+   [Eio.Buf_read.t] / [Eio.Buf_write.t]: readRequest / ReadRequest,
+   Request.Write, ReadResponse, Response.Write.
 
    Read bodies {b stream} — they are not materialized in memory. {!read_request}
    and {!read_response} return a {!Body.Stream} that pulls bytes lazily from the
@@ -78,20 +78,18 @@ type error =
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)
 
-val read_mime_header : Lwt_io.input_channel -> (Header.t, error) result Lwt.t
-(** [read_mime_header ic] reads a CRLF-terminated header block (until the blank
+val read_mime_header : Eio.Buf_read.t -> (Header.t, error) result
+(** [read_mime_header r] reads a CRLF-terminated header block (until the blank
     line), folding obs-fold continuation lines, into a {!Header.t}. Port of
     [textproto.Reader.ReadMIMEHeader]. A malformed line short-circuits as
     [Error (Protocol _)]. *)
 
 val read_request :
-  ?max_header_bytes:int ->
-  Lwt_io.input_channel ->
-  (Body.t Request.t, error) result Lwt.t
-(** [read_request ?max_header_bytes ic] is [ReadRequest]: parse the request
-    line, headers (Host promoted to [host] and deleted from the header map), and
-    body framing from [ic]. The body is a streaming {!Body.Stream} reading
-    lazily from [ic]; it is not buffered. Consume it to EOF
+  ?max_header_bytes:int -> Eio.Buf_read.t -> (Body.t Request.t, error) result
+(** [read_request ?max_header_bytes r] is [ReadRequest]: parse the request line,
+    headers (Host promoted to [host] and deleted from the header map), and body
+    framing from [ic]. The body is a streaming {!Body.Stream} reading lazily
+    from [ic]; it is not buffered. Consume it to EOF
     ({!Body.read_all}/{!Body.drain}) to reach the next message boundary and
     populate any chunked trailer.
 
@@ -112,9 +110,9 @@ val read_request :
 val read_response :
   ?request:Body.t Request.t ->
   ?max_header_bytes:int ->
-  Lwt_io.input_channel ->
-  (Body.t Response.t, error) result Lwt.t
-(** [read_response ?request ?max_header_bytes ic] is [ReadResponse]: parse the
+  Eio.Buf_read.t ->
+  (Body.t Response.t, error) result
+(** [read_response ?request ?max_header_bytes r] is [ReadResponse]: parse the
     status line, headers and body framing. [request] optionally supplies the
     corresponding request (for HEAD body suppression); a GET is assumed
     otherwise. The body is a streaming {!Body.Stream} reading lazily from [ic]
@@ -128,14 +126,13 @@ val read_response :
     short-circuits as [Error Response_header_too_large]. Omitting it leaves the
     head read unbounded. *)
 
-val write_request :
-  Lwt_io.output_channel -> Body.t Request.t -> (unit, error) result Lwt.t
-(** [write_request oc r] is [Request.Write]: write the request line, Host /
+val write_request : Eio.Buf_write.t -> Body.t Request.t -> (unit, error) result
+(** [write_request w r] is [Request.Write]: write the request line, Host /
     User-Agent / framing headers, the remaining headers and the body. Always
     emits ["HTTP/1.1"]. Returns [Error Missing_host] when no host is available.
 *)
 
-val write_response : Lwt_io.output_channel -> Body.t Response.t -> unit Lwt.t
-(** [write_response oc r] is [Response.Write]: write the status line, framing
+val write_response : Eio.Buf_write.t -> Body.t Response.t -> unit
+(** [write_response w r] is [Response.Write]: write the status line, framing
     headers, the remaining headers and the body, applying Go's zero-length-body
     probe and the HTTP/1.1 unknown-length [Connection: close] rule. *)

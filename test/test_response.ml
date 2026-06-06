@@ -1,17 +1,11 @@
 (* Ported from go/src/net/http/response_test.go (ReadResponse rows). *)
 
-let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
+let read ?request s =
+  match Httpg.Io.read_response ?request (Eio.Buf_read.of_string s) with
+  | Ok r -> r
+  | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let read_ok ?request ic =
-  Lwt.bind (Httpg.Io.read_response ?request ic) (function
-    | Ok r -> Lwt.return r
-    | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e)))
-
-let read ?request s = Lwt_main.run (read_ok ?request (ic_of_string s))
-
-let body_of (r : Httpg.Body.t Httpg.Response.t) =
-  Lwt_main.run (Httpg.Body.read_all r.body)
-
+let body_of (r : Httpg.Body.t Httpg.Response.t) = Httpg.Body.read_all r.body
 let i64 = Int64.to_string
 
 (* HTTP/1.0 unchunked, Connection: close, no Content-Length. *)
@@ -91,7 +85,6 @@ let location () =
       form = None;
       post_form = None;
       multipart_form = None;
-      ctx = Httpg.Context.background;
     }
   in
   let raw =

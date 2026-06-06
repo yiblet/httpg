@@ -1,7 +1,8 @@
 {0 httpg}
 
 A faithful 1:1 OCaml port of Go's [net/http] — HTTP/1.0, HTTP/1.1, and HTTP/2
-(over TLS via ALPN), client and server. Written directly against Lwt.
+(over TLS via ALPN), client and server. Written directly against Eio
+(direct-style, multicore-capable).
 
 The public API lives in the {!module:Httpg} library; types and function names
 mirror Go's, so the Go documentation doubles as a reference.
@@ -13,7 +14,6 @@ writes its response through the {!Httpg.Server.response_writer} ([write_header]
 sets the status; [write] streams the body).
 
 {[
-open Lwt.Infix
 open Httpg
 
 let () =
@@ -22,9 +22,10 @@ let () =
     (Server.handle_func mux "/hello" (fun w _req ->
          w.write_header 200;
          w.write "Hello, world\n"));
-  Lwt_main.run
-    (Server.listen_and_serve ~addr:"127.0.0.1" ~port:8080
-       (Server.serve_mux_handler mux))
+  Eio_main.run @@ fun env ->
+  Server.listen_and_serve ~net:(Eio.Stdenv.net env)
+    ~clock:(Eio.Stdenv.clock env) ~addr:"127.0.0.1" ~port:8080
+    (Server.serve_mux_handler mux)
 ]}
 
 For more control (timeouts, max header bytes), build a {!Httpg.Server.t} with
@@ -32,7 +33,7 @@ For more control (timeouts, max header bytes), build a {!Httpg.Server.t} with
 
 {[
 let srv =
-  Server.create ~addr:"127.0.0.1" ~port:8080 ~read_timeout:10.
+  Server.create ~net ~clock ~addr:"127.0.0.1" ~port:8080 ~read_timeout:10.
     ~write_timeout:10. ~max_header_bytes:(1 lsl 20)
     (Server.serve_mux_handler mux)
 ]}
@@ -41,20 +42,25 @@ HTTPS with HTTP/2 (negotiated via ALPN) is {!Httpg.Server.listen_and_serve_tls}.
 
 {1 Running a request}
 
-{!Httpg.Client.default_client} is the ready-to-use client (Go's
-[http.DefaultClient]). {b The response body streams} — consume it to EOF with
-{!Httpg.Body.read_all} or {!Httpg.Body.drain} to release the connection back
-to the pool (the analogue of Go's [resp.Body.Close]).
+Build a client with {!Httpg.Client.create} (Go's [http.Client]; there is no
+ambient default, so you pass the [net]/[clock] capabilities). {b The response
+body streams} — consume it to EOF with {!Httpg.Body.read_all} or
+{!Httpg.Body.drain} to release the connection back to the pool (the analogue of
+Go's [resp.Body.Close]).
 
 {[
-open Lwt.Infix
 open Httpg
 
 let () =
-  Lwt_main.run
-    (Client.get Client.default_client "http://example.com/" >>= fun resp ->
-     Body.read_all resp.body >|= fun body ->
-     Printf.printf "%d\n%s" resp.status_code body)
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let client =
+    Client.create ~net:(Eio.Stdenv.net env)
+      ~clock:(Eio.Stdenv.clock env) ()
+  in
+  let resp = Client.get ~sw client "http://example.com/" in
+  Printf.printf "%d\n%s" resp.Response.status_code
+    (Body.read_all resp.Response.body)
 ]}
 
 POST a body with a content type, or POST form values:
@@ -78,10 +84,10 @@ For control over headers, redirect policy, TLS, and timeouts, build a
 with {!Httpg.Client.do_}:
 
 {[
-let c = Client.create ~timeout:10. () in
+let c = Client.create ~net ~clock ~timeout:10. () in
 let req = Client.make_request "GET" "http://example.com" in
-Header.add req.header "If-None-Match" {|W/"wyzzy"|};
-Lwt_main.run (Client.do_ c req)
+Header.add req.Request.header "If-None-Match" {|W/"wyzzy"|};
+Client.do_ ~sw c req
 ]}
 
 {1 Testing your server}
@@ -92,17 +98,20 @@ Lwt_main.run (Client.do_ c req)
 preconfigured client — start it, hit it, close it:
 
 {[
-open Lwt.Infix
 open Httpg
 
 let () =
-  Lwt_main.run
-    (Httptest.Server.new_server my_handler >>= fun srv ->
-     let c = Httptest.Server.client srv in
-     Client.get c (Httptest.Server.url srv ^ "/hello") >>= fun resp ->
-     Body.read_all resp.body >>= fun body ->
-     assert (resp.status_code = 200 && body = "Hello, world\n");
-     Httptest.Server.close srv)
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let srv =
+    Httptest.Server.new_server ~net:(Eio.Stdenv.net env)
+      ~clock:(Eio.Stdenv.clock env) ~sw my_handler
+  in
+  let c = Httptest.Server.client srv in
+  let resp = Client.get ~sw c (Httptest.Server.url srv ^ "/hello") in
+  let body = Body.read_all resp.Response.body in
+  assert (resp.Response.status_code = 200 && body = "Hello, world\n");
+  Httptest.Server.close srv
 ]}
 
 To unit-test a handler in memory without a socket, use
@@ -111,7 +120,7 @@ To unit-test a handler in memory without a socket, use
 {[
 let rec_ = Httptest.Response_recorder.create () in
 let w = Httptest.Response_recorder.to_response_writer rec_ in
-Lwt_main.run (my_handler.Server.serve_http w req);
+my_handler.Server.serve_http w req;
 assert (Httptest.Response_recorder.code rec_ = 200);
 assert (Httptest.Response_recorder.body_string rec_ = "Hello, world\n")
 ]}

@@ -53,13 +53,11 @@ module Response_recorder = struct
 
   let write t s =
     write_header_implicit t s;
-    Buffer.add_string t.body s;
-    Lwt.return_unit
+    Buffer.add_string t.body s
 
   let flush t =
     if not t.wrote_header then write_header_code t 200;
-    t.flushed <- true;
-    Lwt.return_unit
+    t.flushed <- true
 
   let to_response_writer (t : t) : Server.response_writer =
     {
@@ -133,60 +131,68 @@ module Server = struct
     port : int;  (** the bound ephemeral port. *)
     tls : bool;  (** whether this is a TLS ([StartTLS]) server. *)
     srv : Server.t;  (** the running httpg [Server] (Go's [Config]). *)
-    serve : unit Lwt.t;  (** the serve-loop promise (Go's [goServe]). *)
-    close : unit -> unit Lwt.t;  (** Go's [Server.Close]. *)
+    close : unit -> unit;  (** Go's [Server.Close]. *)
+    (* Capabilities captured so {!client} can build a matching [Client.t]. *)
+    net : [ `Generic ] Eio.Net.ty Eio.Resource.t;
+    clock : float Eio.Time.clock_ty Eio.Resource.t option;
   }
 
   let url s = s.url
   let port s = s.port
+  let coerce_net net = (net :> [ `Generic ] Eio.Net.ty Eio.Resource.t)
 
-  (* NewServer: bind 127.0.0.1:0, build the URL, serve in the background. *)
-  let new_server (handler : Server.handler) : t Lwt.t =
-    let open Lwt.Infix in
-    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 handler
-    >>= fun (srv, port, serve_loop) ->
-    (* Drive the serve loop in the background so [new_server] doesn't block,
-       mirroring Go's [goServe]. *)
-    Lwt.async (fun () -> serve_loop);
+  let coerce_clock clock =
+    Option.map (fun c -> (c :> float Eio.Time.clock_ty Eio.Resource.t)) clock
+
+  (* NewServer: bind 127.0.0.1:0, build the URL, serve in a fiber under [sw]. *)
+  let new_server ~net ?clock ~sw (handler : Server.handler) : t =
+    let srv, port, serve_loop =
+      Server.listen_and_serve_started ~net ?clock ~sw ~addr:"127.0.0.1" ~port:0
+        handler
+    in
+    Eio.Fiber.fork ~sw serve_loop;
     let url = Printf.sprintf "http://127.0.0.1:%d" port in
-    Lwt.return
-      {
-        url;
-        port;
-        tls = false;
-        srv;
-        serve = serve_loop;
-        close = (fun () -> Server.close srv);
-      }
+    {
+      url;
+      port;
+      tls = false;
+      srv;
+      close = (fun () -> Server.close srv);
+      net = coerce_net net;
+      clock = coerce_clock clock;
+    }
 
   (* NewTLSServer: like [new_server] but over TLS with the self-signed
-     [Net.test_server_certificate] (Go's [testcert.LocalhostCert]); URL is
-     "https://...". The matching [client] trusts the cert via [~insecure]. *)
-  let new_tls_server (handler : Server.handler) : t Lwt.t =
-    let open Lwt.Infix in
+     [Net.test_server_certificate]; URL is "https://...". The matching [client]
+     trusts the cert via [~insecure]. *)
+  let new_tls_server ~net ?clock ~sw (handler : Server.handler) : t =
     let certificates = Net.test_server_certificate () in
-    Server.listen_and_serve_tls_started ~certificates ~addr:"127.0.0.1" ~port:0
-      handler
-    >>= fun (srv, port, serve_loop) ->
-    Lwt.async (fun () -> serve_loop);
+    (* Advertise h2 + http/1.1 (Go's httptest StartTLS with HTTP/2 enabled) so
+       ALPN can negotiate either. *)
+    let srv, port, serve_loop =
+      Server.listen_and_serve_tls_started ~net ?clock ~certificates
+        ~alpn:[ "h2"; "http/1.1" ] ~sw ~addr:"127.0.0.1" ~port:0 handler
+    in
+    Eio.Fiber.fork ~sw serve_loop;
     let url = Printf.sprintf "https://127.0.0.1:%d" port in
-    Lwt.return
-      {
-        url;
-        port;
-        tls = true;
-        srv;
-        serve = serve_loop;
-        close = (fun () -> Server.close srv);
-      }
+    {
+      url;
+      port;
+      tls = true;
+      srv;
+      close = (fun () -> Server.close srv);
+      net = coerce_net net;
+      clock = coerce_clock clock;
+    }
 
-  (* Server.Client: a client configured to talk to this server. Go pre-loads
-     the server's self-signed cert into the client's RootCAs; the faithful
-     httpg analogue for a TLS server is a client that trusts it via
-     [~insecure:true] (Net.test_server_certificate's matching insecure
-     opt-out). An HTTP server gets a plain default-shaped client. *)
+  (* Server.Client: a client (capturing the same net/clock) configured to talk
+     to this server. Go pre-loads the server's self-signed cert into the client's
+     RootCAs; the faithful httpg analogue for a TLS server is a client that
+     trusts it via [~insecure:true]. An HTTP server gets a plain client. *)
   let client (s : t) : Client.t =
-    if s.tls then Client.create ~insecure:true () else Client.create ()
+    let net = s.net and clock = s.clock in
+    if s.tls then Client.create ~net ?clock ~insecure:true ()
+    else Client.create ~net ?clock ()
 
-  let close (s : t) : unit Lwt.t = s.close ()
+  let close (s : t) : unit = s.close ()
 end

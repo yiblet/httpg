@@ -2,19 +2,11 @@
 
 let chunk s = Printf.sprintf "%x\r\n%s\r\n" (String.length s) s
 
-(* Capture output written by [f oc] into a string. *)
-let capture (f : Lwt_io.output_channel -> unit Lwt.t) : string =
-  Lwt_main.run
-    (let buf = Buffer.create 256 in
-     let oc =
-       Lwt_io.make ~mode:Lwt_io.output (fun bytes off len ->
-           let b = Bytes.create len in
-           Lwt_bytes.blit_to_bytes bytes off b 0 len;
-           Buffer.add_bytes buf b;
-           Lwt.return len)
-     in
-     Lwt.bind (f oc) (fun () ->
-         Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
+(* Capture output written by [f w] into a string. *)
+let capture (f : Eio.Buf_write.t -> unit) : string =
+  let w = Eio.Buf_write.create 256 in
+  f w;
+  Eio.Buf_write.serialize_to_string w
 
 let header pairs =
   let h = Httpg.Header.create () in
@@ -43,14 +35,13 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Httpg.Context.background;
   }
 
 let write r =
-  capture (fun oc ->
-      Lwt.bind (Httpg.Io.write_request oc r) (function
-        | Ok () -> Lwt.return_unit
-        | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e))))
+  capture (fun w ->
+      match Httpg.Io.write_request w r with
+      | Ok () -> ()
+      | Error e -> failwith (Httpg.Io.error_to_string e))
 
 (* Row 0: GET, no body, custom headers, no Content-Length. *)
 let row0 () =

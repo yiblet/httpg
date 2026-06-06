@@ -1,52 +1,49 @@
 (* Port of the HTTP/1.x subset of go/src/net/http/server.go: Handler /
    HandlerFunc, ResponseWriter, the per-connection serve loop, Server /
    ListenAndServe, ServeMux dispatch, and the NotFound / Error / Redirect /
-   RedirectHandler helpers. HTTP/2, hijacking, TLS-NPN and graceful-shutdown
-   niceties are out of scope. *)
+   RedirectHandler helpers. HTTP/2-over-TLS is dispatched by ALPN (the h2 branch
+   hands off to the HTTP/2 server via a translation shim, Go's http2.go);
+   hijacking and graceful-shutdown niceties are out of scope. *)
 
 type response_writer = {
   header : unit -> Header.t;
   write_header : int -> unit;
-  write : string -> unit Lwt.t;
-  flush : unit -> unit Lwt.t;
+  write : string -> unit;
+  flush : unit -> unit;
 }
 (** Go's [ResponseWriter] interface, modeled as a record of operations.
     - [header ()] returns the mutable header map the handler writes to before
       the response headers are flushed (Go's [ResponseWriter.Header]).
     - [write_header code] sets the status code (Go's [WriteHeader]); the first
       [write] implicitly calls [write_header 200].
-    - [write data] appends body bytes (Go's [ResponseWriter.Write]). Writes
-      accumulate in a [bufferBeforeChunkingSize = 2048] byte buffer; the framing
-      decision (Content-Length vs chunked) fires at first flush = the buffer
-      exceeds 2048 bytes, the handler returns, or [flush] is called. A handler
-      that finishes with <=2048 bytes buffered and no explicit Content-Length
-      gets an exact Content-Length (Go's common case); otherwise the response is
-      streamed chunked (HTTP/1.1) or close-delimited (HTTP/1.0).
-    - [flush ()] forces the headers/framing decision and pushes buffered bytes
-      to the client (Go's [http.Flusher.Flush]). *)
+    - [write data] appends body bytes. Writes accumulate in a
+      [bufferBeforeChunkingSize = 2048] byte buffer; the framing decision
+      (Content-Length vs chunked) fires at first flush = the buffer exceeds 2048
+      bytes, the handler returns, or [flush] is called. A handler that finishes
+      with <=2048 bytes buffered and no explicit Content-Length gets an exact
+      Content-Length (Go's common case); otherwise the response is streamed
+      chunked (HTTP/1.1) or close-delimited (HTTP/1.0).
+    - [flush ()] forces the framing decision and pushes buffered bytes (Go's
+      [http.Flusher.Flush]). *)
 
-type handler = {
-  serve_http : response_writer -> Body.t Request.t -> unit Lwt.t;
-}
+type handler = { serve_http : response_writer -> Body.t Request.t -> unit }
 (** Go's [Handler] interface: [ServeHTTP(ResponseWriter, *Request)]. *)
 
-val handler_func :
-  (response_writer -> Body.t Request.t -> unit Lwt.t) -> handler
+val handler_func : (response_writer -> Body.t Request.t -> unit) -> handler
 (** Go's [HandlerFunc]: adapt a function to a {!handler}. *)
 
-val error : response_writer -> string -> int -> unit Lwt.t
+val error : response_writer -> string -> int -> unit
 (** Go's [Error]: reply with a plain-text error message and status [code],
     resetting Content-Type, deleting Content-Length and setting the nosniff
     option. *)
 
-val not_found : response_writer -> Body.t Request.t -> unit Lwt.t
+val not_found : response_writer -> Body.t Request.t -> unit
 (** Go's [NotFound]: a 404 "404 page not found" reply. *)
 
 val not_found_handler : unit -> handler
 (** Go's [NotFoundHandler]. *)
 
-val redirect :
-  response_writer -> Body.t Request.t -> string -> int -> unit Lwt.t
+val redirect : response_writer -> Body.t Request.t -> string -> int -> unit
 (** Go's [Redirect]: reply with a redirect to [url] (which may be relative to
     the request path) using status [code]. *)
 
@@ -62,8 +59,7 @@ val new_serve_mux : unit -> serve_mux
 (** Go's [NewServeMux]. *)
 
 (** A handleable registration error: an invalid or conflicting pattern (Go's
-    [register] error, which Go surfaces by panicking in [Handle] but returns
-    from [registerErr]). Carries Go's message text. *)
+    [register] error). Carries Go's message text. *)
 type error = Register of string
 
 val error_to_string : error -> string
@@ -71,19 +67,17 @@ val error_to_string : error -> string
 
 val handle : serve_mux -> string -> handler -> (unit, error) result
 (** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
-    [Error (Register _)] on an invalid or conflicting pattern (a wiring-time
-    programmer error; callers may [Result.get_ok] at setup). *)
+    [Error (Register _)] on an invalid or conflicting pattern. *)
 
 val handle_func :
   serve_mux ->
   string ->
-  (response_writer -> Body.t Request.t -> unit Lwt.t) ->
+  (response_writer -> Body.t Request.t -> unit) ->
   (unit, error) result
-(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern].
-    Returns [Error (Register _)] on an invalid or conflicting pattern. *)
+(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern]. *)
 
 val serve_mux_serve_http :
-  serve_mux -> response_writer -> Body.t Request.t -> unit Lwt.t
+  serve_mux -> response_writer -> Body.t Request.t -> unit
 (** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 
 val serve_mux_handler : serve_mux -> handler
@@ -92,10 +86,19 @@ val serve_mux_handler : serve_mux -> handler
 (* ---- Server ---- *)
 
 type t
-(** Go's [Server]. The zero-ish value carries an address, a handler and an
-    internal stop signal used to shut the accept loop down (for tests). *)
+(** Go's [Server]: an address, a handler, the duration knobs, and the per-domain
+    accept [Switch]es used to shut the accept loops (and in-flight connection
+    fibers) down. *)
+
+exception Shutdown
+(** Sentinel used by {!close} to cancel the accept switches; swallowed by
+    {!serve} (the shared accept loop, also used by the TLS entry points) so a
+    clean shutdown returns normally. *)
 
 val create :
+  net:_ Eio.Net.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
   ?addr:string ->
   ?port:int ->
   ?read_timeout:float ->
@@ -105,44 +108,72 @@ val create :
   ?max_header_bytes:int ->
   handler ->
   t
-(** [create ?addr ?port handler] builds a server bound to [addr]:[port].
+(** [create ~net ?clock ?domain_mgr ?addr ?port handler] builds a server bound
+    to [addr]:[port], capturing the [net] capability (and optional [clock] for
+    the duration knobs) so the serve entry points don't re-thread them.
+
+    [?domain_mgr] (Eio.Stdenv.domain_mgr) enables the multicore accept pool: the
+    serve entry points pre-spawn one accept loop per domain (default
+    [Domain.recommended_domain_count ()], overridable with [?domains]), all
+    accepting the same listening socket, for genuine parallelism across OS
+    cores. Without it (or with [?domains:1]) serving stays single-domain.
 
     The four optional duration knobs are Go's [Server.ReadTimeout],
-    [ReadHeaderTimeout], [WriteTimeout] and [IdleTimeout] (server.go:3717-3724),
-    in seconds. Each defaults to [0.] meaning "no timeout" (Go's zero-value
-    semantics) — production deployments should set them to defend against slow /
-    idle / incomplete (Slowloris) clients. As in Go, [read_header_timeout] and
-    [idle_timeout] fall back to [read_timeout] when left at [0.].
+    [ReadHeaderTimeout], [WriteTimeout] and [IdleTimeout], in seconds, each
+    defaulting to [0.] = "no timeout". As in Go, [read_header_timeout] and
+    [idle_timeout] fall back to [read_timeout] when left at [0.]. The timeouts
+    are enforced only when a [?clock] was captured here; they are implemented as
+    [Eio.Time] deadlines (Go uses socket [SetReadDeadline]/[SetWriteDeadline]).
 
-    - [read_header_timeout] bounds reading the request line + header block; a
-      client that never finishes the headers is dropped (no reply).
-    - [idle_timeout] bounds how long a kept-alive connection may sit idle
-      between requests before being closed.
-    - [read_timeout] (whole-request) additionally bounds reading the request
-      body.
-    - [write_timeout] bounds writing the response.
+    [max_header_bytes] is Go's [Server.MaxHeaderBytes]: the request line +
+    header block is bounded cumulatively against [max_header_bytes + 4096]
+    bytes; a request exceeding it is answered [431] and the connection closed.
+    Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB). *)
 
-    The timeouts are implemented as child {!Httpg_base.Context} deadlines
-    derived off the per-connection context (Lwt_io channels expose no socket
-    deadline, unlike Go's [SetReadDeadline]/[SetWriteDeadline]).
+val close : t -> unit
+(** Minimal [Server.Close]: cancel all per-domain accept switches, which stops
+    accepting and cancels every in-flight connection fiber across all domains,
+    then close the listener. Safe to call from any domain. *)
 
-    [max_header_bytes] is Go's [Server.MaxHeaderBytes] (server.go:920-929): the
-    request line + header block is bounded cumulatively against
-    [max_header_bytes + 4096] bytes ("bufio slop"); a request exceeding it is
-    answered [431 Request Header Fields Too Large] and the connection closed.
-    Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB), as in Go. *)
+val shutdown : t -> unit
+(** Go's [Server.Shutdown]: gracefully stop. Closes the listener (refuses new
+    connections) and signals live connections to drain rather than cancelling
+    them — HTTP/2 conns send a GOAWAY (NO_ERROR) with the last processed stream
+    id, finish their in-flight streams, then linger briefly before closing; new
+    streams after the GOAWAY are refused. Unlike {!close} it does not abort
+    in-flight work. Safe to call from any domain. *)
 
-val close : t -> unit Lwt.t
-(** Minimal [Server.Close]: stop accepting and close the listening socket. *)
+val serve : ?domains:int -> t -> _ Eio.Net.listening_socket -> unit
+(** [serve ?domains srv listen_sock] is Go's [Server.Serve]: accept connections
+    on [listen_sock] and handle each in its own Eio fiber until {!close} is
+    called. Each connection runs the per-request keep-alive loop; per-connection
+    errors are recovered so one bad connection never tears down its accept loop
+    (Go's [conn.serve]). The [clock] captured at {!create} (if any) drives the
+    duration-knob deadlines.
 
-val serve : t -> Lwt_unix.file_descr -> unit Lwt.t
-(** [serve srv fd] is Go's [Server.Serve]: accept connections on the listening
-    socket [fd] and handle each in its own Lwt fiber until {!close} is called.
-    Each connection runs the per-request keep-alive loop. *)
+    When a [?domain_mgr] was captured at {!create}, [?domains] accept loops (one
+    per domain, default [Domain.recommended_domain_count ()]) are pre-spawned on
+    the shared [listen_sock] for true multicore parallelism. [?domains:1], or no
+    captured [domain_mgr], gives the legacy single-domain accept loop. *)
 
-val listen_and_serve : addr:string -> port:int -> handler -> unit Lwt.t
-(** Go's [ListenAndServe]: bind [addr]:[port] and serve [handler] until the
-    process or the listener is torn down. *)
+val listen_and_serve :
+  ?read_timeout:float ->
+  ?read_header_timeout:float ->
+  ?write_timeout:float ->
+  ?idle_timeout:float ->
+  ?max_header_bytes:int ->
+  net:_ Eio.Net.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  ?domains:int ->
+  addr:string ->
+  port:int ->
+  handler ->
+  unit
+(** Go's [ListenAndServe]: bind [addr]:[port] (under an internal switch) and
+    serve [handler] until the listener is torn down. Pass [?domain_mgr] (with an
+    optional [?domains] count) to serve across OS cores; see {!serve}. The four
+    duration knobs and [max_header_bytes] are forwarded to {!create}. *)
 
 val listen_and_serve_started :
   ?read_timeout:float ->
@@ -150,45 +181,73 @@ val listen_and_serve_started :
   ?write_timeout:float ->
   ?idle_timeout:float ->
   ?max_header_bytes:int ->
+  net:_ Eio.Net.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  ?domains:int ->
+  sw:Eio.Switch.t ->
   addr:string ->
   port:int ->
   handler ->
-  (t * int * unit Lwt.t) Lwt.t
-(** Like {!listen_and_serve} but binds first and returns the running [Server.t],
-    the bound port (useful when [port = 0] selects an ephemeral port) and the
-    serve loop promise — so tests can connect and {!close}. The four optional
-    duration knobs and [max_header_bytes] are forwarded to {!create}. *)
+  t * int * (unit -> unit)
+(** Like {!listen_and_serve} but binds the listener under the caller's [sw]
+    first and returns the running [Server.t], the bound port (useful when
+    [port = 0] selects an ephemeral port) and a thunk that runs the accept pool
+    — so tests can read the port, fork the accept thunk, connect and {!close}.
+    The four duration knobs and [max_header_bytes] are forwarded to {!create};
+    [?domain_mgr]/[?domains] enable the multicore accept pool (see {!serve}). *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 
 val default_alpn_protocols : string list
-(** The default ALPN protocols advertised by {!listen_and_serve_tls}, in
-    descending order of preference: [["h2"; "http/1.1"]] (Go's
-    [http2.NextProtoTLS] + ["http/1.1"]). *)
+(** The default ALPN protocols advertised by the TLS server:
+    [["h2"; "http/1.1"]] (Go's [http2.NextProtoTLS] + ["http/1.1"]). *)
 
 val listen_and_serve_tls :
+  ?read_timeout:float ->
+  ?read_header_timeout:float ->
+  ?write_timeout:float ->
+  ?idle_timeout:float ->
+  ?max_header_bytes:int ->
+  net:_ Eio.Net.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  ?domains:int ->
   certificates:Tls.Config.certchain ->
   ?alpn:string list ->
   addr:string ->
   port:int ->
   handler ->
-  unit Lwt.t
+  unit
 (** Go's [ListenAndServeTLS]: bind [addr]:[port] with server-side TLS carrying
     [certificates] and advertising the ALPN protocols [alpn] (default
     {!default_alpn_protocols}), then serve [handler] over each accepted
-    connection — dispatching to the HTTP/2 server connection
-    ([H2_server.serve]) when the negotiated ALPN protocol is ["h2"], and to the
-    existing HTTP/1.x serve loop otherwise (incl. when no ALPN protocol was
-    agreed). The same {!handler} serves both protocols (the h2 path adapts it
-    via the [H2_server] response_writer). *)
+    connection. When the negotiated ALPN protocol is ["h2"] the connection is
+    served by {!Httpg_http2.H2_server} (via the public h1<->h2 translation shim,
+    Go's http2.go); otherwise the HTTP/1.x serve loop runs over the TLS
+    channels. The four duration knobs and [max_header_bytes] are forwarded to
+    {!create} (Go keeps these on the single [Server] struct shared by
+    [ListenAndServe] and [ListenAndServeTLS]). *)
 
 val listen_and_serve_tls_started :
+  ?read_timeout:float ->
+  ?read_header_timeout:float ->
+  ?write_timeout:float ->
+  ?idle_timeout:float ->
+  ?max_header_bytes:int ->
+  net:_ Eio.Net.t ->
+  ?clock:_ Eio.Time.clock ->
+  ?domain_mgr:_ Eio.Domain_manager.t ->
+  ?domains:int ->
   certificates:Tls.Config.certchain ->
   ?alpn:string list ->
+  sw:Eio.Switch.t ->
   addr:string ->
   port:int ->
   handler ->
-  (t * int * unit Lwt.t) Lwt.t
-(** Like {!listen_and_serve_tls} but binds first and returns the running
-    [Server.t], the bound port (useful with an ephemeral [port = 0]) and the
-    serve loop promise — so tests can connect over TLS and {!close}. *)
+  t * int * (unit -> unit)
+(** Like {!listen_and_serve_tls} but binds the listener under [sw] first and
+    returns the running [Server.t], the bound port (useful with an ephemeral
+    [port = 0]) and the accept-loop thunk — so tests can connect over TLS and
+    {!close}. The four duration knobs and [max_header_bytes] are forwarded to
+    {!create}. *)

@@ -1,50 +1,30 @@
 (* Ported from go/src/net/http/internal/http2/frame_test.go.
-   Each test writes a frame with the writers and reads it back over an
-   Lwt_io.pipe pair, asserting the parsed fields (round-trip). Bounded by
-   Net.with_timeout so a hang fails rather than blocks the suite. *)
+   Each test writes a frame with the writers (capturing the bytes) and reads it
+   back through an in-memory Eio.Buf_read, asserting the parsed fields. Frame IO
+   is synchronous, so no fibers/switch are needed for these round-trips. *)
 
 module F = Httpg_http2.H2_frame
 module H2 = Httpg_http2.H2
 module H2_error = Httpg_http2.H2_error
 module Hpack = Httpg_http2.Hpack
-module Net = Httpg.Net
-
-(* Run [writer] then [reader] over a fresh pipe, returning [reader]'s result.
-   The writer's output channel is closed (flushing) before reading. *)
-let with_pipe (writer : Lwt_io.output_channel -> unit Lwt.t)
-    (reader : Lwt_io.input_channel -> 'a Lwt.t) : 'a =
-  Lwt_main.run
-    (Net.with_timeout 10.
-       (let ic, oc = Lwt_io.pipe () in
-        let run () =
-          Lwt.bind (writer oc) (fun () ->
-              Lwt.bind (Lwt_io.close oc) (fun () -> reader ic))
-        in
-        run ()))
 
 (* Capture the raw bytes a writer produces (for byte-exact encoding checks). *)
-let capture (writer : Lwt_io.output_channel -> unit Lwt.t) : string =
-  Lwt_main.run
-    (Net.with_timeout 10.
-       (let buf = Buffer.create 64 in
-        let oc =
-          Lwt_io.make ~mode:Lwt_io.output (fun bytes off len ->
-              let b = Bytes.create len in
-              Lwt_bytes.blit_to_bytes bytes off b 0 len;
-              Buffer.add_bytes buf b;
-              Lwt.return len)
-        in
-        Lwt.bind (writer oc) (fun () ->
-            Lwt.bind (Lwt_io.close oc) (fun () ->
-                Lwt.return (Buffer.contents buf)))))
+let capture (writer : Eio.Buf_write.t -> unit) : string =
+  Test_harness.with_output_string writer
 
-(* read_frame now returns [result]; unwrap [Ok], re-raising the boundary error
-   via [H2_error.to_exception] so the [check_raises] error tests below keep
-   asserting the exception identity (Frame_too_large / Connection_error / …). *)
-let read_one ?max_size () ic =
-  Lwt.map
-    (function Ok f -> f | Error e -> raise (H2_error.to_exception e))
-    (F.read_frame ?max_size ic)
+(* Run [writer] then [reader]: serialize the writer's bytes, then read them back
+   through a fresh in-memory Buf_read. *)
+let with_pipe (writer : Eio.Buf_write.t -> unit) (reader : Eio.Buf_read.t -> 'a)
+    : 'a =
+  reader (Test_harness.buf_read_of_string (capture writer))
+
+(* read_frame returns [result]; unwrap [Ok], re-raising the boundary error via
+   [H2_error.to_exception] so the [check_raises] error tests below keep asserting
+   the exception identity (Frame_too_large / Connection_error / …). *)
+let read_one ?max_size () r =
+  match F.read_frame ?max_size r with
+  | Ok f -> f
+  | Error e -> raise (H2_error.to_exception e)
 
 (* ---- frame type string ---- *)
 
@@ -445,7 +425,7 @@ let test_bad_stream_id () =
 (* ---- result boundary: read_frame returns Error (Ticket 7) ---- *)
 
 (* Read the raw [(frame, H2_error.t) result] without unwrapping. *)
-let read_result ?max_size () ic = F.read_frame ?max_size ic
+let read_result ?max_size () r = F.read_frame ?max_size r
 
 (* A frame whose declared length exceeds max_size -> Error Frame_too_large. *)
 let test_read_oversize_frame_result () =
@@ -488,29 +468,15 @@ let encode_header_raw pairs =
 let split_at s i = (String.sub s 0 i, String.sub s i (String.length s - i))
 
 let read_meta ?(max_header_list_size = 16 lsl 20) writer =
-  Lwt_main.run
-    (Net.with_timeout 10.
-       (let ic, oc = Lwt_io.pipe () in
-        let run () =
-          Lwt.bind (writer oc) (fun () ->
-              Lwt.bind (Lwt_io.close oc) (fun () ->
-                  Lwt.bind (F.read_frame ic) (fun fr ->
-                      match fr with
-                      | Ok (F.Headers (fh, h)) ->
-                          let dec =
-                            Hpack.new_decoder H2.initial_header_table_size
-                              (fun _ -> ())
-                          in
-                          Lwt.map
-                            (function
-                              | Ok mf -> mf
-                              | Error e -> raise (H2_error.to_exception e))
-                            (F.read_meta_headers ~max_header_list_size dec
-                               (fh, h) ic)
-                      | Ok _ -> Alcotest.fail "expected HEADERS"
-                      | Error e -> raise (H2_error.to_exception e))))
-        in
-        run ()))
+  let r = Test_harness.buf_read_of_string (capture writer) in
+  match F.read_frame r with
+  | Ok (F.Headers (fh, h)) -> (
+      let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
+      match F.read_meta_headers ~max_header_list_size dec (fh, h) r with
+      | Ok mf -> mf
+      | Error e -> raise (H2_error.to_exception e))
+  | Ok _ -> Alcotest.fail "expected HEADERS"
+  | Error e -> raise (H2_error.to_exception e)
 
 let field_pairs (mh : F.meta_headers_frame) =
   List.map (fun (f : Hpack.header_field) -> (f.name, f.value)) mh.fields
@@ -533,8 +499,8 @@ let test_meta_with_continuation () =
   let a, b = split_at all 1 in
   let mh =
     read_meta (fun oc ->
-        Lwt.bind (F.write_headers oc ~stream_id:1 a) (fun () ->
-            F.write_continuation oc 1 true b))
+        F.write_headers oc ~stream_id:1 a;
+        F.write_continuation oc 1 true b)
   in
   Alcotest.(check (list (pair string string)))
     "with continuation"
@@ -549,9 +515,9 @@ let test_meta_two_continuation () =
   let b, c = split_at rest 2 in
   let mh =
     read_meta (fun oc ->
-        Lwt.bind (F.write_headers oc ~stream_id:1 a) (fun () ->
-            Lwt.bind (F.write_continuation oc 1 false b) (fun () ->
-                F.write_continuation oc 1 true c)))
+        F.write_headers oc ~stream_id:1 a;
+        F.write_continuation oc 1 false b;
+        F.write_continuation oc 1 true c)
   in
   Alcotest.(check (list (pair string string)))
     "two continuation"
@@ -568,8 +534,8 @@ let test_meta_truncated () =
   let a, b = split_at all 2 in
   let mh =
     read_meta ~max_header_list_size:512 (fun oc ->
-        Lwt.bind (F.write_headers oc ~stream_id:1 a) (fun () ->
-            F.write_continuation oc 1 true b))
+        F.write_headers oc ~stream_id:1 a;
+        F.write_continuation oc 1 true b)
   in
   Alcotest.(check bool) "truncated" true mh.truncated;
   (* method(:GET=~37) + path(:/=~36) then foo/bar pairs of size 38 each until

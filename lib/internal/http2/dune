@@ -1,4 +1,4 @@
 (library
  (name httpg_http2)
  (package httpg)
- (libraries lwt lwt.unix uri httpg_base httpg_internal))
+ (libraries eio uri httpg_base httpg_internal))

@@ -1,17 +1,21 @@
 (* Port of the core file-serving path of go/src/net/http/fs.go:
-   [FileSystem]/[File]/[Dir], [ServeContent] (full-body, no ranges yet),
-   [serveFile]/[FileServer], [dirList], [toHTTPError], [localRedirect], the
-   path-cleaning + [containsDotDot] traversal guard.
+   [FileSystem]/[File]/[Dir], [ServeContent], [serveFile]/[FileServer],
+   [dirList], [toHTTPError], [localRedirect], the path-cleaning +
+   [containsDotDot] traversal guard.
 
    The conditional-request branch ([checkPreconditions] — If-Match /
    If-Unmodified-Since / If-None-Match / If-Modified-Since / If-Range, 304 / 412)
-   is fully ported (Ticket 4). The byte-range branch
-   ([parseRange]/[httpRange], 206 / multipart/byteranges / 416) is fully ported
-   (Ticket 5): a single satisfiable range yields {b 206} + [Content-Range], a
-   single body window; multiple ranges yield {b 206}
+   and the byte-range branch ([parseRange]/[httpRange], 206 / multipart/byteranges
+   / 416) are fully ported. A single satisfiable range yields {b 206} +
+   [Content-Range], a single body window; multiple ranges yield {b 206}
    [multipart/byteranges]; an unsatisfiable range yields {b 416} +
    [Content-Range: bytes */SIZE]. [If-Range] (handled in {!check_preconditions})
-   gates whether the range applies. *)
+   gates whether the range applies.
+
+   Direct-style over Eio: file IO uses the [Eio.Path] filesystem capability; a
+   regular file is opened {b once} (under a switch) and bodies stream
+   window-by-window by [pread]ing that single handle (Go keeps one [*os.File]
+   and seeks within it), closed after the body is served on every path. *)
 
 type file_info = {
   fi_name : string;  (** base name (Go [FileInfo.Name]) *)
@@ -24,13 +28,14 @@ type file_info = {
     off a [Stat]. *)
 
 type file = {
-  stat : unit -> file_info Lwt.t;  (** Go [File.Stat]. *)
-  read_window : off:int64 -> len:int -> string Lwt.t;
-      (** Read up to [len] bytes starting at byte offset [off] (a seek + read;
-          Go's [Seek]+[Read]). Returns fewer bytes only at EOF. *)
-  readdir : unit -> file_info list Lwt.t;
+  stat : unit -> file_info;  (** Go [File.Stat]. *)
+  read_window : off:int64 -> len:int -> string;
+      (** Read up to [len] bytes starting at byte offset [off] by [pread]ing the
+          single open handle (Go's [Seek]+[Read]). Returns fewer bytes only at
+          EOF. Valid until {!close}. *)
+  readdir : unit -> file_info list;
       (** Go [File.Readdir(-1)]: all directory entries. *)
-  close : unit -> unit Lwt.t;  (** Go [File.Close]. *)
+  close : unit -> unit;  (** Go [File.Close]. *)
 }
 (** Go's [http.File]: a file returned by a {!file_system}'s open, served by the
     [FileServer]. Models the [io.Closer]/[io.Reader]/[io.Seeker] + [Readdir] +
@@ -40,8 +45,7 @@ type file = {
     {!to_http_error} maps to an HTTP status ({!Invalid_unsafe_path}/{!Not_exist}
     → 404, {!Permission} → 403, {!Other} → 500) and the {!parse_range} failures
     ({!No_overlap} → 416 with [Content-Range: bytes */SIZE], {!Invalid_range} →
-    416). Replaces the previous [exn]-typed results (Resolution #3 — a breaking,
-    in-repo-only change to {!file_system}). *)
+    416). *)
 type error =
   | Invalid_unsafe_path
       (** Go's [errInvalidUnsafePath]: path escapes the root. *)
@@ -56,19 +60,17 @@ type error =
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)
 
-type file_system = {
-  open_ : string -> (file, error) result Lwt.t;  (** Go [FileSystem.Open]. *)
-}
+type file_system = { open_ : sw:Eio.Switch.t -> string -> (file, error) result }
 (** Go's [http.FileSystem]: access to a collection of named, '/'-separated
-    files. *)
+    files. The returned {!file}'s handle is opened under [sw]; it lives until
+    {!file.close} or [sw] teardown, so a regular file is read from one fd. *)
 
-val dir : string -> file_system
+val dir : Eio.Fs.dir_ty Eio.Path.t -> file_system
 (** Go's [Dir]: a {!file_system} backed by the native filesystem rooted at the
-    given directory. The open path is cleaned and
+    given [Eio.Path] directory capability. The open path is cleaned and
     {b rejected if it escapes the root} (contains a [".."] element, mirroring
     Go's [path.Clean("/"+name)] + [containsDotDot] guard). OS errors map to
-    {!Not_exist} (missing) or a permission error. An empty root is treated as
-    ["."]. *)
+    {!Not_exist} (missing) or {!Permission}. *)
 
 val contains_dot_dot : string -> bool
 (** Go's [containsDotDot]: whether the '/'- or '\'-separated path [v] has a
@@ -81,12 +83,12 @@ val to_http_error : error -> string * int
     ["500 Internal Server Error"]/500. *)
 
 val local_redirect :
-  Server.response_writer -> Body.t Request.t -> string -> unit Lwt.t
+  Server.response_writer -> Body.t Request.t -> string -> unit
 (** Go's [localRedirect]: a 301 Moved Permanently to [new_path], preserving the
     request's raw query, {b without} converting the path to absolute (unlike
     {!Server.redirect}). *)
 
-val dir_list : Server.response_writer -> Body.t Request.t -> file -> unit Lwt.t
+val dir_list : Server.response_writer -> Body.t Request.t -> file -> unit
 (** Go's [dirList]: write an HTML [<pre>] listing of the directory [f]'s entries
     as escaped links; sets [Content-Type: text/html; charset=utf-8]. *)
 
@@ -139,8 +141,8 @@ val serve_content :
   name:string ->
   modtime:float ->
   size:int64 ->
-  read_window:(off:int64 -> len:int -> string Lwt.t) ->
-  unit Lwt.t
+  read_window:(off:int64 -> len:int -> string) ->
+  unit
 (** Go's [ServeContent] core. Sets [Content-Type] (a small extension→MIME table,
     falling back to {!Sniff.detect_content_type} on the first bytes when the
     handler left it unset), [Last-Modified] (via {!Http_time.format_gmt}, unless
@@ -160,7 +162,7 @@ val serve_file :
   file_system ->
   string ->
   redirect:bool ->
-  unit Lwt.t
+  unit
 (** Go's [serveFile]: serve [name] from [fs]. Redirects [".../index.html"] to
     ["./"]; when [redirect] is set, redirects a directory URL lacking a trailing
     slash to [dir/] (and a file URL with a trailing slash to [../base]). A

@@ -20,20 +20,19 @@ end
 
 (* The http2 body abstraction (Go's io.ReadCloser body). *)
 module Body : sig
-  type t = Empty | String of string | Stream of (unit -> string option Lwt.t)
+  type t = Empty | String of string | Stream of (unit -> string option)
 
   val empty : t
   val of_string : string -> t
-  val of_stream : (unit -> string option Lwt.t) -> t
+  val of_stream : (unit -> string option) -> t
 
   (* Pull the whole body to a string (EOF at the first [None]). *)
-  val read_all : t -> string Lwt.t
+  val read_all : t -> string
 end
 
 val default_user_agent : string
 
 type client_request = {
-  creq_ctx : Httpg_base.Context.t;
   creq_meth : string;
   creq_url : Uri.t;
   creq_header : header;
@@ -54,7 +53,6 @@ type client_response = {
 }
 
 type server_request = {
-  sreq_ctx : Httpg_base.Context.t;
   sreq_proto : string;
   sreq_proto_major : int;
   sreq_proto_minor : int;
@@ -72,8 +70,8 @@ type server_request = {
 type response_writer = {
   rw_header : unit -> header;
   rw_write_header : int -> unit;
-  rw_write : string -> unit Lwt.t;
-  rw_flush : unit -> unit Lwt.t;
+  rw_write : string -> unit;
+  rw_flush : unit -> unit;
 }
 
-type handler = response_writer -> server_request -> unit Lwt.t
+type handler = response_writer -> server_request -> unit

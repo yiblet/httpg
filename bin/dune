@@ -1,4 +1,4 @@
 (executable
  (public_name httpg)
  (name main)
- (libraries httpg lwt lwt.unix))
+ (libraries httpg eio eio_main))

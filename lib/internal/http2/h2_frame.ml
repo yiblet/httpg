@@ -1,6 +1,6 @@
 (* Port of go/src/net/http/internal/http2/frame.go. The per-frame encode/decode
-   is pure over strings; thin Lwt wrappers read/write through Lwt_io channels.
-   Composes H2, H2_error and Hpack. *)
+   is pure over strings; thin direct-style wrappers read/write through
+   Eio.Buf_read/Eio.Buf_write. Composes H2, H2_error and Hpack. *)
 
 let frame_header_len = 9
 let max_frame_size = (1 lsl 24) - 1
@@ -342,47 +342,39 @@ let parse_payload fh raw_type p =
   | Some H2.Continuation -> parse_continuation fh p
   | None -> Unknown (fh, { raw_type; payload = p })
 
-(* ---- Lwt read ---- *)
+(* ---- read ---- *)
 
-let read_exactly ic n =
-  if n = 0 then Lwt.return ""
-  else
-    let b = Bytes.create n in
-    Lwt.bind (Lwt_io.read_into_exactly ic b 0 n) (fun () ->
-        Lwt.return (Bytes.unsafe_to_string b))
+let read_exactly r n = if n = 0 then "" else Eio.Buf_read.take n r
 
 (* Read a frame, raising the internal exceptions ([Frame_too_large],
    [conn_error], [Stream_error], or a clean [End_of_file]). *)
-let read_frame_raising ?(max_size = max_frame_size) ic =
-  Lwt.bind (read_exactly ic frame_header_len) (fun hdr_bytes ->
-      let fh, raw_type = decode_frame_header_raw hdr_bytes in
-      if fh.length > max_size then raise Frame_too_large
-      else
-        Lwt.bind (read_exactly ic fh.length) (fun payload ->
-            Lwt.return (parse_payload fh raw_type payload)))
+let read_frame_raising ?(max_size = max_frame_size) r =
+  let fh, raw_type =
+    decode_frame_header_raw (read_exactly r frame_header_len)
+  in
+  if fh.length > max_size then raise Frame_too_large
+  else parse_payload fh raw_type (read_exactly r fh.length)
 
 (* Public boundary: surface a unified {!H2_error.t} on an HTTP/2 framing error.
    A clean [End_of_file] (connection closed before/between frames) propagates as
    an exception, matching Go's [io.EOF] return contract. *)
-let read_frame ?(max_size = max_frame_size) ic :
-    (frame, H2_error.t) result Lwt.t =
-  Lwt.catch
-    (fun () -> Lwt.map (fun f -> Ok f) (read_frame_raising ~max_size ic))
-    (fun e ->
+let read_frame ?(max_size = max_frame_size) r : (frame, H2_error.t) result =
+  match read_frame_raising ~max_size r with
+  | f -> Ok f
+  | exception e -> (
       match h2_error_of_exception e with
-      | Some err -> Lwt.return (Error err)
-      | None -> Lwt.fail e)
+      | Some err -> Error err
+      | None -> raise e)
 
-(* ---- Lwt writers ---- *)
+(* ---- writers ---- *)
 
-(* Build a full frame (header + payload) into a string, then one write. *)
-let write_frame oc typ flags stream_id (payload : string) =
+(* Build a full frame (header + payload), then one write. *)
+let write_frame w typ flags stream_id (payload : string) =
   let length = String.length payload in
   if length >= 1 lsl 24 then raise Frame_too_large;
   let fh = { length; typ; flags; stream_id } in
-  Lwt.bind
-    (Lwt_io.write oc (encode_frame_header fh))
-    (fun () -> Lwt_io.write oc payload)
+  Eio.Buf_write.string w (encode_frame_header fh);
+  Eio.Buf_write.string w payload
 
 let write_data ?pad oc stream_id end_stream data =
   if not (valid_stream_id stream_id) then raise Invalid_stream_id;
@@ -508,7 +500,7 @@ let write_raw oc typ flags stream_id payload =
   Buffer.add_char buf (Char.chr (flags land 0xff));
   put_uint32 buf (stream_id land 0x7fffffff);
   Buffer.add_string buf payload;
-  Lwt_io.write oc (Buffer.contents buf)
+  Eio.Buf_write.string oc (Buffer.contents buf)
 
 (* ===================== read_meta_headers ===================== *)
 
@@ -638,45 +630,41 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
       (match Hpack.write_result dec frag with
       | Ok _ -> ()
       | Error e -> raise (H2_error.Compression_error e));
-      if ended then Lwt.return_unit
+      if ended then ()
       else
         (* read next frame; it MUST be a CONTINUATION on the same stream. *)
-        Lwt.bind (read_frame_raising ~max_size ic) (fun f ->
-            match f with
-            | Continuation (cfh, cf) ->
-                if cfh.stream_id <> stream_id then
-                  raise (conn_error H2_error.ProtocolError)
-                else loop cf.header_frag cf.end_headers
-            | other ->
-                let ofh = header_of_frame other in
-                ignore ofh;
-                raise (conn_error H2_error.ProtocolError))
+        match read_frame_raising ~max_size ic with
+        | Continuation (cfh, cf) ->
+            if cfh.stream_id <> stream_id then
+              raise (conn_error H2_error.ProtocolError)
+            else loop cf.header_frag cf.end_headers
+        | other ->
+            let ofh = header_of_frame other in
+            ignore ofh;
+            raise (conn_error H2_error.ProtocolError)
     end
   in
-  Lwt.bind (loop hf.header_frag hf.end_headers) (fun () ->
-      (match Hpack.close_result dec with
-      | Ok () -> ()
-      | Error e -> raise (H2_error.Compression_error e));
-      let result_fields = List.rev !fields in
-      if !invalid then
-        raise
-          (H2_error.Stream_error
-             (H2_error.stream_error stream_id H2_error.ProtocolError));
-      check_pseudos stream_id result_fields;
-      Lwt.return { fh = hf_fh; fields = result_fields; truncated = !truncated })
+  loop hf.header_frag hf.end_headers;
+  (match Hpack.close_result dec with
+  | Ok () -> ()
+  | Error e -> raise (H2_error.Compression_error e));
+  let result_fields = List.rev !fields in
+  if !invalid then
+    raise
+      (H2_error.Stream_error
+         (H2_error.stream_error stream_id H2_error.ProtocolError));
+  check_pseudos stream_id result_fields;
+  { fh = hf_fh; fields = result_fields; truncated = !truncated }
 
 (* Public boundary: surface a unified {!H2_error.t} on a meta-headers framing /
    HPACK / pseudo-header error. A clean [End_of_file] (a CONTINUATION never
    arriving) propagates as an exception, as with {!read_frame}. *)
 let read_meta_headers ?(max_size = max_frame_size)
     ?(max_header_list_size = H2.default_max_header_bytes) dec hf ic :
-    (meta_headers_frame, H2_error.t) result Lwt.t =
-  Lwt.catch
-    (fun () ->
-      Lwt.map
-        (fun mf -> Ok mf)
-        (read_meta_headers_raising ~max_size ~max_header_list_size dec hf ic))
-    (fun e ->
+    (meta_headers_frame, H2_error.t) result =
+  match read_meta_headers_raising ~max_size ~max_header_list_size dec hf ic with
+  | mf -> Ok mf
+  | exception e -> (
       match h2_error_of_exception e with
-      | Some err -> Lwt.return (Error err)
-      | None -> Lwt.fail e)
+      | Some err -> Error err
+      | None -> raise e)

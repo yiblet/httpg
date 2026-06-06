@@ -14,8 +14,9 @@ val uninitialized_pipe_write_msg : string
 type t
 (** A fiber-safe Reader/Writer pair backed by an internal {!H2_databuffer.t},
     with error/close propagation. Mirrors Go's [pipe]; a blocked {!read} awaits
-    an [Lwt_condition] that {!write}/{!close_with_error}/{!break_with_error}
-    broadcast (replacing Go's [sync.Cond]). *)
+    an [Eio.Condition.t] (via [await_no_mutex]) that
+    {!write}/{!close_with_error}/{!break_with_error} broadcast (replacing Go's
+    [sync.Cond]). *)
 
 val create : unit -> t
 (** A fresh pipe with no buffer set. Mirrors Go's zero-valued [pipe]. *)
@@ -28,9 +29,9 @@ val len : t -> int
 (** [len p] is the number of unread bytes (the recorded [unread] count once done
     reading). Mirrors [pipe.Len]. *)
 
-val read : t -> int -> string Lwt.t
-(** [read p max] resolves with up to [max] bytes once data is available. If the
-    pipe is empty it waits until a {!write}, {!close_with_error} or
+val read : t -> int -> string
+(** [read p max] returns up to [max] bytes once data is available. If the pipe
+    is empty it waits until a {!write}, {!close_with_error} or
     {!break_with_error} occurs. On close-with-error, buffered data is returned
     first and the error is raised only once drained; on break, the error is
     raised immediately. Mirrors [pipe.Read]. *)
@@ -59,6 +60,6 @@ val err : t -> exn option
 (** [err p] is the error first set by {!break_with_error} or
     {!close_with_error}. Mirrors [pipe.Err]. *)
 
-val done_ : t -> unit Lwt.t
+val done_ : t -> unit Eio.Promise.t
 (** [done_ p] is a promise resolved when the pipe is closed/broken with an
     error. Mirrors [pipe.Done]. *)

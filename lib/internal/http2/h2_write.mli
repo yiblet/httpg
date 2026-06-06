@@ -78,8 +78,7 @@ val encode_headers : Hpack.encoder -> Api.Header.t -> string list option -> unit
     names and values, and only emits [transfer-encoding: trailers]. Mirrors Go's
     [encodeHeaders]. *)
 
-val write_frame :
-  enc:Hpack.encoder -> Lwt_io.output_channel -> write_framer -> unit Lwt.t
+val write_frame : enc:Hpack.encoder -> Eio.Buf_write.t -> write_framer -> unit
 (** [write_frame ~enc oc w] serializes [w] to the channel [oc] using the
     {!H2_frame} writers, encoding any header block with [enc]. Header writers
     split large blocks into a HEADERS/PUSH_PROMISE frame plus CONTINUATION

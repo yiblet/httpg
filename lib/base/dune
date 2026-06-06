@@ -1,4 +1,3 @@
 (library
  (name httpg_base)
- (package httpg)
- (libraries lwt lwt.unix unix))
+ (package httpg))

@@ -2,28 +2,27 @@
    [serverConn] frame-read/serve loop, the [stream] state machine, flow
    control, and the response-writing path. Composes {!H2}, {!H2_error},
    {!H2_frame}, {!Hpack}, {!H2_flow}, {!H2_pipe}, {!H2_databuffer},
-   {!H2_write}, {!H2_writesched}, {!Header}, {!Request}, {!Body}, {!Uri},
-   {!Context}.
+   {!H2_write}, {!H2_writesched}, {!Api}.
 
-   To avoid a module cycle with the HTTP/1.x {!Server} (which will call this
-   module in a later ticket), [H2_server] defines its own {!response_writer}
-   and {!handler} types — structurally identical to {!Server}'s — rather than
-   depending on {!Server}.
+   To avoid a module cycle with the HTTP/1.x {!Server} (which calls this module
+   via the ALPN shim), [H2_server] uses the {!Api} (Go's api.go)
+   {!response_writer}/{!handler} types rather than depending on {!Server}.
 
-   Go's goroutine + channel concurrency is mapped onto Lwt fibers:
+   Go's goroutine + channel concurrency is mapped onto Eio fibers under one
+   [Eio.Switch] per connection:
    - The [serve] goroutine + its [select] over [readFrameCh]/[wantWriteFrameCh]/
      [wroteFrameCh]/[bodyReadCh]/[serveMsgCh] becomes one serve fiber draining a
-     single {!Lwt_stream} of {e events}; that fiber exclusively owns all the
+     single [Eio.Stream] of {e events}; that fiber exclusively owns all the
      [serverConn]/[stream] mutable state and is the sole writer of the output
-     channel (mirroring "the serve goroutine never blocks; only handlers do").
-   - The [readFrames] goroutine becomes a reader fiber that posts [Read_frame]/
-     [Read_error] events.
-   - Each handler runs in its own fiber ([Lwt.async]); it posts write requests
-     ([wantWriteFrameCh]), body-read notes ([bodyReadCh]) and a done message
-     ([handlerDoneMsg]) as events, and blocks on an {!Lwt_condition} for the
-     frame-write result (mirroring [writeDataFromHandler]'s [done] channel).
-   - Go's per-stream request {!H2_pipe} feeds the streaming {!Body}; DATA frames
-     write into it and a blocked handler read awaits the pipe's condition. *)
+     [Eio.Buf_write.t].
+   - The [readFrames] goroutine becomes a reader fiber ([Fiber.fork ~sw]) that
+     posts [Read_frame]/[Read_meta]/[Read_error] events.
+   - Each handler runs in its own fiber ([Fiber.fork ~sw]); it posts write
+     requests, body-read notes and a done message as events, and blocks on a
+     per-request reply mailbox raced ([Eio.Fiber.first]) against the
+     [done_serving] condition (mirroring [writeDataFromHandler]'s [done] chan).
+   - Releasing the connection switch cancels the reader and any in-flight
+     handler fibers (Go's [doneServing] broadcast). *)
 
 type response_writer = Api.response_writer
 (** Go's [ResponseWriter] / [Handler], defined in {!Api} (Go's api.go) so the
@@ -36,18 +35,42 @@ type handler = Api.handler
 val serve :
   ?max_concurrent_streams:int ->
   ?max_header_bytes:int ->
-  Lwt_io.input_channel ->
-  Lwt_io.output_channel ->
+  ?clock:_ Eio.Time.clock ->
+  ?idle_timeout:float ->
+  ?read_timeout:float ->
+  ?graceful:unit Eio.Promise.t ->
+  Eio.Buf_read.t ->
+  Eio.Buf_write.t ->
   handler:handler ->
-  unit Lwt.t
-(** [serve ic oc ~handler] serves a single HTTP/2 connection over the duplex
-    channel pair [(ic, oc)] (already past TLS/ALPN): it reads and validates the
+  unit
+(** [serve r w ~handler] serves a single HTTP/2 connection over the buffered
+    duplex pair [(r, w)] (already past TLS/ALPN): it reads and validates the
     client preface, sends the server's initial SETTINGS, ACKs the client's
     SETTINGS, then runs the frame-read/serve loop until the connection ends
     (clean EOF, GOAWAY drain, or a fatal error). Each fully-received request is
     dispatched to [handler] in its own fiber. Mirrors Go's [serverConn.serve].
-    Server push, RFC 9218 priority and 100-continue auto-send are out of scope
-    (see the module's execution record). Resolves when the connection is done.
+    It owns an internal [Eio.Switch]; on return the reader and all handler
+    fibers are cancelled, the request pipes broken, and any blocked handler
+    write unblocked. Server push, RFC 9218 priority and 100-continue auto-send
+    are out of scope (see the module's execution record).
+
+    Shutdown / timeouts (Go's [serverConn] [serveMsgCh] timers, gated on
+    [clock]; with no [clock] every timer is inert, matching Go's zero-duration
+    knobs):
+    - [graceful], once resolved, starts a graceful shutdown (Go's
+      [startGracefulShutdown]): GOAWAY with NO_ERROR and the last processed
+      stream id, then keep serving until all in-flight streams complete, then
+      linger [goAwayTimeout] (~1s) before closing. New streams after the GOAWAY
+      are refused. This is distinct from a {e forced} close (cancelling the conn
+      switch), which tears down in-flight streams immediately.
+    - [idle_timeout] (Go's [IdleTimeout]; 0. = off): once no streams are open,
+      arms a graceful GOAWAY after the idle period.
+    - [read_timeout] (Go's [ReadTimeout]/[SendPingTimeout] shape; 0. = off):
+      closes the connection if no frame is read within the period; reset on
+      every received frame.
+    - The first-SETTINGS ([firstSettingsTimeout], 2s) and preface
+      ([prefaceTimeout], 10s) handshake timers close a peer that never completes
+      the HTTP/2 handshake.
 
     [max_concurrent_streams] is the advertised SETTINGS_MAX_CONCURRENT_STREAMS
     (default {!default_max_concurrent_streams}). [max_header_bytes] is the
