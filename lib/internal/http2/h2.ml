@@ -104,4 +104,8 @@ let initial_max_frame_size = 16384
 let initial_header_table_size = 4096
 let default_max_read_frame_size = 1 lsl 20
 
+(* Go: DefaultMaxHeaderBytes (server.go:497), the default for the server's
+   advertised SETTINGS_MAX_HEADER_LIST_SIZE and the HPACK decode budget. *)
+let default_max_header_bytes = 1 lsl 20
+
 type setting = { id : setting_id; value : int32 }

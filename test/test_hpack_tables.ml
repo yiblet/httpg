@@ -95,6 +95,10 @@ let huffman_decode_invalid () =
     (fun s ->
       match H.decode s with
       | Error H.Invalid_huffman -> ()
+      | Error H.String_too_long ->
+          Alcotest.failf
+            "invalid huffman %s: expected Invalid_huffman, got String_too_long"
+            (to_hex s)
       | Ok _ ->
           Alcotest.failf "invalid huffman %s: expected Error, got Ok" (to_hex s))
     bad_cases
@@ -104,6 +108,7 @@ let huffman_decode_invalid () =
 let decode_invalid () =
   (match H.decode "\xff\xff\xff\xff" with
   | Error H.Invalid_huffman -> ()
+  | Error H.String_too_long -> Alcotest.fail "expected Invalid_huffman"
   | Ok _ -> Alcotest.fail "expected Error Invalid_huffman");
   let enc = H.encode "www.example.com" in
   match H.decode enc with

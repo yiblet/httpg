@@ -580,7 +580,8 @@ let check_pseudos stream_id fields =
          (H2_error.stream_error stream_id H2_error.ProtocolError))
 
 let read_meta_headers_raising ?(max_size = max_frame_size)
-    ?(max_header_list_size = 16 lsl 20) dec (hf_fh, (hf : headers_frame)) ic =
+    ?(max_header_list_size = H2.default_max_header_bytes) dec
+    (hf_fh, (hf : headers_frame)) ic =
   let stream_id = hf_fh.stream_id in
   let remain_size = ref max_header_list_size in
   let saw_regular = ref false in
@@ -658,7 +659,7 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
    HPACK / pseudo-header error. A clean [End_of_file] (a CONTINUATION never
    arriving) propagates as an exception, as with {!read_frame}. *)
 let read_meta_headers ?(max_size = max_frame_size)
-    ?(max_header_list_size = 16 lsl 20) dec hf ic :
+    ?(max_header_list_size = H2.default_max_header_bytes) dec hf ic :
     (meta_headers_frame, H2_error.t) result Lwt.t =
   Lwt.catch
     (fun () ->

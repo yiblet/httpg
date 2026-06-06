@@ -89,6 +89,11 @@ val initial_header_table_size : int
 val default_max_read_frame_size : int
 (** Default maximum read frame size. Mirrors Go's [defaultMaxReadFrameSize]. *)
 
+val default_max_header_bytes : int
+(** Default for the advertised SETTINGS_MAX_HEADER_LIST_SIZE and the HPACK
+    decode budget ([1 lsl 20]). Mirrors Go's [DefaultMaxHeaderBytes]
+    (server.go:497). *)
+
 type setting = { id : setting_id; value : int32 }
 (** A setting parameter: which setting it is, and its value. Mirrors Go's
     [Setting] struct. *)

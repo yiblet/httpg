@@ -1,13 +1,19 @@
 (* Port of golang.org/x/net/http2/hpack/huffman.go (plus the [huffmanCodes]
    and [huffmanCodeLen] arrays from tables.go). Pure, no IO. *)
 
-type error = Invalid_huffman
+type error = Invalid_huffman | String_too_long
 
-let error_to_string = function Invalid_huffman -> "invalid Huffman-coded data"
+let error_to_string = function
+  | Invalid_huffman -> "invalid Huffman-coded data"
+  | String_too_long -> "hpack: string too long"
 
 (* Internal sentinel used by the decoder loop to bail out to the [result]
    boundary. Not exposed; mapped to [Error Invalid_huffman] by {!decode}. *)
 exception Invalid_huffman_sentinel
+
+(* Go's huffmanDecode returns ErrStringLength once [maxLen] output bytes are
+   produced (huffman.go:67-68,:87-88); mapped to [Error String_too_long]. *)
+exception String_too_long_sentinel
 
 (* Go: var huffmanCodes = [256]uint32{...} (tables.go) *)
 let huffman_codes =
@@ -579,12 +585,21 @@ let build_root_huffman_node () =
 
 let root_huffman_node = lazy (build_root_huffman_node ())
 
-(* Go: huffmanDecode (maxLen = 0, i.e. unlimited). Raises the internal
-   [Invalid_huffman_sentinel] sentinel on invalid data; {!decode} maps it to a
+(* Go: huffmanDecode. If [max_len > 0], decoding errors with
+   [String_too_long_sentinel] the moment the output reaches [max_len] bytes
+   (huffman.go:67-68,:87-88) -- i.e. it never allocates more than [max_len]
+   output bytes, so an oversized compressed string cannot force a large
+   transient allocation. [max_len = 0] means unlimited. Raises the internal
+   [Invalid_huffman_sentinel] sentinel on invalid data; {!decode} maps both to a
    [result]. *)
-let huffman_decode (v : string) : string =
+let huffman_decode ?(max_len = 0) (v : string) : string =
   let root = Lazy.force root_huffman_node in
   let buf = Buffer.create (String.length v) in
+  let emit sym =
+    if max_len <> 0 && Buffer.length buf = max_len then
+      raise String_too_long_sentinel;
+    Buffer.add_char buf (Char.chr sym)
+  in
   let n = ref root in
   (* cur is the bit buffer; cbits valid low bits; sbits = symbol-prefix bits. *)
   let cur = ref 0 and cbits = ref 0 and sbits = ref 0 in
@@ -600,7 +615,7 @@ let huffman_decode (v : string) : string =
         | None -> raise Invalid_huffman_sentinel
         | Some child -> n := child);
         if is_leaf !n then begin
-          Buffer.add_char buf (Char.chr !n.sym);
+          emit !n.sym;
           cbits := !cbits - !n.code_len;
           n := root;
           sbits := !cbits
@@ -615,7 +630,7 @@ let huffman_decode (v : string) : string =
        | None -> raise Invalid_huffman_sentinel
        | Some child -> n := child);
        if (not (is_leaf !n)) || !n.code_len > !cbits then raise Exit;
-       Buffer.add_char buf (Char.chr !n.sym);
+       emit !n.sym;
        cbits := !cbits - !n.code_len;
        n := root;
        sbits := !cbits
@@ -630,9 +645,10 @@ let huffman_decode (v : string) : string =
     raise Invalid_huffman_sentinel;
   Buffer.contents buf
 
-let decode (v : string) : (string, error) result =
-  try Ok (huffman_decode v)
-  with Invalid_huffman_sentinel -> Error Invalid_huffman
+let decode ?(max_len = 0) (v : string) : (string, error) result =
+  try Ok (huffman_decode ~max_len v) with
+  | Invalid_huffman_sentinel -> Error Invalid_huffman
+  | String_too_long_sentinel -> Error String_too_long
 
 (* Go: AppendHuffmanString (starting from an empty dst). Uses 64-bit
    arithmetic faithfully via Int64; max code length is 30 so an Int64 buffer

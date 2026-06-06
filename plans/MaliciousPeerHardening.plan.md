@@ -602,7 +602,7 @@ Test Successful in 2.272s. 524 tests run.
 ---
 
 ### Ticket 9 — HTTP/2 MAX_HEADER_LIST_SIZE advertise/derive + HPACK per-string cap + Huffman bound (Case 11)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Advertise and enforce a config-derived `MAX_HEADER_LIST_SIZE` (default `1 lsl 20` to match Go, vs today's hardcoded 16 MiB), wire the HPACK per-string cap to a sane value (not the full list budget), and bound the Huffman decode so a compressed string can't force a multi-MB allocation before the post-decode check.
@@ -625,7 +625,45 @@ The server advertises `MAX_HEADER_LIST_SIZE`; a header bomb is rejected at the c
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/internal/http2/h2.ml`/`.mli`: new constant `H2.default_max_header_bytes = 1 lsl 20` (Go's `DefaultMaxHeaderBytes`, server.go:497), used as the default advertised `SETTINGS_MAX_HEADER_LIST_SIZE` and the HPACK decode budget.
+- `lib/internal/http2/h2_server.ml`/`.mli`: `serve` gains `?max_header_bytes` (default `H2.default_max_header_bytes`; a non-positive value falls back to the default — mirrors Go's `serverConn.maxHeaderListSize`, server.go:499-505). New `server_conn.adv_max_header_list_size` field. The initial SETTINGS frame now includes `{ id = Max_header_list_size; value = adv_max_header_list_size }` (placed after `Max_concurrent_streams`, matching server.go:774-779). The `read_meta_headers` call in `read_loop` now passes `~max_header_list_size:sc.adv_max_header_list_size` (was using the function's default).
+- `lib/internal/http2/h2_frame.ml`/`.mli`: `read_meta_headers`/`read_meta_headers_raising` default for `?max_header_list_size` changed from `16 lsl 20` to `H2.default_max_header_bytes` (`1 lsl 20`) — the **divergence-from-Go correction** (Go's default is 1 MiB, not 16 MiB). The decoder per-string cap is still wired to `max_header_list_size` via `Hpack.set_max_string_length` — this is faithful: Go sets `SetMaxStringLength(maxHeaderStringLen())` where `maxHeaderStringLen() == maxHeaderListSize()` (frame.go:1697-1704,:1722). The `.mli` doc that wrongly claimed "16MB (Go's default)" was corrected.
+- `lib/internal/http2/hpack_huffman.ml`/`.mli`: `decode` gains `?max_len`; `huffman_decode` now errors with the new `String_too_long` variant the moment the output buffer reaches `max_len` bytes (Go's `huffmanDecode(buf, maxLen, v)`, huffman.go:49,:67-68,:87-88), so an oversized compressed string is rejected **without** a large transient allocation. `error` gains `String_too_long` (Go's `ErrStringLength`).
+- `lib/internal/http2/hpack.ml`: `decode_string` now passes `~max_len:d.max_str_len` to `Huff.decode` and maps `String_too_long` to the existing `String_too_long_sentinel` (→ `Hpack.String_too_long` at the boundary, faithful to Go hpack.go:516). Removed the stale comment flagging the unbounded Huffman path.
+- `lib/server.ml`: the public `Server`'s `max_header_bytes` (the T2 field, default `1 lsl 20`) is now threaded into `Gohttp_http2.H2_server.serve ~max_header_bytes` at the ALPN "h2" boundary — so the same server knob derives both the h1 head budget and the h2 `MAX_HEADER_LIST_SIZE`, mirroring Go (`sc.maxHeaderListSize()` derives from `sc.hs.MaxHeaderBytes()`, server.go:499-505). Public wiring is NOT deferred.
+- `test/test_hpack_tables.ml`: existing exhaustive matches on `Hpack_huffman.error` extended for the new `String_too_long` arm (both treat it as an unexpected failure for those invalid-Huffman cases).
+- `test/test_abuse.ml`: three new tests (below).
+
+**Open question resolution (recorded)**
+- **Per-string vs list-size relationship:** kept per-string cap == list cap, which is exactly Go (`maxHeaderStringLen() == maxHeaderListSize()`, frame.go:1697-1704). The plan's "mis-wired to 16 MiB" was really a **wrong default** (16 MiB vs Go's 1 MiB), not a wrong *relationship*. Fixed the default to `1 lsl 20`. The cap is now derived from the configurable `max_header_bytes` (Go derives it from `MaxHeaderBytes()`), so the two remain a single source of truth, faithfully, rather than two unrelated constants.
+- **Bound Huffman by length vs tightened post-decode check:** chose to **bound the Huffman decode by length** (`?max_len`), matching Go's `huffmanDecode(buf, maxLen, v)` exactly — it errors at the moment the output reaches `maxLen`, so the transient allocation is bounded by `maxLen` and never the full decompressed size. A post-decode check would have allowed an unbounded transient allocation first (the very OOM this ticket closes), so it was rejected.
+- **Chosen values:** list size (and thus per-string cap) default = `1 lsl 20` (1 MiB), matching Go's `DefaultMaxHeaderBytes`. This is the safe, faithful gohttp default; it is configurable per-server via `Server.create ~max_header_bytes` / `H2_server.serve ~max_header_bytes`.
+
+**Precedent followed**
+- **Initial-SETTINGS construction + `Max_header_list_size` setting-id handling** (h2_server.ml `serve`, and the SETTINGS write path): added the advertised setting alongside the existing `Max_frame_size`/`Max_concurrent_streams`/... entries, not as a new subsystem. **Verified against Go** (server.go:774-779): Go advertises `SettingMaxHeaderListSize, sc.maxHeaderListSize()` in its initial `writeSettings`. Faithful.
+- **CONTINUATION-flood `2*remainSize` bound** (h2_frame.ml `read_meta_headers_raising` loop): the incremental list-size enforcement was already present and faithful (`frag > 2 * !remain_size -> ProtocolError`, frame.go:1774); I only corrected its *default* budget. No logic correction needed there.
+- **Sentinel→boundary error idiom in `hpack.ml`** (`String_too_long_sentinel` → `Hpack.String_too_long`): the new Huffman `String_too_long` rides the existing `error_of_exception` boundary exactly like `Invalid_huffman`. Faithful to Go's `ErrStringLength` propagation (hpack.go:516).
+- **Correction made:** the `read_meta_headers` default of `16 lsl 20` (and its `.mli` doc claiming that was "Go's default") diverged from Go's actual 1 MiB default — corrected to `H2.default_max_header_bytes` and the doc fixed, per the workflow's "fix the precedent if it diverges" rule.
+
+**Tests added** (`test/test_abuse.ml`)
+- `advertises_max_header_list_size`: starts `H2_server.serve ~max_header_bytes:4096` over the in-memory pipe harness, reads the server's first SETTINGS frame, asserts a `Max_header_list_size` entry with value `4096`.
+- `rejects_header_list_bomb`: `~max_header_bytes:256`; sends one HEADERS frame carrying a ~4 KiB header value; asserts the server GOAWAYs with `PROTOCOL_ERROR` (the assembled fragment exceeds `2 * remain_size`, frame.go:1774).
+- `huffman_string_cap`: an HPACK unit test — hand-builds a literal-header-without-indexing wire block whose value is a Huffman-coded run that decodes to `cap+8` bytes while the *encoded* wire form stays `<= cap` (so the encoded-length check passes and the cap must be enforced during Huffman decode); feeds it to a decoder with `set_max_string_length cap`; asserts `Error Hpack.String_too_long`.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  19   too_many_early_resets.
+  [OK]          Abuse                  20   advertises_max_header_list_size.
+  [OK]          Abuse                  21   rejects_header_list_bomb.
+  [OK]          Abuse                  22   huffman_string_cap.
+
+Test Successful in 2.249s. 527 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (527 tests: 524 prior + 3 new).
+
+**Commit:** `qrttunxr` (`feat(h2): advertise/derive MAX_HEADER_LIST_SIZE + bound HPACK strings`).
 
 ---
 

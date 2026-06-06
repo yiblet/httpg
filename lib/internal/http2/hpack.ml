@@ -299,15 +299,16 @@ let call_emit d hf =
     then raise String_too_long_sentinel;
   if d.emit_enabled then d.emit hf
 
-(* Go: decodeString *)
-let decode_string _d u =
+(* Go: decodeString. Passes maxStrLen to huffmanDecode (hpack.go:516) so an
+   oversized compressed string errors with ErrStringLength once max_str_len
+   output bytes are produced, without a large transient allocation. *)
+let decode_string d u =
   if not u.is_huff then u.b
   else
-    (* Go passes maxStrLen to huffmanDecode; our Huffman decoder is the
-       maxLen=0 path. Enforce length post-decode in readString/callEmit. *)
-    match Huff.decode u.b with
+    match Huff.decode ~max_len:d.max_str_len u.b with
     | Ok s -> s
     | Error Hpack_huffman.Invalid_huffman -> raise Invalid_huffman_sentinel
+    | Error Hpack_huffman.String_too_long -> raise String_too_long_sentinel
 
 (* Go: readString. Returns Ok (undecoded, next_pos) or Error error; raises
    {!Need_more} on truncation. *)

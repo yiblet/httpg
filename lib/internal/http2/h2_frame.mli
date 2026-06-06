@@ -224,6 +224,12 @@ val read_meta_headers :
     field names/values, and returns [Error] with the unified {!H2_error.t}
     faithfully ([Connection _] / [Stream _], and [Compression e] wrapping the
     underlying {!Hpack.error} on a header-block decode failure). Mirrors Go's
-    [Framer.readMetaFrame]. [max_header_list_size] defaults to 16MB (Go's
-    default). A clean EOF (a CONTINUATION never arriving) propagates as
-    [End_of_file]. *)
+    [Framer.readMetaFrame]. [max_header_list_size] caps the decoded header-list
+    size and is also wired to the decoder's per-string cap via
+    [Hpack.set_max_string_length] (Go's
+    [SetMaxStringLength(maxHeaderStringLen())] where
+    [maxHeaderStringLen() == maxHeaderListSize()], frame.go:1697-1722); it
+    defaults to {!H2.default_max_header_bytes} ([1 lsl 20], Go's
+    [DefaultMaxHeaderBytes]). A fragment more than twice the remaining budget,
+    or a list exceeding the budget, is rejected as a connection [ProtocolError].
+    A clean EOF (a CONTINUATION never arriving) propagates as [End_of_file]. *)

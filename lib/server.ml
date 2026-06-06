@@ -1079,7 +1079,7 @@ let serve_tls_conn ?(timeouts = no_timeouts)
   | Some "h2" ->
       Lwt.finalize
         (fun () ->
-          Gohttp_http2.H2_server.serve ic oc
+          Gohttp_http2.H2_server.serve ~max_header_bytes ic oc
             ~handler:(h2_handler_of_handler handler))
         (fun () ->
           Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)

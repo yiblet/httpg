@@ -35,6 +35,7 @@ type handler = Api.handler
 
 val serve :
   ?max_concurrent_streams:int ->
+  ?max_header_bytes:int ->
   Lwt_io.input_channel ->
   Lwt_io.output_channel ->
   handler:handler ->
@@ -49,7 +50,12 @@ val serve :
     (see the module's execution record). Resolves when the connection is done.
 
     [max_concurrent_streams] is the advertised SETTINGS_MAX_CONCURRENT_STREAMS
-    (default {!default_max_concurrent_streams}). *)
+    (default {!default_max_concurrent_streams}). [max_header_bytes] is the
+    advertised SETTINGS_MAX_HEADER_LIST_SIZE and the HPACK decode budget
+    (incoming HEADERS/CONTINUATION blocks exceeding it are rejected as a
+    connection [ProtocolError]); a non-positive value falls back to the default
+    {!H2.default_max_header_bytes} ([1 lsl 20]), mirroring Go's
+    [serverConn.maxHeaderListSize] (server.go:499-505,:778). *)
 
 val default_max_concurrent_streams : int
 (** The default advertised SETTINGS_MAX_CONCURRENT_STREAMS. Mirrors Go's

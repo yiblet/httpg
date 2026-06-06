@@ -88,6 +88,9 @@ type server_conn = {
   write_sched : H2_writesched.t;
   streams : (int, stream) Hashtbl.t;
   adv_max_streams : int;
+  adv_max_header_list_size : int;
+      (* advertised SETTINGS_MAX_HEADER_LIST_SIZE; also the HPACK decode budget.
+       Go's sc.maxHeaderListSize() (server.go:499-505). *)
   mutable saw_first_settings : bool;
   mutable need_to_send_settings_ack : bool;
   mutable unacked_settings : int;
@@ -1095,7 +1098,9 @@ let rec read_loop sc : unit Lwt.t =
             Lwt.map
               (function
                 | Ok mf -> mf | Error e -> raise (H2_error.to_exception e))
-              (H2_frame.read_meta_headers sc.dec (fh, hf) sc.ic)
+              (H2_frame.read_meta_headers
+                 ~max_header_list_size:sc.adv_max_header_list_size sc.dec
+                 (fh, hf) sc.ic)
           in
           sc.push_event (Some (Read_meta mf));
           read_loop sc
@@ -1217,8 +1222,9 @@ let read_preface sc : bool Lwt.t =
       Lwt.return (Bytes.to_string buf = H2.client_preface))
     (fun _ -> Lwt.return false)
 
-let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
-    ~handler : unit Lwt.t =
+let serve ?(max_concurrent_streams = default_max_concurrent_streams)
+    ?(max_header_bytes = H2.default_max_header_bytes) ic oc ~handler :
+    unit Lwt.t =
   let open Lwt.Syntax in
   let events, push_event = Lwt_stream.create () in
   let flow = H2_flow.create_outflow () in
@@ -1240,6 +1246,9 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
       write_sched = H2_writesched.create ();
       streams = Hashtbl.create 16;
       adv_max_streams = max_concurrent_streams;
+      adv_max_header_list_size =
+        (if max_header_bytes <= 0 then H2.default_max_header_bytes
+         else max_header_bytes);
       saw_first_settings = false;
       need_to_send_settings_ack = false;
       unacked_settings = 0;
@@ -1269,6 +1278,10 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams) ic oc
       {
         H2.id = H2.Max_concurrent_streams;
         value = Int32.of_int max_concurrent_streams;
+      };
+      {
+        H2.id = H2.Max_header_list_size;
+        value = Int32.of_int sc.adv_max_header_list_size;
       };
       {
         H2.id = H2.Initial_window_size;

@@ -3,8 +3,10 @@
 
    Pure HPACK Huffman codec. No IO. *)
 
-(** A handleable Huffman-decode error. Mirrors Go's [ErrInvalidHuffman]. *)
-type error = Invalid_huffman
+(** A handleable Huffman-decode error. [Invalid_huffman] mirrors Go's
+    [ErrInvalidHuffman]; [String_too_long] mirrors Go's [ErrStringLength]
+    (raised when the decoded output would exceed the configured maximum). *)
+type error = Invalid_huffman | String_too_long
 
 val error_to_string : error -> string
 (** Renders {!error} as a human-readable string. *)
@@ -19,8 +21,11 @@ val encoded_len : string -> int
     Huffman codes, rounded up to a byte boundary. Mirrors Go's
     [HuffmanEncodeLength]. *)
 
-val decode : string -> (string, error) result
-(** [decode s] decodes the Huffman-encoded bytes in [s], validating the EOS
-    padding, and returns the expanded bytes. Returns [Error Invalid_huffman] on
-    invalid data (incomplete symbol, overlong padding, or non-EOS-prefix
-    trailing bits). Mirrors Go's [HuffmanDecodeToString] / [huffmanDecode]. *)
+val decode : ?max_len:int -> string -> (string, error) result
+(** [decode ?max_len s] decodes the Huffman-encoded bytes in [s], validating the
+    EOS padding, and returns the expanded bytes. Returns [Error Invalid_huffman]
+    on invalid data (incomplete symbol, overlong padding, or non-EOS-prefix
+    trailing bits). When [max_len > 0], decoding stops with
+    [Error String_too_long] the moment the output would exceed [max_len] bytes,
+    bounding the transient allocation (default [0] = unlimited). Mirrors Go's
+    [HuffmanDecodeToString] / [huffmanDecode]. *)

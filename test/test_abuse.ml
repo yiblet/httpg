@@ -917,6 +917,150 @@ let too_many_early_resets () =
     "GOAWAY error code is ENHANCE_YOUR_CALM" true
     (code = H2_error.EnhanceYourCalm)
 
+(* Ticket 9 (Case 11): HTTP/2 MAX_HEADER_LIST_SIZE advertise/derive + HPACK
+   per-string cap + Huffman bound. Refs: server.go:497-505,:778; frame.go:1716,
+   :1722,:1774; hpack/hpack.go:84,:122,:488,:516. *)
+module Huff = Gohttp_http2.Hpack_huffman
+
+(* Read the server's first SETTINGS frame off the wire. *)
+let rec read_first_settings ic =
+  F.read_frame ic >>= function
+  | Ok (F.Settings (_, sf)) -> Lwt.return sf
+  | Ok _ -> read_first_settings ic
+  | Error e -> raise (H2_error.to_exception e)
+
+(* TestH2AdvertisesMaxHeaderListSize: the server's initial SETTINGS frame
+   contains a MAX_HEADER_LIST_SIZE entry equal to the configured value
+   (server.go:778). *)
+let advertises_max_header_list_size () =
+  let configured = 4096 in
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    rw.Api.rw_flush ()
+  in
+  let value =
+    Lwt_main.run
+      (Net.with_timeout 10.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server =
+            S.serve ~max_header_bytes:configured s_ic s_oc ~handler
+          in
+          (* The server sends its initial SETTINGS before reading the preface. *)
+          read_first_settings c_ic >>= fun sf ->
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () ->
+          let v =
+            List.find_opt
+              (fun (s : H2.setting) -> s.id = H2.Max_header_list_size)
+              sf.settings
+          in
+          Lwt.return (Option.map (fun (s : H2.setting) -> s.value) v)))
+  in
+  Alcotest.(check (option int32))
+    "advertised MAX_HEADER_LIST_SIZE = configured value"
+    (Some (Int32.of_int configured))
+    value
+
+(* TestH2RejectsHeaderListBomb: a HEADERS block whose decoded header list
+   exceeds the configured size is a connection PROTOCOL_ERROR (GOAWAY).
+   frame.go:1774 ("frag more than twice the remaining header list bytes"). *)
+let rejects_header_list_bomb () =
+  let configured = 256 in
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    rw.Api.rw_flush ()
+  in
+  (* One header whose value is ~4 KiB: the assembled fragment far exceeds
+     2 * max_header_list_size, tripping the PROTOCOL_ERROR connection error. *)
+  let bomb_block =
+    h2_encode_block
+      [
+        (":method", "GET");
+        (":path", "/");
+        (":scheme", "https");
+        (":authority", "example.com");
+        ("x-bomb", String.make 4096 'a');
+      ]
+  in
+  let code =
+    Lwt_main.run
+      (Net.with_timeout 15.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server =
+            S.serve ~max_header_bytes:configured s_ic s_oc ~handler
+          in
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          F.write_settings c_oc [] >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          F.write_headers c_oc ~stream_id:1 ~end_stream:true ~end_headers:true
+            bomb_block
+          >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          read_until_goaway c_ic >>= fun code ->
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () -> Lwt.return code))
+  in
+  Alcotest.(check bool)
+    "GOAWAY error code is PROTOCOL_ERROR" true
+    (code = H2_error.ProtocolError)
+
+(* TestH2HuffmanStringCap: a Huffman-coded string whose DECODED length exceeds
+   the decoder's per-string cap is rejected with the ErrStringLength-equivalent
+   (hpack.go:516, huffman.go:67-68) without a large transient allocation. Driven
+   as an HPACK unit test: build a literal-header-without-indexing wire block with
+   a Huffman-coded value, feed it to a decoder with a small max string length. *)
+let huffman_string_cap () =
+  let cap = 64 in
+  (* 'a' is a 5-bit code in the HPACK static Huffman table, so a run of 'a's
+     compresses to ~5/8 of its length on the wire. We want the DECODED length to
+     exceed [cap] while the ENCODED wire length stays <= [cap], so the
+     encoded-length check in [read_string] passes and the cap must instead be
+     enforced during Huffman decode. [cap + 8] bytes decoded -> ~45 wire bytes. *)
+  let decoded = String.make (cap + 8) 'a' in
+  let huff = Huff.encode decoded in
+  (* The encoded wire form is shorter than the decoded length, so [read_string]'s
+     encoded-length check (str_len > max_str_len) does NOT trip; the cap must be
+     enforced during Huffman decode. *)
+  Alcotest.(check bool)
+    "encoded wire string is within the per-string cap (so the encoded-length \
+     check alone would pass)"
+    true
+    (String.length huff <= cap);
+  let buf = Buffer.create 64 in
+  (* Literal Header Field without Indexing, new name (RFC 7541 6.2.2):
+     first byte 0x00 (pattern 0000, 4-bit name index 0). *)
+  Buffer.add_char buf '\x00';
+  (* name string: not Huffman, length 1, "x". *)
+  Hpack.append_var_int buf 7 1;
+  Buffer.add_char buf 'x';
+  (* value string: Huffman flag (0x80) | 7-bit length varint, then bytes. *)
+  let len_buf = Buffer.create 8 in
+  Hpack.append_var_int len_buf 7 (String.length huff);
+  let len_bytes = Buffer.contents len_buf in
+  (* set the Huffman flag on the first length byte. *)
+  let first = Char.code len_bytes.[0] lor 0x80 in
+  Buffer.add_char buf (Char.chr first);
+  Buffer.add_substring buf len_bytes 1 (String.length len_bytes - 1);
+  Buffer.add_string buf huff;
+  let block = Buffer.contents buf in
+  let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
+  Hpack.set_max_string_length dec cap;
+  let result =
+    match Hpack.write_result dec block with
+    | Error e -> Error e
+    | Ok _ -> Hpack.close_result dec
+  in
+  match result with
+  | Error Gohttp_http2.Hpack.String_too_long -> ()
+  | Error e ->
+      Alcotest.failf "expected String_too_long, got %s"
+        (Gohttp_http2.Hpack.error_to_string e)
+  | Ok () -> Alcotest.fail "expected String_too_long, got Ok"
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -952,4 +1096,9 @@ let tests =
     Alcotest.test_case "redirect_referer_https_to_http" `Quick
       redirect_referer_https_to_http;
     Alcotest.test_case "too_many_early_resets" `Quick too_many_early_resets;
+    Alcotest.test_case "advertises_max_header_list_size" `Quick
+      advertises_max_header_list_size;
+    Alcotest.test_case "rejects_header_list_bomb" `Quick
+      rejects_header_list_bomb;
+    Alcotest.test_case "huffman_string_cap" `Quick huffman_string_cap;
   ]
