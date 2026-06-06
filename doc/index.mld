@@ -1,0 +1,123 @@
+{0 gohttp}
+
+A faithful 1:1 OCaml port of Go's [net/http] — HTTP/1.0, HTTP/1.1, and HTTP/2
+(over TLS via ALPN), client and server. Written directly against Lwt.
+
+The public API lives in the {!module:Gohttp} library; types and function names
+mirror Go's, so the Go documentation doubles as a reference.
+
+{1 Creating a server}
+
+Register handlers on a {!Gohttp.Server.serve_mux} and serve them. A handler
+writes its response through the {!Gohttp.Server.response_writer} ([write_header]
+sets the status; [write] streams the body).
+
+{[
+open Lwt.Infix
+open Gohttp
+
+let () =
+  let mux = Server.new_serve_mux () in
+  Result.get_ok
+    (Server.handle_func mux "/hello" (fun w _req ->
+         w.write_header 200;
+         w.write "Hello, world\n"));
+  Lwt_main.run
+    (Server.listen_and_serve ~addr:"127.0.0.1" ~port:8080
+       (Server.serve_mux_handler mux))
+]}
+
+For more control (timeouts, max header bytes), build a {!Gohttp.Server.t} with
+{!Gohttp.Server.create} — the analogue of Go's custom [http.Server]:
+
+{[
+let srv =
+  Server.create ~addr:"127.0.0.1" ~port:8080 ~read_timeout:10.
+    ~write_timeout:10. ~max_header_bytes:(1 lsl 20)
+    (Server.serve_mux_handler mux)
+]}
+
+HTTPS with HTTP/2 (negotiated via ALPN) is {!Gohttp.Server.listen_and_serve_tls}.
+
+{1 Running a request}
+
+{!Gohttp.Client.default_client} is the ready-to-use client (Go's
+[http.DefaultClient]). {b The response body streams} — consume it to EOF with
+{!Gohttp.Body.read_all} or {!Gohttp.Body.drain} to release the connection back
+to the pool (the analogue of Go's [resp.Body.Close]).
+
+{[
+open Lwt.Infix
+open Gohttp
+
+let () =
+  Lwt_main.run
+    (Client.get Client.default_client "http://example.com/" >>= fun resp ->
+     Body.read_all resp.body >|= fun body ->
+     Printf.printf "%d\n%s" resp.status_code body)
+]}
+
+POST a body with a content type, or POST form values:
+
+{[
+(* POST raw bytes *)
+Client.post c "http://example.com/upload" ~content_type:"image/jpeg"
+  (Body.of_string data)
+
+(* POST application/x-www-form-urlencoded *)
+let form = Values.create () in
+Values.set form "key" "Value";
+Values.set form "id" "123";
+Client.post c "http://example.com/form"
+  ~content_type:"application/x-www-form-urlencoded"
+  (Body.of_string (Values.encode form))
+]}
+
+For control over headers, redirect policy, TLS, and timeouts, build a
+{!Gohttp.Client.t} with {!Gohttp.Client.create} and send a hand-built request
+with {!Gohttp.Client.do_}:
+
+{[
+let c = Client.create ~timeout:10. () in
+let req = Client.make_request "GET" "http://example.com" in
+Header.add req.header "If-None-Match" {|W/"wyzzy"|};
+Lwt_main.run (Client.do_ c req)
+]}
+
+{1 Testing your server}
+
+{!Gohttp.Httptest} mirrors Go's [net/http/httptest].
+
+{!Gohttp.Httptest.Server} is an ephemeral loopback server (http or TLS) with a
+preconfigured client — start it, hit it, close it:
+
+{[
+open Lwt.Infix
+open Gohttp
+
+let () =
+  Lwt_main.run
+    (Httptest.Server.new_server my_handler >>= fun srv ->
+     let c = Httptest.Server.client srv in
+     Client.get c (Httptest.Server.url srv ^ "/hello") >>= fun resp ->
+     Body.read_all resp.body >>= fun body ->
+     assert (resp.status_code = 200 && body = "Hello, world\n");
+     Httptest.Server.close srv)
+]}
+
+To unit-test a handler in memory without a socket, use
+{!Gohttp.Httptest.Response_recorder}:
+
+{[
+let rec_ = Httptest.Response_recorder.create () in
+let w = Httptest.Response_recorder.to_response_writer rec_ in
+Lwt_main.run (my_handler.Server.serve_http w req);
+assert (Httptest.Response_recorder.code rec_ = 200);
+assert (Httptest.Response_recorder.body_string rec_ = "Hello, world\n")
+]}
+
+{1 HTTP/2}
+
+HTTP/2 support is transparent: {!Gohttp.Server.listen_and_serve_tls} and the
+default {!Gohttp.Transport.t} negotiate ["h2"] over TLS via ALPN, falling back
+to HTTP/1.1 automatically. Plaintext [http] always uses HTTP/1.x.
