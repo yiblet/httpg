@@ -41,6 +41,10 @@ type error =
       (** embedded framing error from {!Transfer.read_transfer} *)
   | Unexpected_eof
       (** clean EOF before a full message (Go's [io.ErrUnexpectedEOF]) *)
+  | Request_too_large
+      (** the request status line + header block exceeded the bounded read
+          budget (Go's [errTooLarge], server.go:998); the server answers
+          [431 Request Header Fields Too Large] and closes *)
 
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)
@@ -52,12 +56,20 @@ val read_mime_header : Lwt_io.input_channel -> (Header.t, error) result Lwt.t
     [Error (Protocol _)]. *)
 
 val read_request :
-  Lwt_io.input_channel -> (Body.t Request.t, error) result Lwt.t
-(** [read_request ic] is [ReadRequest]: parse the request line, headers (Host
-    promoted to [host] and deleted from the header map), and body framing from
-    [ic]. The body is a streaming {!Body.Stream} reading lazily from [ic]; it is
-    not buffered. Consume it to EOF ({!Body.read_all}/{!Body.drain}) to reach
-    the next message boundary and populate any chunked trailer.
+  ?max_header_bytes:int ->
+  Lwt_io.input_channel ->
+  (Body.t Request.t, error) result Lwt.t
+(** [read_request ?max_header_bytes ic] is [ReadRequest]: parse the request
+    line, headers (Host promoted to [host] and deleted from the header map), and
+    body framing from [ic]. The body is a streaming {!Body.Stream} reading
+    lazily from [ic]; it is not buffered. Consume it to EOF
+    ({!Body.read_all}/{!Body.drain}) to reach the next message boundary and
+    populate any chunked trailer.
+
+    [max_header_bytes] bounds the request line + header block cumulatively
+    against [max_header_bytes + 4096] bytes (Go's [initialReadLimitSize], the
+    "bufio slop", server.go:929); exceeding it short-circuits as
+    [Error Request_too_large]. Omitting it leaves the head read unbounded.
 
     Header / initial-parse errors short-circuit as [Error]; see {!error} for the
     mid-stream policy. *)

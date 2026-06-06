@@ -102,6 +102,7 @@ val create :
   ?read_header_timeout:float ->
   ?write_timeout:float ->
   ?idle_timeout:float ->
+  ?max_header_bytes:int ->
   handler ->
   t
 (** [create ?addr ?port handler] builds a server bound to [addr]:[port].
@@ -123,7 +124,13 @@ val create :
 
     The timeouts are implemented as child {!Gohttp_base.Context} deadlines
     derived off the per-connection context (Lwt_io channels expose no socket
-    deadline, unlike Go's [SetReadDeadline]/[SetWriteDeadline]). *)
+    deadline, unlike Go's [SetReadDeadline]/[SetWriteDeadline]).
+
+    [max_header_bytes] is Go's [Server.MaxHeaderBytes] (server.go:920-929): the
+    request line + header block is bounded cumulatively against
+    [max_header_bytes + 4096] bytes ("bufio slop"); a request exceeding it is
+    answered [431 Request Header Fields Too Large] and the connection closed.
+    Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB), as in Go. *)
 
 val close : t -> unit Lwt.t
 (** Minimal [Server.Close]: stop accepting and close the listening socket. *)
@@ -142,6 +149,7 @@ val listen_and_serve_started :
   ?read_header_timeout:float ->
   ?write_timeout:float ->
   ?idle_timeout:float ->
+  ?max_header_bytes:int ->
   addr:string ->
   port:int ->
   handler ->
@@ -149,7 +157,7 @@ val listen_and_serve_started :
 (** Like {!listen_and_serve} but binds first and returns the running [Server.t],
     the bound port (useful when [port = 0] selects an ephemeral port) and the
     serve loop promise — so tests can connect and {!close}. The four optional
-    duration knobs are forwarded to {!create}. *)
+    duration knobs and [max_header_bytes] are forwarded to {!create}. *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 

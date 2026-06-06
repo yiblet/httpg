@@ -140,9 +140,131 @@ let idle_timeout () =
     (Printf.sprintf "idle connection closed (%.3fs)" elapsed)
     true (elapsed < 1.5)
 
+(* Read the response status line (the first CRLF-terminated line) off [ic], or
+   "" if the server hung up first. *)
+let read_status_line ic =
+  let rec loop acc =
+    Lwt_io.read ~count:1 ic >>= fun c ->
+    if c = "" then Lwt.return acc
+    else if c = "\n" then Lwt.return acc
+    else loop (acc ^ c)
+  in
+  loop "" >>= fun line ->
+  (* Strip a trailing CR. *)
+  let n = String.length line in
+  if n > 0 && line.[n - 1] = '\r' then Lwt.return (String.sub line 0 (n - 1))
+  else Lwt.return line
+
+(* TestServerRequestHeaderTooLarge (Go's errTooLarge -> 431, server.go:2053-2062;
+   the initialReadLimitSize bound, :929,:1024): a request whose header block
+   exceeds [max_header_bytes] is answered [431 Request Header Fields Too Large]
+   and the connection closed. *)
+let request_header_too_large () =
+  let run () =
+    Server.listen_and_serve_started ~max_header_bytes:8192 ~addr:"127.0.0.1"
+      ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        (* Request line + a header block well over the 8 KiB limit (+4096 slop):
+           many filler header lines summing to ~32 KiB. *)
+        Lwt_io.write oc "GET / HTTP/1.1\r\nHost: localhost\r\n" >>= fun () ->
+        let filler = String.make 200 'x' in
+        let rec write_fillers i =
+          if i >= 160 then Lwt.return_unit
+          else
+            Lwt_io.write oc (Printf.sprintf "X-Filler-%d: %s\r\n" i filler)
+            >>= fun () -> write_fillers (i + 1)
+        in
+        write_fillers 0 >>= fun () ->
+        Lwt_io.write oc "\r\n" >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_status_line ic >>= fun status ->
+        (* Drain to confirm the connection is closed. *)
+        wait_for_eof ic >>= fun elapsed ->
+        Lwt_io.close oc >>= fun () -> Lwt.return (status, elapsed))
+      (fun () -> Server.close srv)
+  in
+  let status, elapsed = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "431 status line (%S)" status)
+    true
+    (match Str.search_forward (Str.regexp_string "431") status 0 with
+    | _ -> true
+    | exception Not_found -> false);
+  Alcotest.(check bool)
+    (Printf.sprintf "connection closed (%.3fs)" elapsed)
+    true (elapsed < 1.5)
+
+(* TestServerRequestLineTooLong: a single request line exceeding the limit is
+   itself caught by the cumulative budget (server.go:929,:1024) -> 431. *)
+let request_line_too_long () =
+  let run () =
+    Server.listen_and_serve_started ~max_header_bytes:8192 ~addr:"127.0.0.1"
+      ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        (* One enormous request line (a long URI) past the 8 KiB + 4096 budget. *)
+        let long_uri = "/" ^ String.make 20000 'a' in
+        Lwt_io.write oc (Printf.sprintf "GET %s HTTP/1.1\r\n" long_uri)
+        >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_status_line ic >>= fun status ->
+        wait_for_eof ic >>= fun elapsed ->
+        Lwt_io.close oc >>= fun () -> Lwt.return (status, elapsed))
+      (fun () -> Server.close srv)
+  in
+  let status, elapsed = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "431 status line (%S)" status)
+    true
+    (match Str.search_forward (Str.regexp_string "431") status 0 with
+    | _ -> true
+    | exception Not_found -> false);
+  Alcotest.(check bool)
+    (Printf.sprintf "connection closed (%.3fs)" elapsed)
+    true (elapsed < 1.5)
+
+(* TestServerHeadersUnderLimitOk: a normal request comfortably under the limit
+   is served 200 — the bound must not produce false positives. *)
+let headers_under_limit_ok () =
+  let run () =
+    Server.listen_and_serve_started ~max_header_bytes:8192 ~addr:"127.0.0.1"
+      ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        Lwt_io.write oc
+          "GET / HTTP/1.1\r\nHost: localhost\r\nX-Small: ok\r\n\r\n"
+        >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_one_response ic >>= fun resp ->
+        Lwt_io.close oc >>= fun () -> Lwt.return resp)
+      (fun () -> Server.close srv)
+  in
+  let resp = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "served 200 (%S)"
+       (String.sub resp 0 (min 20 (String.length resp))))
+    true
+    (match Str.search_forward (Str.regexp_string "200 OK") resp 0 with
+    | _ -> true
+    | exception Not_found -> false)
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
       slowloris_header_timeout;
     Alcotest.test_case "idle_timeout" `Quick idle_timeout;
+    Alcotest.test_case "request_header_too_large" `Quick
+      request_header_too_large;
+    Alcotest.test_case "request_line_too_long" `Quick request_line_too_long;
+    Alcotest.test_case "headers_under_limit_ok" `Quick headers_under_limit_ok;
   ]

@@ -653,15 +653,22 @@ type t = {
   read_header_timeout : float;
   write_timeout : float;
   idle_timeout : float;
+  (* Go's Server.MaxHeaderBytes (server.go:920-929); the request line + header
+     block is bounded against [max_header_bytes + 4096] ("bufio slop"). Default
+     [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB). *)
+  max_header_bytes : int;
   (* a promise that, when resolved, makes the accept loop stop. *)
   stop : unit Lwt.t;
   wake_stop : unit Lwt.u;
   mutable listen_fd : Lwt_unix.file_descr option;
 }
 
+(* Go's DefaultMaxHeaderBytes (server.go:922). *)
+let default_max_header_bytes = 1 lsl 20
+
 let create ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
     ?(read_header_timeout = 0.) ?(write_timeout = 0.) ?(idle_timeout = 0.)
-    handler =
+    ?(max_header_bytes = default_max_header_bytes) handler =
   let stop, wake_stop = Lwt.wait () in
   {
     addr;
@@ -671,6 +678,7 @@ let create ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
     read_header_timeout;
     write_timeout;
     idle_timeout;
+    max_header_bytes;
     stop;
     wake_stop;
     listen_fd = None;
@@ -710,6 +718,13 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
   | Io.Unexpected_eof ->
       (* Common net read error: don't reply. *)
       Lwt.return_unit
+  | Io.Request_too_large ->
+      (* errTooLarge -> 431 Request Header Fields Too Large + close
+         (server.go:2053-2062, errTooLarge at :998). The client may or may not
+         read this if it is still writing its request — undefined, as in Go. *)
+      let public_err = "431 Request Header Fields Too Large" in
+      write
+        (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
   | Io.Protocol _ | Io.Missing_host | Io.Transfer _ ->
       let public_err = "400 Bad Request" in
       write
@@ -816,7 +831,8 @@ let no_timeouts =
    - [to_write] around the response write (serve_one).
    On a header or idle timeout the connection is closed with no reply (Go's
    read past the deadline errors out and conn.serve returns). *)
-let serve_loop ~timeouts ~ic ~oc ~remote (handler : handler) : unit Lwt.t =
+let serve_loop ~timeouts ~max_header_bytes ~ic ~oc ~remote (handler : handler) :
+    unit Lwt.t =
   (* Go's Server: a base context cancelled when the connection is closed
      (connContext / cancelCtx in conn.serve), off which each request derives
      its own per-request context. Cancelled in the finalizer below so a handler
@@ -839,7 +855,9 @@ let serve_loop ~timeouts ~ic ~oc ~remote (handler : handler) : unit Lwt.t =
     in
     race_deadline conn_ctx ~secs:read_secs (fun () ->
         Lwt.catch
-          (fun () -> Io.read_request ic >>= fun r -> Lwt.return (`Read r))
+          (fun () ->
+            Io.read_request ~max_header_bytes ic >>= fun r ->
+            Lwt.return (`Read r))
           (fun _ -> Lwt.return (`Read (Error Io.Unexpected_eof))))
     >>= function
     | `Timeout ->
@@ -885,10 +903,12 @@ let serve_loop ~timeouts ~ic ~oc ~remote (handler : handler) : unit Lwt.t =
       >>= fun () ->
       Lwt.catch (fun () -> Lwt_io.close ic) (fun _ -> Lwt.return_unit))
 
-let serve_conn ?(timeouts = no_timeouts) (handler : handler) (cfd, peer) =
+let serve_conn ?(timeouts = no_timeouts)
+    ?(max_header_bytes = default_max_header_bytes) (handler : handler)
+    (cfd, peer) =
   let ic, oc = Net.channels_of_fd cfd in
   let remote = Net.sockaddr_to_string peer in
-  serve_loop ~timeouts ~ic ~oc ~remote handler
+  serve_loop ~timeouts ~max_header_bytes ~ic ~oc ~remote handler
 
 (* Go's Server.Serve over a listening fd: accept connections, handle each in
    its own fiber, until [stop] resolves. *)
@@ -903,7 +923,9 @@ let serve srv listen_fd =
         let timeouts = timeouts_of_server srv in
         Lwt.async (fun () ->
             Lwt.catch
-              (fun () -> serve_conn ~timeouts srv.handler conn)
+              (fun () ->
+                serve_conn ~timeouts ~max_header_bytes:srv.max_header_bytes
+                  srv.handler conn)
               (fun _ -> Lwt.return_unit));
         accept_loop ()
   in
@@ -975,7 +997,8 @@ let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the
    existing HTTP/1.x serve loop over the TLS channels. *)
-let serve_tls_conn ?(timeouts = no_timeouts) (handler : handler)
+let serve_tls_conn ?(timeouts = no_timeouts)
+    ?(max_header_bytes = default_max_header_bytes) (handler : handler)
     (ic, oc, alpn, peer) =
   match alpn with
   | Some "h2" ->
@@ -992,7 +1015,7 @@ let serve_tls_conn ?(timeouts = no_timeouts) (handler : handler)
          channels with per-conn/per-request contexts, applies the timeout
          deadlines, and closes the channels in its finalizer. *)
       let remote = Net.sockaddr_to_string peer in
-      serve_loop ~timeouts ~ic ~oc ~remote handler
+      serve_loop ~timeouts ~max_header_bytes ~ic ~oc ~remote handler
 
 (* Go's Server.ServeTLS over a [Net.tls_server]: accept + handshake each
    connection, dispatch by ALPN, until [srv.stop] resolves. *)
@@ -1007,7 +1030,9 @@ let serve_tls srv (tls_srv : Net.tls_server) =
         let timeouts = timeouts_of_server srv in
         Lwt.async (fun () ->
             Lwt.catch
-              (fun () -> serve_tls_conn ~timeouts srv.handler conn)
+              (fun () ->
+                serve_tls_conn ~timeouts ~max_header_bytes:srv.max_header_bytes
+                  srv.handler conn)
               (fun _ -> Lwt.return_unit));
         accept_loop ()
   in
@@ -1043,10 +1068,10 @@ let listen_and_serve_tls_started ~certificates ?(alpn = default_alpn_protocols)
    callback once the listener is up, so tests can connect to an ephemeral
    port and stop the server. *)
 let listen_and_serve_started ?read_timeout ?read_header_timeout ?write_timeout
-    ?idle_timeout ~addr ~port handler =
+    ?idle_timeout ?max_header_bytes ~addr ~port handler =
   let srv =
-    create ?read_timeout ?read_header_timeout ?write_timeout ?idle_timeout ~addr
-      ~port handler
+    create ?read_timeout ?read_header_timeout ?write_timeout ?idle_timeout
+      ?max_header_bytes ~addr ~port handler
   in
   Net.listen (if addr = "" then "0.0.0.0" else addr) port >>= fun listen_fd ->
   srv.listen_fd <- Some listen_fd;

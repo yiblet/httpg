@@ -22,18 +22,29 @@ let missing_host_sentinel = Missing_host
 let bad_string_error what value =
   Protocol_error (Printf.sprintf "%s %S" what value)
 
+(* errTooLarge (server.go:998): the request status line + header block exceeded
+   the bounded read budget. Declared before [type error] (whose [Request_too_large]
+   arm shadows the name) and aliased so the deep parser can raise it; caught at the
+   boundary and mapped to the {!error} arm. The same sentinel backs every bounded
+   read (request, response, chunked trailer). *)
+exception Request_too_large
+
+let request_too_large_sentinel = Request_too_large
+
 (* Handleable boundary error (see io.mli). *)
 type error =
   | Protocol of string
   | Missing_host
   | Transfer of Transfer.error
   | Unexpected_eof
+  | Request_too_large
 
 let error_to_string = function
   | Protocol s -> s
   | Missing_host -> "http: Request.Write on Request with no Host or URL set"
   | Transfer e -> Transfer.error_to_string e
   | Unexpected_eof -> "unexpected EOF"
+  | Request_too_large -> "http: request too large"
 
 (* Internal sentinels carrying a typed boundary error through the raising parse
    path. Caught at the read/write boundary and mapped to {!error}; never escape
@@ -55,6 +66,7 @@ let error_of_exception = function
   | Unexpected_eof_sentinel -> Unexpected_eof
   | End_of_file -> Unexpected_eof
   | e when e == missing_host_sentinel -> Missing_host
+  | e when e == request_too_large_sentinel -> Request_too_large
   | e -> raise e
 
 (* ------------------------------------------------------------------ *)
@@ -63,26 +75,48 @@ let error_of_exception = function
 
 (* Read one CRLF- (or bare-LF-) terminated line, eliding the trailing
    \r\n / \n. Raises End_of_file at a clean EOF before any bytes. Mirrors
-   bufio.ReadLine as consumed by textproto.ReadLine. *)
-let read_line (ic : Lwt_io.input_channel) : string Lwt.t =
+   bufio.ReadLine as consumed by textproto.ReadLine.
+
+   The optional [limit] is a {b shared mutable byte budget} (Go's
+   [connReader.setReadLimit] / [hitReadLimit], server.go:803-818,:1024): each byte
+   pulled off [ic] — including the terminating CRLF — decrements it, and the read
+   raises the {!Request_too_large} sentinel as soon as the budget would go
+   negative, before buffering an unbounded line. Passing the same [int ref] to
+   the request-line read and every subsequent header-line read bounds the whole
+   request head against one cumulative limit (server.go:929,:1024). Omitting
+   [limit] (or any non-bounded caller) leaves the read unbounded, as before. *)
+let read_line ?(limit : int ref option) (ic : Lwt_io.input_channel) :
+    string Lwt.t =
   let buf = Buffer.create 128 in
+  let consume () =
+    match limit with
+    | None -> true
+    | Some budget ->
+        if !budget <= 0 then false
+        else begin
+          decr budget;
+          true
+        end
+  in
   let rec loop got_any =
-    Lwt.catch
-      (fun () -> Lwt_io.read_char ic >|= fun c -> Some c)
-      (function End_of_file -> Lwt.return None | e -> Lwt.fail e)
-    >>= function
-    | None ->
-        if got_any then Lwt.return (Buffer.contents buf)
-        else Lwt.fail End_of_file
-    | Some '\n' ->
-        let s = Buffer.contents buf in
-        (* Strip a single trailing CR. *)
-        let n = String.length s in
-        if n > 0 && s.[n - 1] = '\r' then Lwt.return (String.sub s 0 (n - 1))
-        else Lwt.return s
-    | Some c ->
-        Buffer.add_char buf c;
-        loop true
+    if not (consume ()) then Lwt.fail request_too_large_sentinel
+    else
+      Lwt.catch
+        (fun () -> Lwt_io.read_char ic >|= fun c -> Some c)
+        (function End_of_file -> Lwt.return None | e -> Lwt.fail e)
+      >>= function
+      | None ->
+          if got_any then Lwt.return (Buffer.contents buf)
+          else Lwt.fail End_of_file
+      | Some '\n' ->
+          let s = Buffer.contents buf in
+          (* Strip a single trailing CR. *)
+          let n = String.length s in
+          if n > 0 && s.[n - 1] = '\r' then Lwt.return (String.sub s 0 (n - 1))
+          else Lwt.return s
+      | Some c ->
+          Buffer.add_char buf c;
+          loop true
   in
   loop false
 
@@ -108,11 +142,14 @@ let valid_header_value_byte c =
 (* ReadMIMEHeader: read a CRLF-terminated header block (until the blank line),
    honoring obs-fold continuation lines (lines starting with space/tab). Returns
    the populated Header. Raises Protocol_error on a malformed line. *)
-let read_mime_header_raising (ic : Lwt_io.input_channel) : Header.t Lwt.t =
+let read_mime_header_raising ?(limit : int ref option)
+    (ic : Lwt_io.input_channel) : Header.t Lwt.t =
   let h = Header.create () in
-  (* Read all raw lines of the header block, folding continuations. *)
+  (* Read all raw lines of the header block, folding continuations. The shared
+     [limit] budget (when present) is decremented across every line, continuing
+     from wherever the request/status line left it. *)
   let rec gather acc =
-    read_line ic >>= fun line ->
+    read_line ?limit ic >>= fun line ->
     if line = "" then Lwt.return (List.rev acc)
     else if String.length line > 0 && (line.[0] = ' ' || line.[0] = '\t') then
       (* Continuation of the previous logical line. *)
@@ -256,10 +293,17 @@ let is_token (s : string) : bool =
          | _ -> true)
        s
 
-let read_request_raising (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
+let read_request_raising ?(max_header_bytes : int option)
+    (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
+  (* Bound the request line + header block against one cumulative budget (Go's
+     initialReadLimitSize = maxHeaderBytes + 4096 bufio slop, server.go:929,:1024).
+     [None] leaves the read unbounded. *)
+  let limit =
+    match max_header_bytes with Some n -> Some (ref (n + 4096)) | None -> None
+  in
   Lwt.catch
     (fun () ->
-      read_line ic >>= fun s ->
+      read_line ?limit ic >>= fun s ->
       (match parse_request_line s with
         | None -> Lwt.fail (bad_string_error "malformed HTTP request" s)
         | Some (meth, request_uri, proto) ->
@@ -283,7 +327,7 @@ let read_request_raising (ic : Lwt_io.input_channel) : Body.t Request.t Lwt.t =
             let url =
               if just_authority then Uri.with_scheme url None else url
             in
-            read_mime_header_raising ic >>= fun header ->
+            read_mime_header_raising ?limit ic >>= fun header ->
             if List.length (Header.values header "Host") > 1 then
               Lwt.fail (Protocol_error "too many Host headers")
             else begin
@@ -540,8 +584,8 @@ let to_result (f : unit -> 'a Lwt.t) : ('a, error) result Lwt.t =
 let read_mime_header ic : (Header.t, error) result Lwt.t =
   to_result (fun () -> read_mime_header_raising ic)
 
-let read_request ic : (Body.t Request.t, error) result Lwt.t =
-  to_result (fun () -> read_request_raising ic)
+let read_request ?max_header_bytes ic : (Body.t Request.t, error) result Lwt.t =
+  to_result (fun () -> read_request_raising ?max_header_bytes ic)
 
 let read_response ?request ic : (Body.t Response.t, error) result Lwt.t =
   to_result (fun () -> read_response_raising ?request ic)

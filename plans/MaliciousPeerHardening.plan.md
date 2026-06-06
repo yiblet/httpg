@@ -198,7 +198,7 @@ Test Successful in 2.297s. 506 tests run.
 ---
 
 ### Ticket 2 — `max_header_bytes` + bounded read layer (Case 2) — FOUNDATION
-Status: Planned
+Status: Done
 
 **A) Scope**
 Bound the request status line + header block so one connection cannot exhaust memory. Introduces the shared bounded-read primitive (`read_line ?limit` + head budget) that T3 and T6 reuse. Server answers `431 Request Header Fields Too Large` and closes, as Go does.
@@ -225,7 +225,41 @@ A request with a header block (or single huge line, or unterminated header strea
 `dune build` clean; `dune test` green incl. new tests; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/io.ml`:
+  - New internal sentinel `exception Request_too_large` + `request_too_large_sentinel` alias (Go's `errTooLarge`, server.go:998), declared before `type error` so the `Request_too_large` arm can shadow the name — mirrors the existing `Missing_host` sentinel idiom (io.ml:14-21).
+  - New `Io.error` arm `Request_too_large` with `error_to_string` = `"http: request too large"`; mapped at the boundary in `error_of_exception` (`e == request_too_large_sentinel -> Request_too_large`), so it rides the existing `to_result` catch-at-boundary path verbatim.
+  - **The reusable bounded-read primitive:** `read_line : ?limit:int ref -> Lwt_io.input_channel -> string Lwt.t`. `limit` is a **shared mutable byte budget** (`int ref`): each byte pulled off `ic` (including the terminating CRLF) decrements it, and the read raises `Request_too_large` as soon as the budget would go negative — *before* buffering an unbounded line. Omitting `limit` is unbounded as before. Modeled on `chunked.ml`'s incremental `Buffer.length > max_line_length` check, but as a shared decrementing ref so one budget spans multiple `read_line` calls.
+  - `read_mime_header_raising : ?limit:int ref -> ...` threads the same `limit` ref through every header line, continuing from wherever the request/status line left it.
+  - `read_request_raising : ?max_header_bytes:int -> ...` creates `Some (ref (n + 4096))` (Go's `initialReadLimitSize = maxHeaderBytes + 4096` bufio slop, server.go:929) and passes it to BOTH the request-line `read_line` and `read_mime_header_raising ?limit`, so the request line + all header lines are bounded cumulatively against one limit (server.go:1024).
+  - Boundary wrapper `read_request : ?max_header_bytes:int -> ...` forwards to the raising core.
+- `lib/io.mli`: documented the new `Request_too_large` error arm and `?max_header_bytes` on `read_request` (kept in sync). `read_line`/`read_mime_header_raising` are not in the `.mli` (internal); the public budget surface is `read_request`'s `?max_header_bytes`.
+- `lib/server.ml`:
+  - `Server.t` gains `max_header_bytes : int`; `create` gains `?max_header_bytes` defaulting to `default_max_header_bytes = 1 lsl 20` (Go's `DefaultMaxHeaderBytes`, server.go:922).
+  - `write_read_error_response` maps `Io.Request_too_large` to `431 Request Header Fields Too Large` + the shared `error_headers` (which include `Connection: close`), then close (server.go:2053-2062). Placed before the `Protocol | Missing_host | Transfer` catch-all 400 arm.
+  - `serve_loop` gains `~max_header_bytes`, passed to `Io.read_request ~max_header_bytes`. `serve_conn`/`serve_tls_conn` gain `?max_header_bytes` (default `default_max_header_bytes`); the `serve`/`serve_tls` accept loops pass `srv.max_header_bytes`. `listen_and_serve_started` forwards `?max_header_bytes` to `create`.
+- `lib/server.mli`: documented `?max_header_bytes` on `create` and `listen_and_serve_started`.
+- `test/test_abuse.ml`: added `request_header_too_large`, `request_line_too_long`, `headers_under_limit_ok` (raw-loopback integration, bounded by `Net.with_timeout`).
+
+**Reusability for T3/T6 (the design ask)**
+- `read_line ?limit:int ref` is **not server-specific**: the budget is a caller-owned `int ref`. T6 (client `MaxResponseHeaderBytes`) reuses it identically — `read_response_raising` will create `ref (max_response_header_bytes + 4096)` and pass `?limit` to its status-line `read_line` (io.ml:~388) and `read_mime_header_raising ?limit` (io.ml:~430). T3 (chunked trailer) reuses it by passing a `?limit` to the trailer's `read_mime_header_raising` call in `stream_body` (io.ml:~225). The sentinel→`error` boundary already in place means T3/T6 only need their own `error` arm + boundary mapping (T6) or reuse `Request_too_large`/a new `Transfer` arm (T3); no new mechanism.
+
+**Precedent followed**
+- (a) **Raise-a-sentinel / catch-at-boundary** (io.ml:14-21 `Missing_host`, `error_of_exception`/`to_result` io.ml:52-58,:~545): added `Request_too_large` the same way — raised deep in `read_line`, mapped once at the boundary. **Verified against Go:** Go's `errTooLarge` is a sentinel `error` value checked at `conn.serve` (server.go:998,:2053); the raise-and-map shape matches Go's error-value-comparison. No correction needed.
+- (b) **`lib/internal/chunked.ml`'s incremental byte bound** (`max_line_length = 4096`, the per-byte `Buffer.length > max_line_length` check at chunked.ml:98): modeled `read_line ?limit`'s per-byte budget on it, generalizing the fixed per-line cap into a shared decrementing cross-line budget (Go bounds the whole head, not each line — server.go:929). **Verified against Go:** Go's `setReadLimit`/`hitReadLimit` (server.go:803-818,:1024) limits *total* bytes read off the socket for the head against `initialReadLimitSize`, which is exactly the shared-ref-across-lines behavior here, not chunked's per-line cap. No correction to chunked needed (it faithfully mirrors `internal/chunked.go`'s own per-line `ErrLineTooLong`, a different Go limit).
+
+**Alcotest tail**
+```
+  [OK]          Abuse                   2   request_header_too_large.
+  [OK]          Abuse                   3   request_line_too_long.
+  [OK]          Abuse                   4   headers_under_limit_ok.
+
+Test Successful in 2.264s. 509 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (509 tests: 506 prior + 3 new).
+
+**Commit:** _(see jj log below)_
 
 ---
 
