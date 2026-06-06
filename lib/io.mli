@@ -25,6 +25,15 @@ exception Missing_host
 (** Retained for the {b mid-stream} body thunk; the handleable boundary error is
     {!error}'s {!Missing_host} arm. *)
 
+exception Trailer_too_large
+(** The trailer block following a chunked body exceeded the bounded read budget
+    (Go's "suspiciously long trailer after chunked body", transfer.go:934). The
+    trailer is read {b mid-stream} (inside the body [Stream] thunk, when the
+    body reaches EOF), so this is the form callers observe — it {b raises} from
+    a body pull ({!Body.read_all} / {!Body.drain}) rather than surfacing as a
+    boundary [Error] from {!read_request} / {!read_response}. The corresponding
+    boundary arm is {!error}'s {!Trailer_too_large}. *)
+
 (** Handleable error at the request/response read/write boundary. Lower-level
     framing failures are embedded via the {!Transfer} arm.
 
@@ -45,6 +54,13 @@ type error =
       (** the request status line + header block exceeded the bounded read
           budget (Go's [errTooLarge], server.go:998); the server answers
           [431 Request Header Fields Too Large] and closes *)
+  | Trailer_too_large
+      (** the trailer block following a chunked body exceeded the bounded read
+          budget (Go's "suspiciously long trailer after chunked body",
+          transfer.go:934). Read {b mid-stream} inside the body [Stream] thunk,
+          so per the mid-stream policy this {b keeps raising} rather than
+          surfacing as a boundary [Error] from {!read_request}/{!read_response}.
+      *)
 
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)

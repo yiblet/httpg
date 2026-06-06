@@ -31,6 +31,19 @@ exception Request_too_large
 
 let request_too_large_sentinel = Request_too_large
 
+(* "http: suspiciously long trailer after chunked body" (transfer.go:934): the
+   trailer block read after a chunked body exceeded the bounded peek budget. Go
+   bounds the trailer to its bufio buffer size (~4kB) via [seeUpcomingDoubleCRLF]
+   peeking for an upcoming double-CRLF (transfer.go:894-951); since Lwt_io has no
+   non-consuming Peek, we reproduce the {b effect} — cap the trailer block to the
+   same buffer-size budget using the T2 [read_line ?limit] primitive — and raise
+   this distinct sentinel (not [Request_too_large], which would mis-map to 431).
+   Read mid-stream inside the body [Stream] thunk, so per the mid-stream policy
+   (see io.mli) it keeps raising rather than surfacing as a boundary [Error]. *)
+exception Trailer_too_large
+
+let trailer_too_large_sentinel = Trailer_too_large
+
 (* Handleable boundary error (see io.mli). *)
 type error =
   | Protocol of string
@@ -38,6 +51,7 @@ type error =
   | Transfer of Transfer.error
   | Unexpected_eof
   | Request_too_large
+  | Trailer_too_large
 
 let error_to_string = function
   | Protocol s -> s
@@ -45,6 +59,7 @@ let error_to_string = function
   | Transfer e -> Transfer.error_to_string e
   | Unexpected_eof -> "unexpected EOF"
   | Request_too_large -> "http: request too large"
+  | Trailer_too_large -> "http: suspiciously long trailer after chunked body"
 
 (* Internal sentinels carrying a typed boundary error through the raising parse
    path. Caught at the read/write boundary and mapped to {!error}; never escape
@@ -67,6 +82,7 @@ let error_of_exception = function
   | End_of_file -> Unexpected_eof
   | e when e == missing_host_sentinel -> Missing_host
   | e when e == request_too_large_sentinel -> Request_too_large
+  | e when e == trailer_too_large_sentinel -> Trailer_too_large
   | e -> raise e
 
 (* ------------------------------------------------------------------ *)
@@ -221,6 +237,39 @@ let merge_trailer (declared : Header.t option) (hdr : Header.t) :
       Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
       Some t
 
+(* Go bounds the chunked trailer to its [bufio.Reader]'s buffer size — "typically
+   4kB" (transfer.go:932) — by iteratively peeking for an upcoming double-CRLF
+   (seeUpcomingDoubleCRLF, transfer.go:894-907) before handing the bytes to
+   textproto. We use the same buffer size as the trailer byte budget. *)
+let trailer_buffer_size = 4096
+
+(* readTrailer (transfer.go:911-951): read the trailer block following a chunked
+   body and merge it into the trailer cell. Bounded to {!trailer_buffer_size}
+   bytes so a malicious peer cannot OOM us with an endless/gigantic trailer.
+
+   Go's defense (transfer.go:925-935) is a peek hack: it cannot slip a
+   LimitReader in front of textproto, so it iteratively [Peek]s up to the
+   bufio.Reader's buffer size looking for a double-CRLF and rejects the trailer
+   ("suspiciously long trailer after chunked body") if none appears within that
+   window. [Lwt_io] exposes no non-consuming Peek, so instead of replicating the
+   peek-then-parse we reproduce its {b effect} directly: bound the trailer's
+   [read_mime_header_raising] with a {!trailer_buffer_size}-byte T2 budget. This
+   is equivalent — both cap the trailer to the buffer size — and avoids a parallel
+   bounding mechanism. The empty-trailer common case (a bare CRLF, transfer.go:
+   913-917) is the [read_line]-returns-"" fast path inside [read_mime_header_raising].
+
+   The budget exhaustion raises [Request_too_large] (the shared [read_line]
+   sentinel); we translate it to the distinct {!Trailer_too_large} so it maps to
+   the right boundary error rather than 431. *)
+let read_trailer (ic : Lwt_io.input_channel) : Header.t Lwt.t =
+  let limit = Some (ref trailer_buffer_size) in
+  Lwt.catch
+    (fun () -> read_mime_header_raising ?limit ic)
+    (function
+      | e when e == request_too_large_sentinel ->
+          Lwt.fail trailer_too_large_sentinel
+      | e -> Lwt.fail e)
+
 (* The non-buffering replacement for materialize_body: wrap [read_transfer]'s
    incremental reader as a [Body.Stream] without collapsing it to a String.
 
@@ -249,7 +298,7 @@ let stream_body ~(is_chunked : bool) ~(declared_trailer : Header.t option)
            trailing CRLF, so the trailer block (possibly a bare CRLF) is read
            here. *)
           if is_chunked then (
-            read_mime_header_raising ic >|= fun hdr ->
+            read_trailer ic >|= fun hdr ->
             set_trailer (merge_trailer declared_trailer hdr);
             None)
           else (

@@ -259,12 +259,12 @@ Test Successful in 2.264s. 509 tests run.
 ```
 `dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (509 tests: 506 prior + 3 new).
 
-**Commit:** _(see jj log below)_
+**Commit:** `mzmnkpzo` (`feat(io): bound request head with max_header_bytes (431 on overflow)`).
 
 ---
 
 ### Ticket 3 — Bounded chunked trailer + line cap (Case 5)
-Status: Planned — depends on Ticket 2
+Status: Done
 
 **A) Scope**
 Bound the trailer block read after a chunked body (and any single line) so a malicious chunked message can't OOM the peer via an endless/gigantic trailer. Applies to both server (request) and client (response) since the trailer read is shared.
@@ -288,7 +288,32 @@ A chunked body followed by an oversized/unterminated trailer fails with a typed 
 `dune build` clean; `dune test` green incl. new tests; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/io.ml`:
+  - New internal sentinel `exception Trailer_too_large` + `trailer_too_large_sentinel` alias (Go's "http: suspiciously long trailer after chunked body", transfer.go:934), declared next to the T2 `Request_too_large` sentinel and aliased for the deep parse path — the same idiom.
+  - New `Io.error` arm `Trailer_too_large` (`error_to_string` = the Go message); mapped at the boundary in `error_of_exception` (`e == trailer_too_large_sentinel -> Trailer_too_large`), riding the existing `to_result` catch-at-boundary path verbatim.
+  - New `trailer_buffer_size = 4096` (Go's "underlying buffer size, typically 4kB", transfer.go:932) and `read_trailer ic`: reads the chunked trailer via `read_mime_header_raising` bounded by a fresh `?limit:(ref trailer_buffer_size)` (the T2 primitive). On budget exhaustion `read_line` raises the shared `Request_too_large` sentinel; `read_trailer` catches that and re-raises `Trailer_too_large` so the error type is correct (not 431). The empty-trailer common case (bare CRLF, transfer.go:913-917) is the `read_line`-returns-"" fast path already inside `read_mime_header_raising`, so no separate two-byte peek was needed.
+  - `stream_body`'s chunked-body EOF action now calls `read_trailer ic` instead of the bare `read_mime_header_raising ic`.
+- `lib/io.mli`: added the `Trailer_too_large` boundary-error arm AND the `exception Trailer_too_large` (mirroring how `Missing_host` is exposed both as an exception and an `error` arm) — because the trailer is read **mid-stream** inside the body `Stream` thunk, callers observe it as a raise from a body pull (`Body.read_all`/`Body.drain`), per the documented mid-stream policy, not as a boundary `Error`.
+- `lib/server.ml`: added `Io.Trailer_too_large` to `write_read_error_response`'s catch-all 400 arm (defensive — it is normally a mid-stream raise and rarely reaches the boundary; 400 matches Go's plain-Read-error treatment of a malformed trailer). Needed to keep the match exhaustive under warnings-as-errors.
+- `test/test_abuse.ml`: added `chunked_trailer_too_long`, `chunked_empty_trailer_ok`, `chunked_small_trailer_ok`, driven over an in-memory `Lwt_io` channel (`ic_of_string` + `Io.read_response`), bounded by `Net.with_timeout`. The too-long test asserts the `Io.Trailer_too_large` exception raises from `Body.drain` (mid-stream), not from `read_response`.
+
+**Precedent followed**
+- **T2's `read_line ?limit` + the `io.ml` sentinel→`error` boundary.** Reused the shared mutable byte-budget `int ref` to bound the trailer's `read_mime_header_raising`, and added `Trailer_too_large` via the identical raise-a-sentinel / map-at-boundary idiom (`error_of_exception`) rather than a parallel mechanism. **Verified against Go:** Go's defense (`seeUpcomingDoubleCRLF`, transfer.go:894-951) peeks up to the bufio buffer size (~4kB) for an upcoming double-CRLF before parsing, because it cannot slip a `LimitReader` in front of `textproto` (transfer.go:925-931). `Lwt_io` exposes no non-consuming `Peek`, so the faithful adaptation reproduces the **effect** — cap the trailer block to the same 4096-byte buffer budget — using the T2 budget directly. This is equivalent (both bound the trailer to the buffer size). No correction to the T2 precedent was needed; it was already faithful.
+- **Deliberate adaptation (recorded):** Go uses peek-then-parse; we use bounded-read. Documented inline in `read_trailer`. The empty-trailer fast path (transfer.go:913-917) is subsumed by `read_mime_header_raising`'s existing blank-first-line handling, so it required no extra peek.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                   5   chunked_trailer_too_long.
+  [OK]          Abuse                   6   chunked_empty_trailer_ok.
+  [OK]          Abuse                   7   chunked_small_trailer_ok.
+
+Test Successful in 2.281s. 512 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt`/`dune build @fmt` clean, full `dune test --force` green (512 tests: 509 prior + 3 new).
+
+**Commit:** `zyqyworr` (`feat(io): bound chunked trailer with seeUpcomingDoubleCRLF analogue`).
 
 ---
 

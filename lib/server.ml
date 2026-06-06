@@ -725,7 +725,11 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
       let public_err = "431 Request Header Fields Too Large" in
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
-  | Io.Protocol _ | Io.Missing_host | Io.Transfer _ ->
+  | Io.Protocol _ | Io.Missing_host | Io.Transfer _ | Io.Trailer_too_large ->
+      (* [Trailer_too_large] is normally a mid-stream raise (read inside the body
+         [Stream] thunk after the header boundary returned [Ok]), so it rarely
+         reaches here; if it does, treat it as a bad request like Go does for a
+         malformed trailer (transfer.go:934, returned as a plain Read error). *)
       let public_err = "400 Bad Request" in
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)

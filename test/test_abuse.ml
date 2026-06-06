@@ -258,6 +258,94 @@ let headers_under_limit_ok () =
     | _ -> true
     | exception Not_found -> false)
 
+(* ------------------------------------------------------------------ *)
+(* Ticket 3 — bounded chunked trailer (Case 5).                        *)
+(*                                                                     *)
+(* The trailer block following a chunked body must be bounded so a     *)
+(* malicious peer cannot OOM us with an endless / gigantic trailer.    *)
+(* Go bounds it to the bufio buffer size (~4kB) via seeUpcomingDouble  *)
+(* CRLF (go/src/net/http/transfer.go:894-951, :934); we reproduce the  *)
+(* effect with the T2 [read_line ?limit] budget. Driven over an        *)
+(* in-memory channel through [Io.read_response]; the trailer is read   *)
+(* mid-stream when the body reaches EOF, so the error surfaces from a   *)
+(* body pull (Body.drain / read_all), not from read_response.          *)
+(* ------------------------------------------------------------------ *)
+
+let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
+
+(* TestChunkedTrailerTooLong (transfer.go:925-935): a chunked body followed by an
+   oversized, unterminated trailer block. Draining the body triggers the trailer
+   read, which must fail with the modeled [Trailer_too_large] error rather than
+   buffering the whole trailer. *)
+let chunked_trailer_too_long () =
+  (* A well-framed chunked body, then a trailer block far over the 4096-byte
+     buffer budget with no terminating blank line: one gigantic trailer line. *)
+  let huge_value = String.make 8192 'x' in
+  let raw =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ^ "3\r\nfoo\r\n"
+    ^ "0\r\n" ^ "X-Trailer: " ^ huge_value ^ "\r\n"
+    (* deliberately no closing CRLF: an endless/oversized trailer *)
+  in
+  let run () =
+    let ic = ic_of_string raw in
+    Io.read_response ic >>= function
+    | Error e -> Lwt.fail (Failure ("read_response: " ^ Io.error_to_string e))
+    | Ok r ->
+        (* The header boundary parsed fine; the trailer error is mid-stream. *)
+        Lwt.catch
+          (fun () -> Body.drain r.Response.body >|= fun _ -> `No_error)
+          (function
+            | Io.Trailer_too_large -> Lwt.return `Trailer_too_large
+            | e -> Lwt.return (`Other (Printexc.to_string e)))
+  in
+  let outcome = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  match outcome with
+  | `Trailer_too_large -> ()
+  | `No_error ->
+      Alcotest.fail "expected Trailer_too_large, body drained cleanly"
+  | `Other s -> Alcotest.fail ("expected Trailer_too_large, got: " ^ s)
+
+(* TestChunkedEmptyTrailerOk (transfer.go:913-917, the common case): a chunked
+   body terminated by a bare CRLF (no trailer headers) drains cleanly and yields
+   no trailer. *)
+let chunked_empty_trailer_ok () =
+  let raw =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ^ "3\r\nfoo\r\n"
+    ^ "3\r\nbar\r\n" ^ "0\r\n\r\n"
+  in
+  let run () =
+    let ic = ic_of_string raw in
+    Io.read_response ic >>= function
+    | Error e -> Lwt.fail (Failure ("read_response: " ^ Io.error_to_string e))
+    | Ok r ->
+        Body.read_all r.Response.body >|= fun data -> (data, r.Response.trailer)
+  in
+  let data, trailer = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check string) "body" "foobar" data;
+  Alcotest.(check bool) "no trailer" true (trailer = None)
+
+(* TestChunkedSmallTrailerOk: a chunked body + one small trailer header parses
+   within the budget and is surfaced on the response trailer after the body is
+   consumed to EOF (Go's body.readTrailer -> mergeSetHeader). *)
+let chunked_small_trailer_ok () =
+  let raw =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: Md5\r\n\r\n"
+    ^ "3\r\nfoo\r\n" ^ "0\r\n" ^ "Md5: abc123\r\n" ^ "\r\n"
+  in
+  let run () =
+    let ic = ic_of_string raw in
+    Io.read_response ic >>= function
+    | Error e -> Lwt.fail (Failure ("read_response: " ^ Io.error_to_string e))
+    | Ok r ->
+        Body.read_all r.Response.body >|= fun data -> (data, r.Response.trailer)
+  in
+  let data, trailer = Lwt_main.run (Net.with_timeout 3. (run ())) in
+  Alcotest.(check string) "body" "foo" data;
+  match trailer with
+  | Some t ->
+      Alcotest.(check string) "trailer Md5" "abc123" (Header.get t "Md5")
+  | None -> Alcotest.fail "expected a parsed trailer header"
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -267,4 +355,10 @@ let tests =
       request_header_too_large;
     Alcotest.test_case "request_line_too_long" `Quick request_line_too_long;
     Alcotest.test_case "headers_under_limit_ok" `Quick headers_under_limit_ok;
+    Alcotest.test_case "chunked_trailer_too_long" `Quick
+      chunked_trailer_too_long;
+    Alcotest.test_case "chunked_empty_trailer_ok" `Quick
+      chunked_empty_trailer_ok;
+    Alcotest.test_case "chunked_small_trailer_ok" `Quick
+      chunked_small_trailer_ok;
   ]
