@@ -75,6 +75,12 @@ let parse_http_version (vers : string) : (int * int) option =
 let proto_at_least (r : 'a t) major minor =
   r.proto_major > major || (r.proto_major = major && r.proto_minor >= minor)
 
+(* Request.expectsContinue (request.go:1518): true when the "Expect" header
+   carries the [100-continue] token (case-insensitive, token-boundary aware).
+   Reuses [Transfer.has_token], the faithful port of header.go's [hasToken]. *)
+let expects_continue (r : 'a t) =
+  Transfer.has_token (Header.get r.header "Expect") "100-continue"
+
 (* Request.UserAgent. *)
 let user_agent (r : 'a t) = Header.get r.header "User-Agent"
 

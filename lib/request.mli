@@ -55,6 +55,10 @@ val parse_http_version : string -> (int * int) option
 val proto_at_least : 'a t -> int -> int -> bool
 (** [Request.ProtoAtLeast]. *)
 
+val expects_continue : 'a t -> bool
+(** [Request.expectsContinue] (request.go:1518): true when the "Expect" header
+    contains the [100-continue] token (case-insensitive). *)
+
 val user_agent : 'a t -> string
 (** [Request.UserAgent]: the "User-Agent" header value, or "". *)
 

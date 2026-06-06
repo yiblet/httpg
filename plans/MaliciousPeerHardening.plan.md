@@ -379,7 +379,7 @@ Test Successful in 2.274s. 516 tests run.
 ---
 
 ### Ticket 5 — `Expect: 100-continue` handling + 417 (Case 7)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Honor `Expect: 100-continue` (lazily emit the interim `100 Continue` on first body read) and reject unknown `Expect` values with `417 Expectation Failed` + `Connection: close`. Fixes an interop break (spec-compliant clients withholding the body hang today) and a minor self-inflicted resource issue.
@@ -402,7 +402,34 @@ A client sending `Expect: 100-continue` receives the interim 100 when the handle
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/request.ml` / `lib/request.mli`: new `expects_continue : 'a t -> bool` (port of `request.go:1518` `expectsContinue`), defined as `Transfer.has_token (Header.get r.header "Expect") "100-continue"`. Reuses the already-faithful `Transfer.has_token` (the port of `header.go:240` `hasToken`) rather than re-deriving token-boundary logic. `request.ml` does not depend on `Transfer` elsewhere, but the layering (transfer = layer 2, request = layer 3) makes request → transfer the correct, cycle-free direction (verified `transfer.ml` never names `Request`).
+- `lib/server.ml`:
+  - New `wrap_expect_continue_body oc r`: wraps the request `Body.Stream` so the FIRST pull writes `HTTP/1.1 100 Continue\r\n\r\n` to `oc` and flushes (once, guarded by a `wrote` ref), then calls the underlying `inner ()` to read the body. Empty/String bodies are left untouched (they never occur when `content_length<>0`). This is the OCaml analogue of Go's `expectContinueReader.Read` (server.go:964-983), in the same one-shot-side-effect-on-pull shape as `Client.wrap_timer_body` / the Ticket 1 `wrap_read_timeout_body`.
+  - New `write_expectation_failed oc`: writes `HTTP/1.1 417 Expectation Failed` + the shared `error_headers` (which already include `Connection: close`) + a short body, then flush — Go's `response.sendExpectationFailed` (server.go:2236-2252) which sets `Connection: close`, writes 417, and does not run the handler.
+  - `serve_loop` (the unified per-connection dispatch path from Ticket 1): after setting `req_ctx` and BEFORE the read-timeout body wrap / dispatch, port server.go:2089-2101 — if `Request.expects_continue r`: when `proto≥1.1 && content_length<>0L`, apply `wrap_expect_continue_body oc r` (and continue normally); else if the `Expect` header is non-empty (any other value), `write_expectation_failed oc`, cancel the request context, and return without dispatching (the connection then closes via `serve_loop`'s finalizer — `Connection: close`). Requests with no `Expect` header take the unchanged path.
+  - **Wrapper composition (the design ask):** `wrap_expect_continue_body` is applied FIRST (it becomes `r.body`), then `wrap_read_timeout_body conn_ctx ~secs:to_read r` wraps THAT. So a body pull goes: read-timeout race → expect-continue thunk (writes 100 on first pull) → real body reader. This orders the 100-continue write to fire on the first *real* body pull, still bounded by the whole-request read deadline. When `read_timeout` is 0 (default) the read-timeout wrapper is a no-op and the expect-continue wrapper stands alone.
+- `test/test_abuse.ml`: added `expect_100_continue` and `expect_unknown` (raw-loopback integration, bounded by `Net.with_timeout`), plus a `read_all_until_eof` helper. Wired both into the `tests` list. (No change to `test/test_gohttp.ml` — the `Abuse` suite was already aggregated by Ticket 1.)
+
+**Precedent followed**
+- `Client.wrap_timer_body` (`client.ml:164-180`) and the Ticket 1 `wrap_read_timeout_body` (`server.ml:797`) — wrap a `Body.Stream` thunk with a one-shot side-effect on pull. Mirrored exactly in `wrap_expect_continue_body`. **Verified against Go:** Go's `expectContinueReader.Read` (server.go:969-983) writes `"HTTP/1.1 100 Continue\r\n\r\n"` + `Flush` guarded by a `canWriteContinue` once-flag on the first body read; the OCaml `wrote` ref reproduces the once-semantics, and the wrap-before-dispatch + lazy-write-on-pull matches server.go:2091-2095. No correction to the precedent was needed.
+- `Transfer.has_token` (`transfer.ml:169`) reused for `expects_continue`. **Verified against Go:** it is a faithful port of `header.go:240` `hasToken` (case-insensitive, token-boundary aware via `isTokenBoundary`). No correction needed.
+
+**Test-determinism adaptation**
+- The "lazy vs eager" assertion is made deterministic by the socket ordering itself: the client sends only the request headers (with `Expect: 100-continue` + `Content-Length: 5`), withholds the body, then blocks reading the status line. The interim `HTTP/1.1 100 Continue` line can only arrive once the handler pulls the body (the wrapper writes it on first pull), so receiving the 100 line at all proves it was emitted lazily after dispatch — and a non-lazy server that withheld 100 until something else would hang, failing the bound. The client then sends the body and reads exactly one Content-Length-framed response (via `read_one_response`, not EOF) because the echo response is keep-alive — the only adaptation vs. a naive read-to-EOF, since the connection is not closed after a successful 100-continue exchange. The `expect_unknown` test reads to EOF, which is correct there because the 417 carries `Connection: close`.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  11   accepts_valid_host_and_headers.
+  [OK]          Abuse                  12   expect_100_continue.
+  [OK]          Abuse                  13   expect_unknown.
+
+Test Successful in 2.265s. 518 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (518 tests: 516 prior + 2 new).
+
+**Commit:** `xnuwpvmy` (`feat(server): honor Expect: 100-continue lazily, 417 on unknown Expect`).
 
 ---
 

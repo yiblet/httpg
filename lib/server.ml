@@ -738,6 +738,22 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
 
+(* Go's response.sendExpectationFailed (server.go:2236-2252): a request carrying
+   an "Expect" header with any value other than [100-continue] gets 417
+   Expectation Failed with [Connection: close], and the handler is NOT run
+   (server.go:2097-2100). Written directly onto the wire, then the connection is
+   closed (RFC 7231 5.1.1). *)
+let write_expectation_failed oc : unit Lwt.t =
+  let code = Status.status_expectation_failed in
+  let body = Printf.sprintf "%d %s" code (Status.status_text code) in
+  Lwt.catch
+    (fun () ->
+      Lwt_io.write oc
+        (Printf.sprintf "HTTP/1.1 %d %s%s%s" code (Status.status_text code)
+           error_headers body)
+      >>= fun () -> Lwt_io.flush oc)
+    (fun _ -> Lwt.return_unit)
+
 (* The four server duration knobs, resolved for one connection (Go's
    readHeaderTimeout()/idleTimeout() fallback to ReadTimeout already applied).
    Seconds; 0. means "no timeout" (Go's zero-value semantics). *)
@@ -823,6 +839,34 @@ let wrap_read_timeout_body conn_ctx ~secs (r : Body.t Request.t) : unit =
         in
         r.Request.body <- Body.Stream next
 
+(* Go's expectContinueReader (server.go:964-983): wrap the request body so the
+   FIRST read replies "HTTP/1.1 100 Continue\r\n\r\n" on the connection (once),
+   then proceeds to read the body. This makes the interim 100 lazy — it is sent
+   only when the handler actually reads the body, not before dispatch — so a
+   spec-compliant client that withholds the body until it sees 100 unblocks.
+   Same one-shot-side-effect-on-pull shape as [Client.wrap_timer_body]
+   (client.ml:164-180) / [wrap_read_timeout_body] above. Only [Body.Stream]
+   bodies are wrapped (Empty/String have no upcoming read to gate on; Go only
+   wraps when ContentLength<>0, which never yields those here). *)
+let wrap_expect_continue_body oc (r : Body.t Request.t) : unit =
+  match r.Request.body with
+  | Body.Empty | Body.String _ -> ()
+  | Body.Stream inner ->
+      let wrote = ref false in
+      let next () =
+        (if !wrote then Lwt.return_unit
+         else begin
+           wrote := true;
+           Lwt.catch
+             (fun () ->
+               Lwt_io.write oc "HTTP/1.1 100 Continue\r\n\r\n" >>= fun () ->
+               Lwt_io.flush oc)
+             (fun _ -> Lwt.return_unit)
+         end)
+        >>= fun () -> inner ()
+      in
+      r.Request.body <- Body.Stream next
+
 let no_timeouts =
   { to_read = 0.; to_read_header = 0.; to_write = 0.; to_idle = 0. }
 
@@ -881,27 +925,46 @@ let serve_loop ~timeouts ~max_header_bytes ~ic ~oc ~remote (handler : handler) :
            [conn_ctx], when the connection closes. *)
         let req_ctx, cancel_req = Context.with_cancel conn_ctx in
         r.Request.ctx <- req_ctx;
-        (* Whole-request read deadline around the streaming body pulls. *)
-        wrap_read_timeout_body conn_ctx ~secs:timeouts.to_read r;
-        (* Write deadline around the response write (Go's deferred
-           SetWriteDeadline, server.go:1017-1021). *)
-        race_deadline conn_ctx ~secs:timeouts.to_write (fun () ->
-            Lwt.catch
-              (fun () -> serve_one oc r handler)
-              (fun _ -> Lwt.return false))
-        >>= fun write_outcome ->
-        cancel_req Context.Canceled;
-        let keep_alive =
-          match write_outcome with `Done k -> k | `Timeout -> false
+        (* Expect: 100-continue support (server.go:2089-2101). If the client
+           expects a 100, lazily reply on the first body read (wrap the body
+           BEFORE the read-timeout wrapper so the 100 is written on the first
+           real pull); else if it sent some other Expect value, reply 417 and
+           close without running the handler. *)
+        let unknown_expect =
+          if Request.expects_continue r then begin
+            if Request.proto_at_least r 1 1 && r.Request.content_length <> 0L
+            then wrap_expect_continue_body oc r;
+            false
+          end
+          else Header.get r.Request.header "Expect" <> ""
         in
-        (* Go's finishRequest: consume/close the request body before reusing the
-           connection, so a kept-alive connection is positioned at the next
-           message boundary (and any chunked trailer is read). The drain is
-           bounded; if too much remained unread, close instead of reusing. *)
-        if keep_alive then
-          drain_request_body r >>= fun reusable ->
-          if reusable then loop ~first:false () else Lwt.return_unit
-        else Lwt.return_unit
+        if unknown_expect then begin
+          cancel_req Context.Canceled;
+          write_expectation_failed oc
+        end
+        else begin
+          (* Whole-request read deadline around the streaming body pulls. *)
+          wrap_read_timeout_body conn_ctx ~secs:timeouts.to_read r;
+          (* Write deadline around the response write (Go's deferred
+             SetWriteDeadline, server.go:1017-1021). *)
+          race_deadline conn_ctx ~secs:timeouts.to_write (fun () ->
+              Lwt.catch
+                (fun () -> serve_one oc r handler)
+                (fun _ -> Lwt.return false))
+          >>= fun write_outcome ->
+          cancel_req Context.Canceled;
+          let keep_alive =
+            match write_outcome with `Done k -> k | `Timeout -> false
+          in
+          (* Go's finishRequest: consume/close the request body before reusing
+             the connection, so a kept-alive connection is positioned at the
+             next message boundary (and any chunked trailer is read). The drain
+             is bounded; if too much remained unread, close instead of reusing. *)
+          if keep_alive then
+            drain_request_body r >>= fun reusable ->
+            if reusable then loop ~first:false () else Lwt.return_unit
+          else Lwt.return_unit
+        end
   in
   Lwt.finalize
     (fun () -> loop ~first:true ())

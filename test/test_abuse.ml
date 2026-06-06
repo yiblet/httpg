@@ -441,6 +441,124 @@ let accepts_valid_host_and_headers () =
     true
     (status_contains resp "200 OK")
 
+(* ------------------------------------------------------------------ *)
+(* Ticket 5 — Expect: 100-continue handling + 417 (Case 7).            *)
+(*                                                                      *)
+(* Go honors [Expect: 100-continue] by lazily emitting the interim     *)
+(* "HTTP/1.1 100 Continue" line on the FIRST body read (server.go:     *)
+(* 964-983, :2089-2096, via expectContinueReader) and rejects any      *)
+(* other Expect value with 417 Expectation Failed + Connection: close  *)
+(* without running the handler (server.go:2097-2100, :2236-2252). We   *)
+(* drive a real loopback server with a raw socket and assert the wire  *)
+(* bytes. *)
+(* ------------------------------------------------------------------ *)
+
+(* Read everything off [ic] until EOF (or a bound), returning the accumulated
+   bytes. Used to capture the full interim + final response sequence. *)
+let read_all_until_eof ic =
+  let buf = Buffer.create 256 in
+  let rec loop () =
+    Lwt_io.read ~count:1024 ic >>= fun s ->
+    if s = "" then Lwt.return (Buffer.contents buf)
+    else begin
+      Buffer.add_string buf s;
+      loop ()
+    end
+  in
+  loop ()
+
+(* TestServerExpect100Continue (server.go:964-983,:2089-2096): a client sends
+   request headers with [Expect: 100-continue] and a Content-Length, then waits
+   WITHOUT sending the body. The handler reads the body; only then is the interim
+   "HTTP/1.1 100 Continue" written (lazily). After the client sees the 100 it
+   sends the body, the handler echoes it, and the final 200 arrives. We assert
+   the raw bytes contain the 100-continue interim line BEFORE the final 200 OK
+   status line, proving the lazy emit and the ordering. *)
+let expect_100_continue () =
+  (* Handler reads the whole request body, then echoes it back as the response.
+     The body read is what triggers the lazy 100. *)
+  let handler =
+    Server.handler_func (fun w r ->
+        Body.read_all r.Request.body >>= fun body -> w.Server.write body)
+  in
+  let run () =
+    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        (* Send headers only (Expect + Content-Length), withhold the body. *)
+        Lwt_io.write oc
+          "POST / HTTP/1.1\r\n\
+           Host: localhost\r\n\
+           Content-Length: 5\r\n\
+           Expect: 100-continue\r\n\
+           \r\n"
+        >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        (* Wait until the server lazily writes the 100-continue line; reading the
+           status line blocks until those bytes arrive (sent only once the
+           handler pulls the body). *)
+        read_status_line ic >>= fun interim ->
+        (* Now send the withheld body; the handler unblocks and replies. The
+           response is keep-alive (no Connection: close), so read exactly one
+           framed response rather than to EOF. *)
+        Lwt_io.write oc "hello" >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_one_response ic >>= fun rest ->
+        Lwt_io.close oc >>= fun () -> Lwt.return (interim, rest))
+      (fun () -> Server.close srv)
+  in
+  let interim, rest = Lwt_main.run (Net.with_timeout 5. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "interim 100 Continue line (%S)" interim)
+    true
+    (status_contains interim "HTTP/1.1 100 Continue");
+  (* The final response arrives after the body was sent, and echoes it. *)
+  Alcotest.(check bool)
+    (Printf.sprintf "final 200 OK after 100 (%S)"
+       (String.sub rest 0 (min 40 (String.length rest))))
+    true
+    (status_contains rest "200 OK");
+  Alcotest.(check bool) "echoed body" true (status_contains rest "hello")
+
+(* TestServerExpectUnknown (server.go:2097-2100,:2236-2252): a client sends an
+   Expect header with a value other than 100-continue; the server replies 417
+   Expectation Failed with Connection: close and does NOT run the handler. *)
+let expect_unknown () =
+  (* A handler that would write "hello" — it must NOT run for an unknown Expect. *)
+  let run () =
+    Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 hello_handler
+    >>= fun (srv, port, serve_loop) ->
+    Lwt.async (fun () -> serve_loop);
+    Lwt.finalize
+      (fun () ->
+        Net.connect ~host:"127.0.0.1" ~port () >>= fun (ic, oc) ->
+        Lwt_io.write oc
+          "POST / HTTP/1.1\r\n\
+           Host: localhost\r\n\
+           Content-Length: 5\r\n\
+           Expect: bogus\r\n\
+           \r\n"
+        >>= fun () ->
+        Lwt_io.flush oc >>= fun () ->
+        read_all_until_eof ic >>= fun resp ->
+        Lwt_io.close oc >>= fun () -> Lwt.return resp)
+      (fun () -> Server.close srv)
+  in
+  let resp = Lwt_main.run (Net.with_timeout 5. (run ())) in
+  Alcotest.(check bool)
+    (Printf.sprintf "417 Expectation Failed (%S)"
+       (String.sub resp 0 (min 40 (String.length resp))))
+    true
+    (status_contains resp "417");
+  Alcotest.(check bool)
+    "Connection: close" true
+    (status_contains resp "Connection: close");
+  (* The handler did not run: no "hello" body. *)
+  Alcotest.(check bool) "handler not run" false (status_contains resp "hello")
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -463,4 +581,6 @@ let tests =
       rejects_missing_host_http11;
     Alcotest.test_case "accepts_valid_host_and_headers" `Quick
       accepts_valid_host_and_headers;
+    Alcotest.test_case "expect_100_continue" `Quick expect_100_continue;
+    Alcotest.test_case "expect_unknown" `Quick expect_unknown;
   ]
