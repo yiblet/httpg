@@ -68,6 +68,12 @@ type error =
           (server.go:1050-1051). A missing required Host (HTTP/1.1+,
           non-CONNECT, non-h2-upgrade) and an invalid header name/value
           (server.go:1045-1062) surface as {!Protocol} (also 400). *)
+  | Response_header_too_large
+      (** {!read_response}: the response status line + header block exceeded the
+          bounded read budget (Go's [Transport.MaxResponseHeaderBytes], default
+          [10 lsl 20], transport.go:275-280,:337-340,:364). The client-side
+          mirror of {!Request_too_large}; the transport surfaces it as a modeled
+          round-trip failure rather than buffering an unbounded head. *)
 
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)
@@ -105,14 +111,22 @@ val read_request :
 
 val read_response :
   ?request:Body.t Request.t ->
+  ?max_header_bytes:int ->
   Lwt_io.input_channel ->
   (Body.t Response.t, error) result Lwt.t
-(** [read_response ?request ic] is [ReadResponse]: parse the status line,
-    headers and body framing. [request] optionally supplies the corresponding
-    request (for HEAD body suppression); a GET is assumed otherwise. The body is
-    a streaming {!Body.Stream} reading lazily from [ic] (not buffered); consume
-    it to EOF to reach the next message boundary and read any chunked trailer.
-*)
+(** [read_response ?request ?max_header_bytes ic] is [ReadResponse]: parse the
+    status line, headers and body framing. [request] optionally supplies the
+    corresponding request (for HEAD body suppression); a GET is assumed
+    otherwise. The body is a streaming {!Body.Stream} reading lazily from [ic]
+    (not buffered); consume it to EOF to reach the next message boundary and
+    read any chunked trailer.
+
+    [max_header_bytes] bounds the status line + header block cumulatively
+    against [max_header_bytes + 4096] bytes — the client-side mirror of
+    {!read_request}'s budget (Go's [Transport.MaxResponseHeaderBytes] /
+    [pc.readLimit], transport.go:275-280,:337-340,:364); exceeding it
+    short-circuits as [Error Response_header_too_large]. Omitting it leaves the
+    head read unbounded. *)
 
 val write_request :
   Lwt_io.output_channel -> Body.t Request.t -> (unit, error) result Lwt.t

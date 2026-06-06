@@ -59,9 +59,19 @@ type t = {
      the system trust store (secure by default). *)
   insecure : bool;
   authenticator : X509.Authenticator.t option;
+  (* Go's [Transport.MaxResponseHeaderBytes] (transport.go:275-280): a limit on
+     how many bytes the client will read parsing the response status line + header
+     block, so a hostile/buggy server cannot OOM the client. Go's
+     [DefaultMaxResponseHeaderBytes] (10<<20) applies when the field is zero
+     (transport.go:337-340). The response body is separately bounded by streaming
+     {!Transfer}, so this covers the head only. *)
+  max_response_header_bytes : int;
 }
 
-let create ?(insecure = false) ?authenticator () =
+let default_max_response_header_bytes = 10 lsl 20
+
+let create ?(insecure = false) ?authenticator
+    ?(max_response_header_bytes = default_max_response_header_bytes) () =
   {
     idle_conn = Hashtbl.create 8;
     disable_keep_alives = false;
@@ -70,6 +80,7 @@ let create ?(insecure = false) ?authenticator () =
     h2_round_trips = 0;
     insecure;
     authenticator;
+    max_response_header_bytes;
   }
 
 (* Go's connectMethodKey.String(): "scheme|host:port" (no proxy here). *)
@@ -328,7 +339,10 @@ let round_trip ?context ?(force_h2 = false) t (req : Body.t Request.t) :
     let exchange pc =
       Io.write_request pc.oc req >>= or_raise >>= fun () ->
       Lwt_io.flush pc.oc >>= fun () ->
-      Io.read_response ~request:req pc.ic >>= or_raise >>= fun resp ->
+      Io.read_response ~request:req
+        ~max_header_bytes:t.max_response_header_bytes pc.ic
+      >>= or_raise
+      >>= fun resp ->
       resp.Response.body <- wrap_body_lifecycle pc resp;
       Lwt.return resp
     in

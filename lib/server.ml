@@ -726,7 +726,7 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
   | Io.Protocol _ | Io.Missing_host | Io.Transfer _ | Io.Trailer_too_large
-  | Io.Malformed_host ->
+  | Io.Malformed_host | Io.Response_header_too_large ->
       (* Invalid header name/value, missing required Host, and a malformed Host
          value (server.go:1045-1062) all map to 400 Bad Request, as Go does via
          [badRequestError]. *)
@@ -734,6 +734,10 @@ let write_read_error_response oc (e : Io.error) : unit Lwt.t =
          [Stream] thunk after the header boundary returned [Ok]), so it rarely
          reaches here; if it does, treat it as a bad request like Go does for a
          malformed trailer (transfer.go:934, returned as a plain Read error). *)
+      (* [Response_header_too_large] is a client-side error (it can only arise
+         from {!Io.read_response}, never from the server's {!Io.read_request}
+         path), so it never actually reaches here; the arm exists only to keep
+         the match exhaustive. *)
       let public_err = "400 Bad Request" in
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)

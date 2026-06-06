@@ -559,6 +559,112 @@ let expect_unknown () =
   (* The handler did not run: no "hello" body. *)
   Alcotest.(check bool) "handler not run" false (status_contains resp "hello")
 
+(* ---------------------------------------------------------------------- *)
+(* Ticket 6 — client Transport.MaxResponseHeaderBytes (Case 14).          *)
+(*                                                                         *)
+(* Mirror of Ticket 2 on the response side: a hostile/buggy server cannot  *)
+(* OOM the client by streaming an unbounded response status line + header  *)
+(* block. Go's [Transport.MaxResponseHeaderBytes] (default 10<<20),        *)
+(* transport.go:275-280,:337-340,:364. The response BODY is already bounded *)
+(* by streaming [Transfer], so this covers the head only.                  *)
+(*                                                                         *)
+(* These drive a RAW loopback server (a bare [Net.listen]/[Net.accept]     *)
+(* loop, NOT a gohttp [Server]) so the test can emit arbitrary/malicious    *)
+(* bytes, against a [Client] backed by a [Transport] with a small          *)
+(* [~max_response_header_bytes]. Everything is bounded by [Net.with_timeout] *)
+(* so a hang (the failure we are guarding against) fails the test.         *)
+
+(* Run a single-shot raw server fiber [serve s_ic s_oc] on an ephemeral    *)
+(* loopback port, then run [client ~port], bounded. The server accepts one  *)
+(* connection, runs [serve], and is torn down with the listener at the end. *)
+let with_raw_server ~serve client =
+  let run () =
+    Net.listen "127.0.0.1" 0 >>= fun lfd ->
+    let port = Net.bound_port lfd in
+    let server =
+      Net.accept lfd >>= fun (cfd, _addr) ->
+      let s_ic, s_oc = Net.channels_of_fd cfd in
+      Lwt.finalize
+        (fun () -> serve s_ic s_oc)
+        (fun () ->
+          Lwt.catch (fun () -> Lwt_unix.close cfd) (fun _ -> Lwt.return_unit))
+    in
+    Lwt.async (fun () ->
+        Lwt.catch (fun () -> server) (fun _ -> Lwt.return_unit));
+    Lwt.finalize
+      (fun () -> client ~port)
+      (fun () ->
+        Lwt.catch (fun () -> Lwt_unix.close lfd) (fun _ -> Lwt.return_unit))
+  in
+  Lwt_main.run (Net.with_timeout 5. (run ()))
+
+(* TestTransportResponseHeaderTooLarge (Go's MaxResponseHeaderBytes,
+   transport.go:275-280,:337-340,:364): a server that writes a valid status
+   line then an endless header stream must make the round trip FAIL with the
+   modeled [Response_header_too_large] error within the budget — not hang or
+   OOM. We set [~max_response_header_bytes:8192]; the client reads at most
+   8192 + 4096 bytes of head before raising. *)
+let response_header_too_large () =
+  (* Malicious server: valid status line, then header lines forever. *)
+  let serve s_ic s_oc =
+    Lwt_io.write s_oc "HTTP/1.1 200 OK\r\n" >>= fun () ->
+    let filler = String.make 200 'y' in
+    let rec spew i =
+      Lwt_io.write s_oc (Printf.sprintf "X-Flood-%d: %s\r\n" i filler)
+      >>= fun () ->
+      Lwt_io.flush s_oc >>= fun () -> spew (i + 1)
+    in
+    (* Keep the input channel referenced so it is not GC'd mid-write. *)
+    ignore s_ic;
+    spew 0
+  in
+  let client ~port =
+    let transport = Transport.create ~max_response_header_bytes:8192 () in
+    let c = Client.create ~transport () in
+    let url = Printf.sprintf "http://127.0.0.1:%d/" port in
+    Lwt.catch
+      (fun () ->
+        Client.get c url >>= fun _resp -> Lwt.return (Error "no error"))
+      (fun exn -> Lwt.return (Ok (Printexc.to_string exn)))
+  in
+  let result = with_raw_server ~serve client in
+  match result with
+  | Error msg -> Alcotest.fail (Printf.sprintf "expected failure, got %s" msg)
+  | Ok exn_str ->
+      (* The transport surfaces the Io error as a Protocol_error carrying the
+         modeled [Response_header_too_large] message text. *)
+      Alcotest.(check bool)
+        (Printf.sprintf "modeled response-header-too-large error (%S)" exn_str)
+        true
+        (let needle = "MaxResponseHeaderBytes" in
+         match Str.search_forward (Str.regexp_string needle) exn_str 0 with
+         | _ -> true
+         | exception Not_found -> false)
+
+(* TestTransportResponseHeaderUnderLimitOk: a normal response whose head is
+   well under the limit succeeds (200, body intact). *)
+let response_header_under_limit_ok () =
+  let body = "hello world" in
+  let serve s_ic s_oc =
+    ignore s_ic;
+    Lwt_io.write s_oc
+      (Printf.sprintf
+         "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+         (String.length body) body)
+    >>= fun () -> Lwt_io.flush s_oc
+  in
+  let client ~port =
+    let transport = Transport.create ~max_response_header_bytes:8192 () in
+    let c = Client.create ~transport () in
+    let url = Printf.sprintf "http://127.0.0.1:%d/" port in
+    Client.get c url >>= fun resp ->
+    Body.read_all resp.Response.body >>= fun b ->
+    Lwt.return (resp.Response.status_code, b)
+  in
+  let code, b = with_raw_server ~serve client in
+  Alcotest.(check int) "status 200" 200 code;
+  Alcotest.(check string) "body intact" body b
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -583,4 +689,8 @@ let tests =
       accepts_valid_host_and_headers;
     Alcotest.test_case "expect_100_continue" `Quick expect_100_continue;
     Alcotest.test_case "expect_unknown" `Quick expect_unknown;
+    Alcotest.test_case "response_header_too_large" `Quick
+      response_header_too_large;
+    Alcotest.test_case "response_header_under_limit_ok" `Quick
+      response_header_under_limit_ok;
   ]

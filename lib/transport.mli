@@ -16,9 +16,15 @@ type t
     a ["scheme|host:port"] cache key to a list of idle connections) plus a
     keep-alive toggle. *)
 
-val create : ?insecure:bool -> ?authenticator:X509.Authenticator.t -> unit -> t
-(** [create ?insecure ?authenticator ()] is Go's [&Transport{}]: a fresh
-    transport with an empty pool and keep-alives enabled.
+val create :
+  ?insecure:bool ->
+  ?authenticator:X509.Authenticator.t ->
+  ?max_response_header_bytes:int ->
+  unit ->
+  t
+(** [create ?insecure ?authenticator ?max_response_header_bytes ()] is Go's
+    [&Transport{}]: a fresh transport with an empty pool and keep-alives
+    enabled.
 
     The TLS verification policy for https dials (reduced from Go's
     [Transport.TLSClientConfig]) is secure by default — the server certificate
@@ -26,7 +32,16 @@ val create : ?insecure:bool -> ?authenticator:X509.Authenticator.t -> unit -> t
     [?authenticator] supplies an explicit [X509.Authenticator.t] (highest
     precedence); [?insecure:true] disables verification entirely (Go's
     [InsecureSkipVerify], suitable only for self-signed/loopback test servers).
-    See {!Net.connect_alpn}. *)
+    See {!Net.connect_alpn}.
+
+    [?max_response_header_bytes] bounds the response status line + header block
+    the client reads, so a hostile/buggy server cannot OOM the client before any
+    handler runs (Go's [Transport.MaxResponseHeaderBytes],
+    transport.go:275-280). Defaults to [10 lsl 20] (Go's
+    [DefaultMaxResponseHeaderBytes], transport.go:337-340). On overflow the
+    round trip fails with a modeled error derived from
+    {!Io.Response_header_too_large}. The response body is separately bounded by
+    streaming {!Transfer}, so this covers the head only. *)
 
 val round_trip :
   ?context:Context.t ->

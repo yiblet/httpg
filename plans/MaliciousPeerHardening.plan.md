@@ -434,7 +434,7 @@ Test Successful in 2.265s. 518 tests run.
 ---
 
 ### Ticket 6 — Client `MaxResponseHeaderBytes` (Case 14)
-Status: Planned — depends on Ticket 2
+Status: Done
 
 **A) Scope**
 Bound the response status line + header block the client reads, so a hostile/buggy server cannot OOM the client before any handler runs. Body is already correctly bounded (streaming `Transfer`), so no body change.
@@ -458,7 +458,36 @@ A server streaming an unbounded header block makes the client fail with a modele
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/io.ml`:
+  - New internal sentinel `exception Response_header_too_large` + `response_header_too_large_sentinel` alias — the client-side mirror of T2's `Request_too_large`, declared before `type error` (whose `Response_header_too_large` arm shadows the name) so the deep parse path can raise it; caught at the boundary in `error_of_exception` and mapped to the `error` arm. Distinct sentinel from `Request_too_large` so the client surfaces its own typed error (not the server-side 431 path).
+  - New `Io.error` arm `Response_header_too_large` with `error_to_string` = `"net/http: server response headers exceeded MaxResponseHeaderBytes; aborted"` (Go's `transport.go:2506` message, dropping only the `%d bytes` byte count which is not available at the boundary).
+  - `read_response_raising` gains `?max_header_bytes`: allocates `Some (ref (n + 4096))` (the same `initialReadLimitSize`/bufio-slop shape as `read_request_raising`, Go's `pc.readLimit`) and passes the shared T2 `?limit` ref to BOTH the status-line `read_line` and the header-block `read_mime_header_raising`, so the status line + all header lines are bounded cumulatively against one budget. The shared `read_line` budget raises `Request_too_large`; `read_response_raising` catches that at both read points and re-raises `Response_header_too_large` so the error type is correct on the client side (this is the same remap idiom `read_trailer` uses to turn `Request_too_large` into `Trailer_too_large`).
+  - Boundary wrapper `read_response : ?request -> ?max_header_bytes -> ...` forwards to the raising core.
+- `lib/io.mli`: documented the new `Response_header_too_large` boundary-error arm and `?max_header_bytes` on `read_response` (kept in sync).
+- `lib/transport.ml`:
+  - `Transport.t` gains `max_response_header_bytes : int`; `create` gains `?max_response_header_bytes` defaulting to `default_max_response_header_bytes = 10 lsl 20` (Go's `DefaultMaxResponseHeaderBytes`, transport.go:337-340).
+  - The response read site (`exchange` inside `round_trip`) passes `~max_header_bytes:t.max_response_header_bytes` into `Io.read_response`.
+  - **Error surfacing:** no new boundary mapping was needed — the existing `or_raise` at the read site already maps ANY `Io.error` (now including `Response_header_too_large`) into `Lwt.fail (Io.Protocol_error (Io.error_to_string e))`, which rides the transport's established exception-based round-trip-failure flow (the retry/close-conn machinery). So an oversized response head fails the round trip with the modeled message text rather than hanging or OOMing.
+- `lib/transport.mli`: documented `?max_response_header_bytes` on `create` (kept in sync).
+- `lib/server.ml`: added `Io.Response_header_too_large` to `write_read_error_response`'s catch-all 400 arm purely to keep the match exhaustive under warnings-as-errors — it is a client-side error that can never arise on the server's `read_request` path (commented as such).
+- `test/test_abuse.ml`: added `response_header_too_large` and `response_header_under_limit_ok`, both driving a RAW `Net.listen`/`Net.accept` loopback server (not a gohttp `Server`, so it can emit malicious bytes) against a `Client` backed by `Transport.create ~max_response_header_bytes:8192`, all bounded by `Net.with_timeout 5.`. Added a `with_raw_server` helper (single-shot accept + serve, listener/conn torn down in `finalize`). The too-large test asserts the round trip fails with an exception whose message contains `MaxResponseHeaderBytes` (not a hang/OOM); the ok test asserts 200 + intact body.
+
+**Precedent followed**
+- **Response-side mirror of T2.** Reused T2's `read_line ?limit` / `read_mime_header_raising ?limit` shared mutable byte budget (`int ref`) verbatim and the `io.ml` sentinel→`error` boundary (`error_of_exception`/`to_result`) — added `Response_header_too_large` exactly as T2 added `Request_too_large` (raised deep, mapped once at the boundary), and remapped `Request_too_large`→`Response_header_too_large` at the two read points the same way `read_trailer` remaps it to `Trailer_too_large`. **Verified against Go:** Go bounds the response head with `pc.readLimit = t.maxHeaderResponseSize()` set before `readResponse` and surfaces `errTooLarge`/the `MaxResponseHeaderBytes` message at `transport.go:2504-2507`; the default is `DefaultMaxResponseHeaderBytes = 10<<20` applied when the field is zero (`transport.go:337-340`). The shared-ref-across-status-line-and-headers budget reproduces `pc.readLimit` bounding the whole head. No correction to the T2 precedent was needed.
+- **Transport `Io`-error mapping at the read site.** Followed the existing `or_raise` (`lib/transport.ml`) which already converts every `Io.error` into `Io.Protocol_error (Io.error_to_string e)` and lets it ride the transport's exception-based failure flow — no bespoke mapping added.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  14   response_header_too_large.
+  [OK]          Abuse                  15   response_header_under_limit_ok.
+
+Test Successful in 2.237s. 520 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (520 tests: 518 prior + 2 new).
+
+**Commit:** `yrolkqzz` (`feat(transport): bound response head with MaxResponseHeaderBytes`).
 
 ---
 

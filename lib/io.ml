@@ -53,6 +53,18 @@ exception Malformed_host
 
 let malformed_host_sentinel = Malformed_host
 
+(* Client-side analogue of [Request_too_large]: the response status line + header
+   block exceeded the bounded read budget (Go's [Transport.MaxResponseHeaderBytes],
+   default 10<<20, transport.go:275-280,:337-340,:364). Declared before
+   [type error] (whose [Response_header_too_large] arm shadows the name) and
+   aliased so the deep parser can raise it; caught at the boundary and mapped to
+   the {!error} arm. Reuses the same T2 [read_line ?limit] budget mechanism as the
+   request side, but raises a distinct sentinel so the client maps it to its own
+   typed error rather than the server-side 431 path. *)
+exception Response_header_too_large
+
+let response_header_too_large_sentinel = Response_header_too_large
+
 (* Handleable boundary error (see io.mli). *)
 type error =
   | Protocol of string
@@ -62,6 +74,7 @@ type error =
   | Request_too_large
   | Trailer_too_large
   | Malformed_host
+  | Response_header_too_large
 
 let error_to_string = function
   | Protocol s -> s
@@ -71,6 +84,9 @@ let error_to_string = function
   | Request_too_large -> "http: request too large"
   | Trailer_too_large -> "http: suspiciously long trailer after chunked body"
   | Malformed_host -> "malformed Host header"
+  | Response_header_too_large ->
+      "net/http: server response headers exceeded MaxResponseHeaderBytes; \
+       aborted"
 
 (* Internal sentinels carrying a typed boundary error through the raising parse
    path. Caught at the read/write boundary and mapped to {!error}; never escape
@@ -95,6 +111,7 @@ let error_of_exception = function
   | e when e == request_too_large_sentinel -> Request_too_large
   | e when e == trailer_too_large_sentinel -> Trailer_too_large
   | e when e == malformed_host_sentinel -> Malformed_host
+  | e when e == response_header_too_large_sentinel -> Response_header_too_large
   | e -> raise e
 
 (* ------------------------------------------------------------------ *)
@@ -524,11 +541,25 @@ let trim_left_spaces s =
   String.sub s !i (n - !i)
 
 let read_response_raising ?(request : Body.t Request.t option)
-    (ic : Lwt_io.input_channel) : Body.t Response.t Lwt.t =
+    ?(max_header_bytes : int option) (ic : Lwt_io.input_channel) :
+    Body.t Response.t Lwt.t =
+  (* Bound the status line + header block against one cumulative budget, the
+     client-side mirror of [read_request_raising] (Go's
+     [Transport.MaxResponseHeaderBytes] / [pc.readLimit], transport.go:275-280,
+     :337-340,:364). [None] leaves the read unbounded. The shared T2 [read_line]
+     budget raises [Request_too_large] on exhaustion; remap it to the distinct
+     [Response_header_too_large] sentinel so the client surfaces its own typed
+     error rather than the server-side 431 path. *)
+  let limit =
+    match max_header_bytes with Some n -> Some (ref (n + 4096)) | None -> None
+  in
   Lwt.catch
-    (fun () -> read_line ic >|= fun l -> l)
+    (fun () -> read_line ?limit ic >|= fun l -> l)
     (function
-      | End_of_file -> Lwt.fail Unexpected_eof_sentinel | e -> Lwt.fail e)
+      | End_of_file -> Lwt.fail Unexpected_eof_sentinel
+      | e when e == request_too_large_sentinel ->
+          Lwt.fail response_header_too_large_sentinel
+      | e -> Lwt.fail e)
   >>= fun line ->
   (match String.index_opt line ' ' with
     | None -> Lwt.fail (bad_string_error "malformed HTTP response" line)
@@ -557,7 +588,13 @@ let read_response_raising ?(request : Body.t Request.t option)
         match Request.parse_http_version proto with
         | None -> Lwt.fail (bad_string_error "malformed HTTP version" proto)
         | Some (proto_major, proto_minor) ->
-            read_mime_header_raising ic >>= fun header ->
+            Lwt.catch
+              (fun () -> read_mime_header_raising ?limit ic)
+              (function
+                | e when e == request_too_large_sentinel ->
+                    Lwt.fail response_header_too_large_sentinel
+                | e -> Lwt.fail e)
+            >>= fun header ->
             fix_pragma_cache_control header;
             let request_method =
               match request with Some r -> r.Request.meth | None -> "GET"
@@ -702,8 +739,9 @@ let read_mime_header ic : (Header.t, error) result Lwt.t =
 let read_request ?max_header_bytes ic : (Body.t Request.t, error) result Lwt.t =
   to_result (fun () -> read_request_raising ?max_header_bytes ic)
 
-let read_response ?request ic : (Body.t Response.t, error) result Lwt.t =
-  to_result (fun () -> read_response_raising ?request ic)
+let read_response ?request ?max_header_bytes ic :
+    (Body.t Response.t, error) result Lwt.t =
+  to_result (fun () -> read_response_raising ?request ?max_header_bytes ic)
 
 let write_request oc r : (unit, error) result Lwt.t =
   to_result (fun () -> write_request_raising oc r)
