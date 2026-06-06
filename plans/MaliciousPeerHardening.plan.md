@@ -716,7 +716,7 @@ Test Successful in 2.296s. 529 tests run.
 ---
 
 ### Ticket 11 — HTTP/2 flow-control overflow modeled as connection error (Case 13)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Ensure a flow-control window overflow surfaces as a modeled `H2_error` connection error (GOAWAY `FLOW_CONTROL_ERROR`) rather than an `invalid_arg` raise that could crash the connection fiber. Detection logic itself is already correct. Low severity / fidelity — first confirm whether the serve loop already converts the raise.
@@ -738,4 +738,36 @@ A peer that overflows its flow-control window triggers a clean `FLOW_CONTROL_ERR
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**Step-2 finding (would it crash the fiber?): IT WOULD CRASH THE FIBER.**
+- `inflow_add`'s overflow raised `invalid_arg` (h2_flow.ml:31). Its callers `send_window_update_conn`/`send_window_update_stream` (h2_server.ml:324,:339) are invoked **synchronously** from `process_data` (via `process_frame`, the `Read_frame` arm of `serve_loop`, h2_server.ml:1170) and directly from the `Body_read` arm (h2_server.ml:1193-1195). Neither path was wrapped in a `Lwt.catch`. `serve_loop` is wrapped only in `Lwt.finalize` (h2_server.ml:1309), which runs cleanup and **re-raises** — so an `inflow_add` overflow would reject the connection fiber's promise with `Invalid_argument` after running teardown, i.e. an unclean crash with **no GOAWAY emitted**. (The reader fiber's `Lwt.catch` at :1087 only covers wire reads, not the synchronous serve-loop frame processing.) So this was a correctness fix, not just a rename.
+
+**Go-fidelity audit (the important correction to the plan's premise).**
+- Verified against `go/src/net/http/internal/http2/flow.go`: `inflow.add`'s `panic("flow control update exceeds maximum window size")` (flow.go:42) is a genuine **panic / invariant**, NOT `ConnectionError(ErrCodeFlowControl)`. It returns flow control we previously *took* via `inflow.take` (itself capped), so a conformant peer can never trip it.
+- The actual malicious-peer flow-control-overflow `ConnectionError(ErrCodeFlowControl)` lives on **two** paths, both of which gohttp **already** models correctly: (1) inbound DATA over the window — `inflow.take`/`takeInflows` false → `streamError`/`ConnectionError` (server.go:1444,:1732,:1749,:1762) ⇒ gohttp `process_data` already returns `Error H2_error.FlowControlError` (h2_server.ml:857-915); (2) a bogus peer **WINDOW_UPDATE** overflowing the *outbound* window — `flow.add` false → `ConnectionError(ErrCodeFlowControl)` (server.go:1525-1529,:1686-1693) ⇒ gohttp `process_window_update` already returns `Error H2_error.FlowControlError` (h2_server.ml:998-1007), riding `outcome_of_result`→`Conn_error`→`go_away`. Go's overflow test `TestServer_Send_GoAway_After_Bogus_WindowUpdate` (server_test.go:1354-1365) exercises exactly path (2) and already passed here.
+- So the only remaining gap was the `inflow_add` invariant-overflow surfacing as an uncaught `invalid_arg`. Resolution honoring both Go and the repo's error policy: surface it as the modeled `H2_error.Connection_error H2_error.FlowControlError` (a typed connection error) and make the synchronous serve-loop paths route it to the **existing** `Conn_error`→`go_away` GOAWAY flow, so even this can't-happen invariant terminates the connection cleanly with `FLOW_CONTROL_ERROR` instead of crashing the fiber.
+
+**What changed**
+- `lib/internal/http2/h2_flow.ml`: `inflow_add`'s overflow now `raise (H2_error.Connection_error H2_error.FlowControlError)` instead of `invalid_arg`. The negative-update guard stays `invalid_arg` (Go's `panic("negative update")` — a real programming bug). Detection logic unchanged. (flow.go:42)
+- `lib/internal/http2/h2_flow.mli`: documented the new raise behavior of `inflow_add` (negative → `Invalid_argument`; window overflow → `H2_error.Connection_error FlowControlError`).
+- `lib/internal/http2/h2_server.ml`: the two synchronous serve-loop arms that can hit `inflow_add` (`Read_frame` → `process_frame`, and `Body_read` → `send_window_update_*`) now `try ... with H2_error.Connection_error code -> Conn_error code`, so a raised modeled connection error routes to the existing `go_away`/`finish_or_continue` path. No parallel teardown; reuses the `process_window_update` mechanism exactly. maxConcurrentStreams logic untouched.
+- `test/test_h2_flow.ml`: `test_inflow_add_overflow` now expects `H2_error.Connection_error H2_error.FlowControlError` (was `Invalid_argument "..."`). This is a porting-artifact fix: Go's `inflow.add` panics (not a typed error), and Ticket 11 deliberately changes how the overflow is surfaced, so the unit test's expectation is updated to match the new modeled error.
+- `test/test_abuse.ml`: added `h2_flow_control_overflow_goaway` and `h2_max_concurrent_streams_refused` to the `Abuse` suite (reusing the existing `h2_duplex`/`h2_request_block`/`h2_open`/`read_until_goaway` harness; added a `read_until_rst` helper).
+
+**Tests added**
+- `h2_flow_control_overflow_goaway` (mirrors Go's `TestServer_Send_GoAway_After_Bogus_WindowUpdate`, server_test.go:1354-1365): client sends `WINDOW_UPDATE(stream 0, 2^31-1)` after the handshake; asserts the server GOAWAYs with `FLOW_CONTROL_ERROR` **and** that the serve fiber terminates cleanly (the `serve` promise resolves within 1s, proving no crash).
+- `h2_max_concurrent_streams_refused` (regression — **not** previously covered in `test_abuse.ml`; only enum/encoding unit tests existed in `test_h2.ml`): with `~max_concurrent_streams:1`, stream 1 kept open (blocking handler) and stream 3 opened over the limit; asserts an `RST_STREAM` for stream 3 with `REFUSED_STREAM`. Added to lock in the already-faithful behavior (logic unchanged).
+
+**Precedent followed**
+- `process_window_update`/`process_settings` → `outcome_of_result` → `Conn_error` → `go_away` (h2_server.ml:1046-1048,:1064-1066,:1174-1177,:354). The modeled overflow error rides this identical path. **Verified against Go (flow.go, server.go) — see the Go-fidelity audit above.** The plan's premise ("flow-control overflow surfaces as `invalid_arg`") was true only for the can't-happen `inflow_add` invariant; the genuine malicious-peer overflow GOAWAY was already faithful and required no change. No precedent needed correcting; the plan's framing was refined (recorded above).
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  25   h2_flow_control_overflow_goaway.
+  [OK]          Abuse                  26   h2_max_concurrent_streams_refused.
+
+Test Successful in 2.248s. 531 tests run.
+```
+Plus `H2Flow` suite green (incl. the updated `inflow_add_overflow`). `dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (531 tests: 529 prior + 2 new).
+
+**Commit:** `lzsmymzk` (`feat(h2): model flow-control overflow as FLOW_CONTROL_ERROR GOAWAY`).

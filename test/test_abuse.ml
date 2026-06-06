@@ -1151,6 +1151,101 @@ let accepts_distinct_settings () =
   Alcotest.(check (option string))
     "distinct SETTINGS accepted; GET served 200" (Some "200") status
 
+(* Ticket 11 (Case 13): HTTP/2 flow-control window overflow surfaces as a
+   modeled FLOW_CONTROL_ERROR connection error (GOAWAY), and the serve fiber
+   terminates cleanly rather than crashing. Refs:
+   go/src/net/http/internal/http2/flow.go (inflow.add / flow.add overflow ->
+   ConnectionError(ErrCodeFlowControl)); the trigger mirrors Go's
+   TestServer_Send_GoAway_After_Bogus_WindowUpdate (server_test.go:1354-1365):
+   a connection-level WINDOW_UPDATE of 2^31-1 overflows the outbound window. *)
+let h2_flow_control_overflow_goaway () =
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    rw.Api.rw_flush ()
+  in
+  let max_window = (1 lsl 31) - 1 in
+  let code, server_terminated =
+    Lwt_main.run
+      (Net.with_timeout 15.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server = S.serve s_ic s_oc ~handler in
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          F.write_settings c_oc [] >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* Bogus connection-level WINDOW_UPDATE that overflows the window. *)
+          F.write_window_update c_oc 0 max_window >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          read_until_goaway c_ic >>= fun code ->
+          Lwt_io.close c_oc >>= fun () ->
+          (* Assert the serve fiber finishes cleanly (resolves, no crash). *)
+          Lwt.catch
+            (fun () ->
+              Lwt.pick
+                [
+                  (server >>= fun () -> Lwt.return true);
+                  (Lwt_unix.sleep 1.0 >>= fun () -> Lwt.return false);
+                ])
+            (fun _ -> Lwt.return false)
+          >>= fun terminated -> Lwt.return (code, terminated)))
+  in
+  Alcotest.(check bool)
+    "GOAWAY error code is FLOW_CONTROL_ERROR" true
+    (code = H2_error.FlowControlError);
+  Alcotest.(check bool)
+    "serve fiber terminated cleanly (no crash)" true server_terminated
+
+(* Read frames until an RST_STREAM is seen; return its (stream_id, code). *)
+let rec read_until_rst ic =
+  F.read_frame ic >>= function
+  | Ok (F.RST_stream (fh, rf)) -> Lwt.return (fh.stream_id, rf.error_code)
+  | Ok _ -> read_until_rst ic
+  | Error e -> raise (H2_error.to_exception e)
+
+(* TestH2MaxConcurrentStreamsRefused (regression): with adv_max_streams = 1,
+   a second concurrent stream opened while the first is still active is refused
+   with RST_STREAM REFUSED_STREAM. Ref: server.go (processHeaders over
+   maxConcurrentStreams); gohttp h2_server.ml:817-821. *)
+let h2_max_concurrent_streams_refused () =
+  (* The first stream's handler blocks forever, keeping cur_client_streams at
+     adv_max_streams so the second stream trips the refusal. *)
+  let block, _wake = Lwt.wait () in
+  let started, started_u = Lwt.wait () in
+  let woken = ref false in
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    if not !woken then begin
+      woken := true;
+      Lwt.wakeup_later started_u ()
+    end;
+    block >>= fun () -> rw.Api.rw_flush ()
+  in
+  let sid, code =
+    Lwt_main.run
+      (Net.with_timeout 15.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server = S.serve ~max_concurrent_streams:1 s_ic s_oc ~handler in
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          F.write_settings c_oc [] >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* Stream 1: kept open (no END_STREAM) so it counts as active. *)
+          F.write_headers c_oc ~stream_id:1 ~end_stream:false ~end_headers:true
+            (h2_request_block "/")
+          >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          started >>= fun () ->
+          (* Stream 3: over the limit -> RST_STREAM REFUSED_STREAM. *)
+          h2_open c_oc ~stream_id:3 >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          read_until_rst c_ic >>= fun (sid, code) ->
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () -> Lwt.return (sid, code)))
+  in
+  Alcotest.(check int) "RST_STREAM is for stream 3" 3 sid;
+  Alcotest.(check bool)
+    "RST_STREAM code is REFUSED_STREAM" true
+    (code = H2_error.RefusedStream)
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -1195,4 +1290,8 @@ let tests =
       rejects_duplicate_settings;
     Alcotest.test_case "accepts_distinct_settings" `Quick
       accepts_distinct_settings;
+    Alcotest.test_case "h2_flow_control_overflow_goaway" `Quick
+      h2_flow_control_overflow_goaway;
+    Alcotest.test_case "h2_max_concurrent_streams_refused" `Quick
+      h2_max_concurrent_streams_refused;
   ]

@@ -1167,7 +1167,15 @@ let rec serve_loop sc : unit Lwt.t =
                 sc.serving_done <- true;
                 Lwt.return_unit)
         | Read_frame f -> (
-            match process_frame sc f with
+            (* A synchronous flow-control overflow in inflow_add (e.g. while
+               returning conn-level window for this DATA frame) raises a
+               modeled Connection_error; catch it here so it routes to GOAWAY
+               via the same Conn_error path rather than crashing the fiber. *)
+            let outcome =
+              try process_frame sc f
+              with H2_error.Connection_error code -> Conn_error code
+            in
+            match outcome with
             | Ok_frame ->
                 let* () = schedule_frame_write sc in
                 serve_loop sc
@@ -1187,14 +1195,28 @@ let rec serve_loop sc : unit Lwt.t =
         | Want_write_frame req ->
             let* () = write_frame sc req in
             serve_loop sc
-        | Body_read (st, n) ->
+        | Body_read (st, n) -> (
             (* noteBodyRead: conn-level window update, and stream-level unless
-               half-closed/closed. *)
-            send_window_update_conn sc n;
-            if st.state <> State_half_closed_remote && st.state <> State_closed
-            then send_window_update_stream sc st n;
-            let* () = schedule_frame_write sc in
-            serve_loop sc
+               half-closed/closed. An inflow_add overflow here raises a modeled
+               Connection_error; route it to GOAWAY instead of crashing. *)
+            let outcome =
+              try
+                send_window_update_conn sc n;
+                if
+                  st.state <> State_half_closed_remote
+                  && st.state <> State_closed
+                then send_window_update_stream sc st n;
+                Ok_frame
+              with H2_error.Connection_error code -> Conn_error code
+            in
+            match outcome with
+            | Ok_frame ->
+                let* () = schedule_frame_write sc in
+                serve_loop sc
+            | Conn_error code ->
+                go_away sc code;
+                let* () = schedule_frame_write sc in
+                finish_or_continue sc)
         | Handler_done ->
             handler_done_serve sc;
             let* () = schedule_frame_write sc in

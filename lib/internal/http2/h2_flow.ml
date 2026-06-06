@@ -28,7 +28,14 @@ let inflow_add f n =
   if n < 0 then invalid_arg "negative update";
   let unsent = Int64.add (Int64.of_int32 f.unsent) (Int64.of_int n) in
   if Int64.add unsent (Int64.of_int32 f.avail) > Int64.of_int max_window then
-    invalid_arg "flow control update exceeds maximum window size";
+    (* "A sender MUST NOT allow a flow-control window to exceed 2^31-1
+       octets." (RFC 7540 6.9.1). Go panics here (flow.go:42), because the
+       returned window is bounded by what [inflow_take] previously permitted,
+       so a conformant peer can never trip it. We surface a modeled
+       [FLOW_CONTROL_ERROR] connection error instead of an [invalid_arg] so
+       that, should it ever fire, it rides the serve loop's existing
+       Conn_error -> GOAWAY path rather than crashing the connection fiber. *)
+    raise (H2_error.Connection_error H2_error.FlowControlError);
   f.unsent <- Int64.to_int32 unsent;
   if f.unsent < Int32.of_int inflow_min_refresh && f.unsent < f.avail then
     (* If there aren't at least inflowMinRefresh bytes of window to send,

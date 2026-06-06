@@ -42,20 +42,24 @@ let test_take_inflows () =
   Alcotest.(check bool) "take 6 from 5,15" false (Flow.take_inflows a b 6);
   Alcotest.(check bool) "take 5 from 5,15" true (Flow.take_inflows a b 5)
 
-(* inflow add overflow / negative: OCaml raises Invalid_argument where Go
-   panics. *)
+(* inflow add negative: a genuine programming bug, raised as Invalid_argument
+   (Go panics "negative update", flow.go:35). *)
 let test_inflow_add_negative () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f 0l;
   Alcotest.check_raises "negative" (Invalid_argument "negative update")
     (fun () -> ignore (Flow.inflow_add f (-1)))
 
+(* inflow add overflow: Go panics (flow.go:42), but to avoid crashing the
+   serve fiber we surface a modeled FLOW_CONTROL_ERROR connection error that
+   the serve loop converts to a GOAWAY (Ticket 11). *)
 let test_inflow_add_overflow () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f (Int32.of_int Flow.max_window);
   Alcotest.check_raises "overflow"
-    (Invalid_argument "flow control update exceeds maximum window size")
-    (fun () -> ignore (Flow.inflow_add f 1))
+    (Gohttp_http2.H2_error.Connection_error
+       Gohttp_http2.H2_error.FlowControlError) (fun () ->
+      ignore (Flow.inflow_add f 1))
 
 (* TestOutFlow *)
 let test_outflow () =
