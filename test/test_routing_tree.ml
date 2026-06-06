@@ -1,6 +1,7 @@
 (* Ported from go/src/net/http/routing_tree_test.go. Handlers are () (Go's nil). *)
 
-open Gohttp
+module Pattern = Gohttp_internal.Pattern
+module Routing_tree = Gohttp_internal.Routing_tree
 
 let build_tree pats =
   let root = Routing_tree.create () in

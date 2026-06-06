@@ -4,6 +4,9 @@
 
 open Lwt.Infix
 
+(* [path_clean] (Go's path.Clean) lives with the routing internals. *)
+module Pattern = Gohttp_internal.Pattern
+
 type file_info = {
   fi_name : string;
   fi_size : int64;

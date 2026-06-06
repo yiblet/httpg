@@ -6,6 +6,11 @@
 
 open Lwt.Infix
 
+(* Routing internals live in the private gohttp_internal library (Go keeps
+   pattern.go / routingNode / mapping.go unexported in net/http). *)
+module Pattern = Gohttp_internal.Pattern
+module Routing_tree = Gohttp_internal.Routing_tree
+
 (* Go's http.TimeFormat applied to the current time. *)
 let http_time_now () =
   let y, mo, d, h, mi, s, wd = Http_time.utc_of_unix (Unix.gettimeofday ()) in

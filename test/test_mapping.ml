@@ -1,6 +1,6 @@
 (* Ported from go/src/net/http/mapping_test.go. *)
 
-open Gohttp
+module Mapping = Gohttp_internal.Mapping
 
 (* TestMapping: stays a slice up to max_slice, switches to map beyond. *)
 let test_mapping () =
