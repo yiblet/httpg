@@ -1,9 +1,9 @@
 opam-version: "2.0"
 synopsis: "Httpg starter project"
 description: "A small starter OCaml project."
-maintainer: ["TODO"]
-authors: ["TODO"]
-license: "MIT"
+maintainer: ["Shalom Yiblet <shalom.yiblet@gmail.com>"]
+authors: ["Shalom Yiblet <shalom.yiblet@gmail.com>"]
+license: "BSD-3-Clause"
 depends: [
   "ocaml" {>= "5.0"}
   "dune" {>= "3.0"}
