@@ -3,10 +3,10 @@
 
    Each test creates a unique temp directory, populates it, serves it via a
    [Fs.file_server] over an ephemeral loopback [Httptest.Server], drives it with
-   the gohttp [Client], and removes the temp dir in an [Lwt.finalize]. The whole
+   the httpg [Client], and removes the temp dir in an [Lwt.finalize]. The whole
    run is bounded by [Net.with_timeout] so a hang fails rather than blocks. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 module Ts = Httptest.Server
 
@@ -15,7 +15,7 @@ module Ts = Httptest.Server
 let mktempdir () =
   let base = Filename.get_temp_dir_name () in
   let name =
-    Printf.sprintf "gohttp_fs_%d_%d" (Unix.getpid ()) (Random.int 1_000_000_000)
+    Printf.sprintf "httpg_fs_%d_%d" (Unix.getpid ()) (Random.int 1_000_000_000)
   in
   let dir = Filename.concat base name in
   Unix.mkdir dir 0o755;

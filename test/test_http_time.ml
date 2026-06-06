@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 
 (* The HTTP-date reference instant 2006-01-02 15:04:05 UTC, a Monday. *)
 let epoch = Http_time.unix_of_utc 2006 1 2 15 4 5

@@ -1,11 +1,11 @@
-(* Integration tests for Gohttp.H2_server: drive a raw HTTP/2 client (the
+(* Integration tests for Httpg.H2_server: drive a raw HTTP/2 client (the
    Ticket-4 Framer + Ticket-3 Hpack encoder) over an Lwt_io.pipe pair against
    H2_server.serve, asserting response HEADERS/DATA. Ported subset of
    go/src/net/http/internal/http2/server_test.go (TestServer / GET, POST echo,
    concurrent streams). Bounded by Net.with_timeout so a hang fails. *)
 
-open Gohttp
-open Gohttp_http2
+open Httpg
+open Httpg_http2
 module F = H2_frame
 module S = H2_server
 

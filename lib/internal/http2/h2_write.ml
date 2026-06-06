@@ -49,14 +49,14 @@ let httpcode_string code =
   match code with 200 -> "200" | 404 -> "404" | _ -> string_of_int code
 
 (* http2.validWireHeaderFieldName, httpguts.ValidHeaderFieldValue and
-   httpcommon.LowerHeader now live in Gohttp_internal.Httpcommon. *)
+   httpcommon.LowerHeader now live in Httpg_internal.Httpcommon. *)
 let valid_wire_header_field_name =
-  Gohttp_internal.Httpcommon.valid_wire_header_field_name
+  Httpg_internal.Httpcommon.valid_wire_header_field_name
 
 let valid_header_field_value =
-  Gohttp_internal.Httpcommon.valid_header_field_value
+  Httpg_internal.Httpcommon.valid_header_field_value
 
-let lower_header = Gohttp_internal.Httpcommon.lower_header
+let lower_header = Httpg_internal.Httpcommon.lower_header
 
 (* encKV: encode one header field. *)
 let enc_kv enc k v =

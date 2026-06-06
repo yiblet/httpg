@@ -1,9 +1,9 @@
-(* Unit tests for Gohttp.H2_write: serialize each writer value through the
+(* Unit tests for Httpg.H2_write: serialize each writer value through the
    Ticket-4 framer over an Lwt_io.pipe and read it back, asserting fields.
    This covers the write.go writeFramer values and splitHeaderBlock. *)
 
-open Gohttp
-open Gohttp_http2
+open Httpg
+open Httpg_http2
 module W = H2_write
 module F = H2_frame
 

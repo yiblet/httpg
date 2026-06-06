@@ -3,14 +3,14 @@
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
 
 let read_ok ic =
-  Lwt.bind (Gohttp.Io.read_request ic) (function
+  Lwt.bind (Httpg.Io.read_request ic) (function
     | Ok r -> Lwt.return r
-    | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e)))
+    | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e)))
 
 let read s = Lwt_main.run (read_ok (ic_of_string s))
 
-let body_of (r : Gohttp.Body.t Gohttp.Request.t) =
-  Lwt_main.run (Gohttp.Body.read_all r.body)
+let body_of (r : Httpg.Body.t Httpg.Request.t) =
+  Lwt_main.run (Httpg.Body.read_all r.body)
 
 (* Baseline: all fields included. *)
 let baseline () =
@@ -38,9 +38,9 @@ let baseline () =
     [ Int64.to_string r.content_length ];
   Alcotest.(check string)
     "user-agent" "Fake"
-    (Gohttp.Header.get r.header "User-Agent");
+    (Httpg.Header.get r.header "User-Agent");
   (* Host promoted out of the header map. *)
-  Alcotest.(check bool) "host deleted" false (Gohttp.Header.has r.header "Host");
+  Alcotest.(check bool) "host deleted" false (Httpg.Header.has r.header "Host");
   Alcotest.(check string) "body" "abcdef\n" (body_of r)
 
 (* Simple GET, no body. *)
@@ -72,7 +72,7 @@ let chunked_trailer () =
   | Some t ->
       Alcotest.(check string)
         "trailer" "Trailer-Value"
-        (Gohttp.Header.get t "Trailer-Key")
+        (Httpg.Header.get t "Trailer-Key")
   | None -> Alcotest.fail "expected trailer"
 
 (* Chunked body with a bogus Content-Length to be removed. *)
@@ -89,7 +89,7 @@ let chunked_drops_content_length () =
     (Int64.to_string r.content_length);
   Alcotest.(check bool)
     "no content-length header" false
-    (Gohttp.Header.has r.header "Content-Length");
+    (Httpg.Header.has r.header "Content-Length");
   Alcotest.(check string) "body" "foobar" (body_of r)
 
 (* HTTP/1.0 request: close-by-default, content-length body. *)

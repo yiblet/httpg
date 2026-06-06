@@ -2,11 +2,11 @@
    subset of go/src/net/http/clientserver_test.go and client_test.go.
 
    Each test starts a real loopback Server (Ticket 9) on an ephemeral port via
-   [Server.listen_and_serve_started] and drives it with the gohttp [Client]
+   [Server.listen_and_serve_started] and drives it with the httpg [Client]
    (Ticket 10) rather than a raw socket. The whole run is bounded by
    [Net.with_timeout] so a hang fails rather than blocks the suite. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 (* Start a server with [handler], run [client ~port] against it, stop it. *)

@@ -1,7 +1,7 @@
 (* Ported from go/src/net/http/internal/http2/writesched_test.go and
    writesched_roundrobin_test.go. *)
 
-open Gohttp_http2
+open Httpg_http2
 module WS = H2_writesched
 module W = H2_write
 

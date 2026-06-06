@@ -1,5 +1,5 @@
 opam-version: "2.0"
-synopsis: "Gohttp starter project"
+synopsis: "Httpg starter project"
 description: "A small starter OCaml project."
 maintainer: ["TODO"]
 authors: ["TODO"]

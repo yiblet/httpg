@@ -1,7 +1,7 @@
 (* Port of the canonicalization subset of go/src/net/textproto/reader.go
    ([CanonicalMIMEHeaderKey] and the helpers it uses). Lives in the foundation
    library so both net/http's [Header] and the HTTP/2 stack can canonicalize
-   header names without depending on the public gohttp library. *)
+   header names without depending on the public httpg library. *)
 
 (* validHeaderFieldByte: RFC 7230 token characters.
    tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /

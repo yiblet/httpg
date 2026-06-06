@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 module R = Httptest.Response_recorder
 
 let ( let* ) = Lwt.bind

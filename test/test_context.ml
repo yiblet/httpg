@@ -3,11 +3,11 @@
    Client / Server.
 
    Networked cases start a real loopback Server on an ephemeral port and drive
-   it with the gohttp Client; every run is bounded by [Net.with_timeout] so a
+   it with the httpg Client; every run is bounded by [Net.with_timeout] so a
    hang fails the suite rather than blocking it. Unit cases exercise the
    Context primitives directly. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 let run p = Lwt_main.run (Net.with_timeout 10. p)

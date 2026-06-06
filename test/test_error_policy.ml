@@ -73,7 +73,7 @@ let contains ~needle haystack =
    [H2_error.t] in its result-returning signatures); [h2_error] owns the
    unified type as [type t]. *)
 
-(* The HTTP/2 stack lives in lib/internal/http2/ (its own gohttp_http2 library);
+(* The HTTP/2 stack lives in lib/internal/http2/ (its own httpg_http2 library);
    hpack/hpack_huffman/h2_frame/h2_error are reached by their nested path. *)
 let modules_with_type_error =
   [

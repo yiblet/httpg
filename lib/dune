@@ -1,6 +1,6 @@
 (library
- (name gohttp)
- (public_name gohttp)
+ (name httpg)
+ (public_name httpg)
  (libraries
   uri
   lwt
@@ -14,6 +14,6 @@
   fmt
   base64
   multipart_form-lwt
-  gohttp_base
-  gohttp_internal
-  gohttp_http2))
+  httpg_base
+  httpg_internal
+  httpg_http2))

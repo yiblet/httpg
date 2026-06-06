@@ -10,7 +10,7 @@
    share concepts (header, body, host, …) without field-name ambiguity. *)
 
 (* Go: type Header = textproto.MIMEHeader. Same structural Hashtbl as the public
-   Gohttp.Header.t, so the shim passes it through with no conversion. *)
+   Httpg.Header.t, so the shim passes it through with no conversion. *)
 type header = (string, string list) Hashtbl.t
 
 (* The textproto.MIMEHeader method subset the HTTP/2 stack uses. *)
@@ -18,7 +18,7 @@ module Header = struct
   type t = header
 
   let create () : t = Hashtbl.create 8
-  let canonical_header_key = Gohttp_base.Textproto.canonical_mime_header_key
+  let canonical_header_key = Httpg_base.Textproto.canonical_mime_header_key
   let find_opt (h : t) k = Hashtbl.find_opt h k
 
   let add (h : t) k v =
@@ -69,7 +69,7 @@ let default_user_agent = "Go-http-client/1.1"
 
 (* A ClientRequest is a Request used by the HTTP/2 client (Transport). *)
 type client_request = {
-  creq_ctx : Gohttp_base.Context.t;
+  creq_ctx : Httpg_base.Context.t;
   creq_meth : string;
   creq_url : Uri.t;
   creq_header : header;
@@ -93,7 +93,7 @@ type client_response = {
 
 (* A ServerRequest is a Request used by the HTTP/2 server. *)
 type server_request = {
-  sreq_ctx : Gohttp_base.Context.t;
+  sreq_ctx : Httpg_base.Context.t;
   sreq_proto : string;
   sreq_proto_major : int;
   sreq_proto_minor : int;

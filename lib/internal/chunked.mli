@@ -1,6 +1,6 @@
 (* Port of go/src/net/http/internal/chunked.go: the wire protocol for HTTP's
    "chunked" Transfer-Encoding. This is the private [internal] package analogue
-   ([Gohttp_internal.Chunked]); see net/http/internal. *)
+   ([Httpg_internal.Chunked]); see net/http/internal. *)
 
 exception Err_line_too_long
 (** [internal.ErrLineTooLong]: a chunk header / line exceeded [max_line_length].

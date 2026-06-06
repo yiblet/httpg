@@ -15,7 +15,7 @@
 
    Bounded by [Net.with_timeout] so a hang fails rather than blocks. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 let run t = Lwt_main.run (Net.with_timeout 10.0 t)

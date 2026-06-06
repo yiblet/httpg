@@ -124,7 +124,7 @@ end
    returns a [Client.t] suitable for hitting the server.
 
    Go's in-memory ("fakenet") network and the [NewUnstartedServer]+[Start]
-   split are out of scope: gohttp's [Server.listen_and_serve_started] binds and
+   split are out of scope: httpg's [Server.listen_and_serve_started] binds and
    begins serving in one step, so a started [Server] is the only useful shape
    here (noted in the plan; [new_unstarted] omitted). *)
 module Server = struct
@@ -132,7 +132,7 @@ module Server = struct
     url : string;  (** Go's [Server.URL] ("http://127.0.0.1:PORT"). *)
     port : int;  (** the bound ephemeral port. *)
     tls : bool;  (** whether this is a TLS ([StartTLS]) server. *)
-    srv : Server.t;  (** the running gohttp [Server] (Go's [Config]). *)
+    srv : Server.t;  (** the running httpg [Server] (Go's [Config]). *)
     serve : unit Lwt.t;  (** the serve-loop promise (Go's [goServe]). *)
     close : unit -> unit Lwt.t;  (** Go's [Server.Close]. *)
   }
@@ -182,7 +182,7 @@ module Server = struct
 
   (* Server.Client: a client configured to talk to this server. Go pre-loads
      the server's self-signed cert into the client's RootCAs; the faithful
-     gohttp analogue for a TLS server is a client that trusts it via
+     httpg analogue for a TLS server is a client that trusts it via
      [~insecure:true] (Net.test_server_certificate's matching insecure
      opt-out). An HTTP server gets a plain default-shaped client. *)
   let client (s : t) : Client.t =

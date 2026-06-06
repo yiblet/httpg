@@ -5,7 +5,7 @@
 open Lwt.Infix
 
 (* [path_clean] (Go's path.Clean) lives with the routing internals. *)
-module Pattern = Gohttp_internal.Pattern
+module Pattern = Httpg_internal.Pattern
 
 type file_info = {
   fi_name : string;
@@ -580,7 +580,7 @@ let sum_ranges_size ranges =
 (* Fixed multipart boundary. Go uses a random 30-hex boundary; we use a fixed,
    syntactically valid token so responses are deterministic and tests can assert
    exact framing. *)
-let multipart_boundary = "GOHTTP_BYTERANGES_BOUNDARY"
+let multipart_boundary = "HTTPG_BYTERANGES_BOUNDARY"
 
 (* Go rangesMIMESize: total encoded size of a multipart/byteranges body — the
    sum of each part's framing (boundary line + headers + CRLF) plus its bytes,

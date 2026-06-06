@@ -3,11 +3,11 @@
    httptest_test.go.
 
    Each test starts an ephemeral loopback test server, drives it with the
-   gohttp [Client] returned by [Httptest.Server.client], and closes the server
+   httpg [Client] returned by [Httptest.Server.client], and closes the server
    at the end. The whole run is bounded by [Net.with_timeout] so a hang fails
    rather than blocks the suite. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 module Ts = Httptest.Server
 

@@ -5,7 +5,7 @@
    read back match, across read sizes that cross chunk boundaries) which is
    exactly what Go's testDataBuffer helper validates. *)
 
-module DB = Gohttp_http2.H2_databuffer
+module DB = Httpg_http2.H2_databuffer
 
 let repeat c n = String.make n c
 

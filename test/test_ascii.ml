@@ -1,6 +1,6 @@
 (* Port of go/src/net/http/internal/ascii/print_test.go. *)
 
-module Ascii = Gohttp_internal.Ascii
+module Ascii = Httpg_internal.Ascii
 
 let test_equal_fold () =
   let cases =

@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 
 let check desc data expected () =
   Alcotest.(check string) desc expected (Sniff.detect_content_type data)

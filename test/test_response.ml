@@ -3,14 +3,14 @@
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
 
 let read_ok ?request ic =
-  Lwt.bind (Gohttp.Io.read_response ?request ic) (function
+  Lwt.bind (Httpg.Io.read_response ?request ic) (function
     | Ok r -> Lwt.return r
-    | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e)))
+    | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e)))
 
 let read ?request s = Lwt_main.run (read_ok ?request (ic_of_string s))
 
-let body_of (r : Gohttp.Body.t Gohttp.Response.t) =
-  Lwt_main.run (Gohttp.Body.read_all r.body)
+let body_of (r : Httpg.Body.t Httpg.Response.t) =
+  Lwt_main.run (Httpg.Body.read_all r.body)
 
 let i64 = Int64.to_string
 
@@ -56,7 +56,7 @@ let content_length () =
   Alcotest.(check bool) "close" true r.close;
   Alcotest.(check string)
     "cl header" "10"
-    (Gohttp.Header.get r.header "Content-Length");
+    (Httpg.Header.get r.header "Content-Length");
   Alcotest.(check string) "body" "Body here\n" (body_of r)
 
 (* Chunked, multiple chunks. *)
@@ -74,13 +74,13 @@ let chunked () =
 let location () =
   let request =
     {
-      Gohttp.Request.meth = "GET";
+      Httpg.Request.meth = "GET";
       url = Uri.of_string "http://example.com/from";
       proto = "HTTP/1.1";
       proto_major = 1;
       proto_minor = 1;
-      header = Gohttp.Header.create ();
-      body = Gohttp.Body.Empty;
+      header = Httpg.Header.create ();
+      body = Httpg.Body.Empty;
       content_length = 0L;
       transfer_encoding = [];
       close = false;
@@ -91,21 +91,21 @@ let location () =
       form = None;
       post_form = None;
       multipart_form = None;
-      ctx = Gohttp.Context.background;
+      ctx = Httpg.Context.background;
     }
   in
   let raw =
     "HTTP/1.1 302 Found\r\nLocation: /to\r\nContent-Length: 0\r\n\r\n"
   in
   let r = read ~request raw in
-  (match Gohttp.Response.location r with
+  (match Httpg.Response.location r with
   | Some u ->
       Alcotest.(check string)
         "location" "http://example.com/to" (Uri.to_string u)
   | None -> Alcotest.fail "expected location");
   let raw2 = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" in
   let r2 = read raw2 in
-  Alcotest.(check bool) "no location" true (Gohttp.Response.location r2 = None)
+  Alcotest.(check bool) "no location" true (Httpg.Response.location r2 = None)
 
 let tests =
   [

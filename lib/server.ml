@@ -6,10 +6,10 @@
 
 open Lwt.Infix
 
-(* Routing internals live in the private gohttp_internal library (Go keeps
+(* Routing internals live in the private httpg_internal library (Go keeps
    pattern.go / routingNode / mapping.go unexported in net/http). *)
-module Pattern = Gohttp_internal.Pattern
-module Routing_tree = Gohttp_internal.Routing_tree
+module Pattern = Httpg_internal.Pattern
+module Routing_tree = Httpg_internal.Routing_tree
 
 (* Go's http.TimeFormat applied to the current time. *)
 let http_time_now () =
@@ -413,7 +413,7 @@ let serve_one oc (r : Body.t Request.t) (h : handler) : bool Lwt.t =
     (if body_allowed && not (Header.has header "Content-Type") then
        if
          not
-           (Gohttp_internal.Ascii.equal_fold
+           (Httpg_internal.Ascii.equal_fold
               (Header.get header "X-Content-Type-Options")
               "nosniff")
        then
@@ -986,16 +986,16 @@ let listen_and_serve ~addr ~port handler =
 let default_alpn_protocols = [ "h2"; "http/1.1" ]
 
 (* net/http <-> http2 translation shim (Go's http2.go: http2Handler.ServeHTTP).
-   The HTTP/2 server hands the handler a decoupled {!Gohttp_http2.Api} request +
+   The HTTP/2 server hands the handler a decoupled {!Httpg_http2.Api} request +
    response_writer; we expand them to a [Request.t] and a {!response_writer}. *)
 
-let body_of_api_body (b : Gohttp_http2.Api.Body.t) : Body.t =
+let body_of_api_body (b : Httpg_http2.Api.Body.t) : Body.t =
   match b with
-  | Gohttp_http2.Api.Body.Empty -> Body.Empty
-  | Gohttp_http2.Api.Body.String s -> Body.String s
-  | Gohttp_http2.Api.Body.Stream f -> Body.Stream f
+  | Httpg_http2.Api.Body.Empty -> Body.Empty
+  | Httpg_http2.Api.Body.String s -> Body.String s
+  | Httpg_http2.Api.Body.Stream f -> Body.Stream f
 
-let request_of_server_request (r : Gohttp_http2.Api.server_request) :
+let request_of_server_request (r : Httpg_http2.Api.server_request) :
     Body.t Request.t =
   {
     meth = r.sreq_meth;
@@ -1019,15 +1019,15 @@ let request_of_server_request (r : Gohttp_http2.Api.server_request) :
     ctx = r.sreq_ctx;
   }
 
-(* Adapt a [Server.handler] into a {!Gohttp_http2.Api.handler}: expose the H2
+(* Adapt a [Server.handler] into a {!Httpg_http2.Api.handler}: expose the H2
    response_writer to the user handler as a {!response_writer} (the H2 writer
    minus [flush]), run the handler, then flush the buffered headers/body. *)
-let h2_handler_of_handler (handler : handler) : Gohttp_http2.H2_server.handler =
- fun (h2w : Gohttp_http2.Api.response_writer)
-     (r : Gohttp_http2.Api.server_request) ->
+let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
+ fun (h2w : Httpg_http2.Api.response_writer)
+     (r : Httpg_http2.Api.server_request) ->
   let w =
     {
-      header = h2w.Gohttp_http2.Api.rw_header;
+      header = h2w.Httpg_http2.Api.rw_header;
       write_header = h2w.rw_write_header;
       write = h2w.rw_write;
       flush = h2w.rw_flush;
@@ -1046,7 +1046,7 @@ let serve_tls_conn ?(timeouts = no_timeouts)
   | Some "h2" ->
       Lwt.finalize
         (fun () ->
-          Gohttp_http2.H2_server.serve ~max_header_bytes ic oc
+          Httpg_http2.H2_server.serve ~max_header_bytes ic oc
             ~handler:(h2_handler_of_handler handler))
         (fun () ->
           Lwt.catch (fun () -> Lwt_io.close oc) (fun _ -> Lwt.return_unit)

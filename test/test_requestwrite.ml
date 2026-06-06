@@ -17,16 +17,16 @@ let capture (f : Lwt_io.output_channel -> unit Lwt.t) : string =
          Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
 
 let header pairs =
-  let h = Gohttp.Header.create () in
-  List.iter (fun (k, v) -> Gohttp.Header.add h k v) pairs;
+  let h = Httpg.Header.create () in
+  List.iter (fun (k, v) -> Httpg.Header.add h k v) pairs;
   h
 
 let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Gohttp.Header.create ()) ?(body = Gohttp.Body.Empty)
+    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false)
-    ?(host = "") url : Gohttp.Body.t Gohttp.Request.t =
+    ?(host = "") url : Httpg.Body.t Httpg.Request.t =
   {
-    Gohttp.Request.meth;
+    Httpg.Request.meth;
     url = Uri.of_string url;
     proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
     proto_major;
@@ -43,14 +43,14 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Gohttp.Context.background;
+    ctx = Httpg.Context.background;
   }
 
 let write r =
   capture (fun oc ->
-      Lwt.bind (Gohttp.Io.write_request oc r) (function
+      Lwt.bind (Httpg.Io.write_request oc r) (function
         | Ok () -> Lwt.return_unit
-        | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e))))
+        | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e))))
 
 (* Row 0: GET, no body, custom headers, no Content-Length. *)
 let row0 () =
@@ -86,7 +86,7 @@ let row0 () =
 let row1 () =
   let r =
     req ~transfer_encoding:[ "chunked" ]
-      ~body:(Gohttp.Body.of_string "abcdef")
+      ~body:(Httpg.Body.of_string "abcdef")
       "http://www.google.com/search"
   in
   let want =
@@ -100,7 +100,7 @@ let row1 () =
 let row2 () =
   let r =
     req ~meth:"POST" ~close:true ~transfer_encoding:[ "chunked" ]
-      ~body:(Gohttp.Body.of_string "abcdef")
+      ~body:(Httpg.Body.of_string "abcdef")
       "http://www.google.com/search"
   in
   let want =
@@ -114,7 +114,7 @@ let row2 () =
 let row3 () =
   let r =
     req ~meth:"POST" ~close:true ~content_length:6L
-      ~body:(Gohttp.Body.of_string "abcdef")
+      ~body:(Httpg.Body.of_string "abcdef")
       "http://www.google.com/search"
   in
   let want =
@@ -129,7 +129,7 @@ let row4 () =
   let r =
     req ~meth:"POST" ~host:"example.com" ~content_length:6L
       ~header:(header [ ("Content-Length", "10") ])
-      ~body:(Gohttp.Body.of_string "abcdef")
+      ~body:(Httpg.Body.of_string "abcdef")
       "http://example.com/"
   in
   let want =

@@ -108,7 +108,7 @@ let split_char s c = String.split_on_char c s
 
 (* ascii.ToLower: returns (lowered, ok) where ok=false if s is not ASCII
    printable. *)
-let ascii_to_lower = Gohttp_internal.Ascii.to_lower
+let ascii_to_lower = Httpg_internal.Ascii.to_lower
 
 let contains_any s set =
   let found = ref false in

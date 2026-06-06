@@ -2,7 +2,7 @@
    go/src/net/http/internal/chunked_test.go cases. Lwt is driven synchronously
    via Lwt_main.run. *)
 
-open Gohttp
+open Httpg
 
 (* An in-memory input channel over a string (the analogue of
    strings.NewReader). *)

@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 
 (* Ported from go/src/net/http/header_test.go and the canonicalization behavior
    of textproto.CanonicalMIMEHeaderKey. *)

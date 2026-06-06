@@ -122,7 +122,7 @@ val create :
       body.
     - [write_timeout] bounds writing the response.
 
-    The timeouts are implemented as child {!Gohttp_base.Context} deadlines
+    The timeouts are implemented as child {!Httpg_base.Context} deadlines
     derived off the per-connection context (Lwt_io channels expose no socket
     deadline, unlike Go's [SetReadDeadline]/[SetWriteDeadline]).
 

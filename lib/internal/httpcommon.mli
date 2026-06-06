@@ -3,10 +3,10 @@
    Request/header machinery that Go shares between net/http and internal/http2.
    Like Go's package, it is deliberately decoupled from the public request/url
    types: it works on primitive values (and the structural Hashtbl behind
-   [Gohttp.Header.t]) so the bundled H2_* modules can reuse it without creating
-   a dependency cycle (gohttp_internal must not depend on gohttp). Where Go's
+   [Httpg.Header.t]) so the bundled H2_* modules can reuse it without creating
+   a dependency cycle (httpg_internal must not depend on httpg). Where Go's
    package reuses textproto canonicalization, callers inject
-   [Gohttp.Header.canonical_header_key] via [~canonical]. *)
+   [Httpg.Header.canonical_header_key] via [~canonical]. *)
 
 (* Go ErrRequestHeaderListSize. *)
 exception Request_header_list_size
@@ -16,7 +16,7 @@ exception Request_header_list_size
 exception Error of string
 
 (* Go's [Request]: a subset of http.Request built from primitive types.
-   [header]/[trailer] use the same structural type as [Gohttp.Header.t]. *)
+   [header]/[trailer] use the same structural type as [Httpg.Header.t]. *)
 type request = {
   url_scheme : string;
   url_host : string;

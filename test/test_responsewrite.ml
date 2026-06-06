@@ -14,15 +14,15 @@ let capture (f : Lwt_io.output_channel -> unit Lwt.t) : string =
          Lwt.bind (Lwt_io.close oc) (fun () -> Lwt.return (Buffer.contents buf))))
 
 let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
-    Gohttp.Body.t Gohttp.Request.t =
+    Httpg.Body.t Httpg.Request.t =
   {
-    Gohttp.Request.meth;
+    Httpg.Request.meth;
     url = Uri.of_string "/";
     proto = Printf.sprintf "HTTP/1.%d" proto_minor;
     proto_major = 1;
     proto_minor;
-    header = Gohttp.Header.create ();
-    body = Gohttp.Body.Empty;
+    header = Httpg.Header.create ();
+    body = Httpg.Body.Empty;
     content_length = 0L;
     transfer_encoding = [];
     close = false;
@@ -33,20 +33,20 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Gohttp.Context.background;
+    ctx = Httpg.Context.background;
   }
 
 let header pairs =
-  let h = Gohttp.Header.create () in
-  List.iter (fun (k, v) -> Gohttp.Header.add h k v) pairs;
+  let h = Httpg.Header.create () in
+  List.iter (fun (k, v) -> Httpg.Header.add h k v) pairs;
   h
 
 let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Gohttp.Header.create ()) ?(body = Gohttp.Body.Empty)
+    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?request
-    () : Gohttp.Body.t Gohttp.Response.t =
+    () : Httpg.Body.t Httpg.Response.t =
   {
-    Gohttp.Response.status;
+    Httpg.Response.status;
     status_code;
     proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
     proto_major;
@@ -61,8 +61,8 @@ let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
     request;
   }
 
-let write r = capture (fun oc -> Gohttp.Io.write_response oc r)
-let body s = Gohttp.Body.of_string s
+let write r = capture (fun oc -> Httpg.Io.write_response oc r)
+let body s = Httpg.Body.of_string s
 
 let http10_identity () =
   let r =

@@ -1,7 +1,7 @@
 (* Port of go/src/net/http/httptest. [Response_recorder] is an in-memory
    {!Server.response_writer} that records a handler's status code, headers and
    body for inspection in tests; [Server] is a loopback test HTTP/HTTPS server
-   (Go's [httptest.Server]) the gohttp [Client] can round-trip against. *)
+   (Go's [httptest.Server]) the httpg [Client] can round-trip against. *)
 
 module Response_recorder : sig
   type t = {
@@ -28,7 +28,7 @@ module Response_recorder : sig
       header/body. *)
 
   val to_response_writer : t -> Server.response_writer
-  (** Adapt the recorder to a {!Gohttp.Server.response_writer} so a handler can run
+  (** Adapt the recorder to a {!Httpg.Server.response_writer} so a handler can run
       against it unchanged. *)
 
   val result : t -> Body.t Response.t
@@ -52,7 +52,7 @@ end
 (** Go's [httptest.Server]: a loopback test server bound to an ephemeral
     [127.0.0.1] port. Only the started, loopback-network path is supported (the
     in-memory "fakenet" network and the [NewUnstartedServer]+[Start] split are
-    omitted, since {!Gohttp.Server.listen_and_serve_started} binds and serves in one
+    omitted, since {!Httpg.Server.listen_and_serve_started} binds and serves in one
     step). *)
 module Server : sig
   type t = {
@@ -68,7 +68,7 @@ module Server : sig
         ["https://..."] for a TLS server), with no trailing slash.
       - [port] is the bound ephemeral port.
       - [tls] is whether this is a TLS server.
-      - [srv] is the underlying running {!Gohttp.Server.t} (Go's [Config]).
+      - [srv] is the underlying running {!Httpg.Server.t} (Go's [Config]).
       - [serve] is the background serve-loop promise (Go's [goServe]).
       - [close] stops the server / closes the listener (Go's [Server.Close]). *)
 

@@ -28,7 +28,7 @@ already shipped) and the separately-tracked `Body`-as-`io.ReadCloser` gap (see "
 
 **Attack matrix (severity / ticket):**
 
-| # | Case | Dir/proto | Go mechanism (ref) | gohttp today | Verdict / ticket |
+| # | Case | Dir/proto | Go mechanism (ref) | httpg today | Verdict / ticket |
 |---|------|-----------|--------------------|--------------|------------------|
 | 1 | Slowloris / idle & header read timeouts | client→server h1 | `ReadHeaderTimeout`/`IdleTimeout`, `SetReadDeadline` (`server.go:1017`,`:2145`) | no timeouts anywhere | HIGH · T1 |
 | 2 | Oversized / too-many request headers | client→server h1 | `DefaultMaxHeaderBytes=1<<20`, `setReadLimit`/`hitReadLimit` (`server.go:920`,`:1024`,`:818`) → 431 | unbounded `read_line`/header gather | HIGH · T2 |
@@ -149,7 +149,7 @@ converts the raise — if so this is a rename/typing cleanup, else a correctness
 - Ref: `internal/http2/flow.go` (`inflow.add`/`take`, `ConnectionError(ErrCodeFlowControl)`).
 - Tests: `TestH2FlowControlOverflowGoaway`; `TestH2MaxConcurrentStreamsRefused` (regression — already works).
 
-**Test harness:** new alcotest suite `Abuse`, aggregated into `test/test_gohttp.ml`; each ticket
+**Test harness:** new alcotest suite `Abuse`, aggregated into `test/test_httpg.ml`; each ticket
 contributes ≥1 ported/adapted test (or adds to the existing suite the test belongs to). Where Go has a
 matching test (`serve_test.go`, `internal/http2/server_test.go`, `transport_test.go`), port it verbatim
 and treat it as the spec; if an architectural difference blocks a verbatim port (e.g. the too-big path

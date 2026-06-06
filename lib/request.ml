@@ -115,7 +115,7 @@ let parse_basic_auth (auth : string) : (string * string) option =
   let lp = String.length prefix in
   let eq_fold_prefix s =
     String.length s >= lp
-    && Gohttp_internal.Ascii.equal_fold (String.sub s 0 lp) prefix
+    && Httpg_internal.Ascii.equal_fold (String.sub s 0 lp) prefix
   in
   if String.length auth < lp || not (eq_fold_prefix auth) then None
   else

@@ -1,7 +1,7 @@
 (* Ported from golang.org/x/net/http2/hpack hpack_test.go and encode_test.go.
    Includes the RFC 7541 appendix C examples (C.2 through C.6). Pure. *)
 
-open Gohttp_http2
+open Httpg_http2
 module H = Hpack
 
 let hf ?(sensitive = false) name value : H.header_field =
@@ -346,7 +346,7 @@ let roundtrip_basic () =
       hf "custom-key" "custom-value";
       hf "accept" "*/*";
       hf ~sensitive:true "authorization" "Bearer secrettoken";
-      hf "user-agent" "gohttp/1.0";
+      hf "user-agent" "httpg/1.0";
     ]
   in
   let e = H.new_encoder () in

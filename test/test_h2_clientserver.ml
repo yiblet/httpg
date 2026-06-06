@@ -1,11 +1,11 @@
-(* End-to-end ALPN integration tests (H2 Ticket 10): a gohttp Server over real
-   loopback TLS advertising ["h2"; "http/1.1"] is driven by the gohttp Client /
+(* End-to-end ALPN integration tests (H2 Ticket 10): a httpg Server over real
+   loopback TLS advertising ["h2"; "http/1.1"] is driven by the httpg Client /
    Transport. The Success Criterion [clientserver_roundtrip] performs a GET and a
    POST over a single multiplexed h2 connection (asserting status 200 + body and
    that the h2 path was actually used); a second case proves the HTTP/1.1
    fallback. All bounded by Net.with_timeout so a hang fails. *)
 
-open Gohttp
+open Httpg
 
 let ( let* ) = Lwt.bind
 
@@ -35,7 +35,7 @@ let with_tls_server ~alpn body =
         Lwt.finalize (fun () -> body port) (fun () -> Server.close srv)))
 
 (* ---- Success Criterion: H2.clientserver_roundtrip ---- *)
-(* TLS server advertises ["h2"; "http/1.1"]; the gohttp Client (https) negotiates
+(* TLS server advertises ["h2"; "http/1.1"]; the httpg Client (https) negotiates
    h2 and performs GET + POST on one multiplexed connection. *)
 let test_clientserver_roundtrip () =
   with_tls_server ~alpn:[ "h2"; "http/1.1" ] (fun port ->
@@ -67,7 +67,7 @@ let test_clientserver_roundtrip () =
   Alcotest.(check int) "two h2 round trips" 2 h2_count
 
 (* ---- Fallback: client/server only http/1.1 ---- *)
-(* The server advertises only ["http/1.1"], so the gohttp Client over TLS is
+(* The server advertises only ["http/1.1"], so the httpg Client over TLS is
    served by the HTTP/1.x path and still gets 200 + body (no h2 used). *)
 let test_http11_fallback () =
   with_tls_server ~alpn:[ "http/1.1" ] (fun port ->

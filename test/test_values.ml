@@ -1,7 +1,7 @@
 (* Ported assertions for go/src/net/url ParseQuery error cases, exercising the
    typed [Values.error] surface. *)
 
-open Gohttp
+open Httpg
 
 (* A semicolon separator is rejected (Go's ParseQuery error). *)
 let test_parse_query_typed () =

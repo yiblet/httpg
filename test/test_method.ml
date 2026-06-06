@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 
 let check_method name expected actual () =
   Alcotest.(check string) name expected actual

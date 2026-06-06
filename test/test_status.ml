@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 
 let check_text name code expected () =
   Alcotest.(check string) name expected (Status.status_text code)

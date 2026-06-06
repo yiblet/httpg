@@ -1,4 +1,4 @@
 (executable
- (public_name gohttp)
+ (public_name httpg)
  (name main)
- (libraries gohttp lwt lwt.unix))
+ (libraries httpg lwt lwt.unix))

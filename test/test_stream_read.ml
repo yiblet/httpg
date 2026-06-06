@@ -9,13 +9,13 @@
 open Lwt.Infix
 
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
-let run t = Lwt_main.run (Gohttp.Net.with_timeout 5.0 t)
+let run t = Lwt_main.run (Httpg.Net.with_timeout 5.0 t)
 
 (* Unwrap Io.read_response's result; a parse error fails the test loudly. *)
 let read_response_ok ic =
-  Gohttp.Io.read_response ic >>= function
+  Httpg.Io.read_response ic >>= function
   | Ok r -> Lwt.return r
-  | Error e -> Lwt.fail (Failure (Gohttp.Io.error_to_string e))
+  | Error e -> Lwt.fail (Failure (Httpg.Io.error_to_string e))
 
 (* A chunked response: three small chunks, no trailer. *)
 let chunked_resp =
@@ -29,8 +29,8 @@ let first_chunk_before_eof () =
   run
     (let ic = ic_of_string chunked_resp in
      read_response_ok ic >>= fun r ->
-     match r.Gohttp.Response.body with
-     | Gohttp.Body.Stream next ->
+     match r.Httpg.Response.body with
+     | Httpg.Body.Stream next ->
          next () >>= fun first ->
          (* The first chunk is "foo"; the stream is not at EOF (more chunks
           remain), proving incremental delivery. *)
@@ -44,7 +44,7 @@ let read_all_full_payload () =
   run
     (let ic = ic_of_string chunked_resp in
      read_response_ok ic >>= fun r ->
-     Gohttp.Body.read_all r.Gohttp.Response.body >|= fun data ->
+     Httpg.Body.read_all r.Httpg.Response.body >|= fun data ->
      Alcotest.(check string) "full body" "foobarbaz" data)
 
 (* Chunked body WITH a trailer: after draining the body the response trailer
@@ -57,12 +57,12 @@ let trailer_after_drain () =
   run
     (let ic = ic_of_string raw in
      read_response_ok ic >>= fun r ->
-     Gohttp.Body.drain r.Gohttp.Response.body >|= fun _ ->
-     match r.Gohttp.Response.trailer with
+     Httpg.Body.drain r.Httpg.Response.body >|= fun _ ->
+     match r.Httpg.Response.trailer with
      | Some t ->
          Alcotest.(check string)
            "trailer Md5" "abc123"
-           (Gohttp.Header.get t "Md5")
+           (Httpg.Header.get t "Md5")
      | None -> Alcotest.fail "expected trailer after drain")
 
 (* A trailer without a declared Trailer header (Go still merges what is read
@@ -75,13 +75,13 @@ let trailer_undeclared_after_drain () =
   run
     (let ic = ic_of_string raw in
      read_response_ok ic >>= fun r ->
-     Gohttp.Body.read_all r.Gohttp.Response.body >|= fun data ->
+     Httpg.Body.read_all r.Httpg.Response.body >|= fun data ->
      Alcotest.(check string) "body" "foo" data;
-     match r.Gohttp.Response.trailer with
+     match r.Httpg.Response.trailer with
      | Some t ->
          Alcotest.(check string)
            "late trailer" "yes"
-           (Gohttp.Header.get t "X-Late")
+           (Httpg.Header.get t "X-Late")
      | None -> Alcotest.fail "expected trailer")
 
 (* Keep-alive: two HTTP/1.1 responses concatenated on one channel. Read the
@@ -96,14 +96,14 @@ let keep_alive_two_responses () =
   run
     (let ic = ic_of_string (resp1 ^ resp2) in
      read_response_ok ic >>= fun r1 ->
-     Gohttp.Body.read_all r1.Gohttp.Response.body >>= fun b1 ->
+     Httpg.Body.read_all r1.Httpg.Response.body >>= fun b1 ->
      Alcotest.(check string) "resp1 body" "hello" b1;
      (* Drain (already at EOF for a fixed-length body; mirrors the server
         finishRequest drain) then read the next message. *)
-     Gohttp.Body.drain r1.Gohttp.Response.body >>= fun _ ->
+     Httpg.Body.drain r1.Httpg.Response.body >>= fun _ ->
      read_response_ok ic >>= fun r2 ->
-     Gohttp.Body.read_all r2.Gohttp.Response.body >|= fun b2 ->
-     Alcotest.(check int) "resp2 code" 200 r2.Gohttp.Response.status_code;
+     Httpg.Body.read_all r2.Httpg.Response.body >|= fun b2 ->
+     Alcotest.(check int) "resp2 code" 200 r2.Httpg.Response.status_code;
      Alcotest.(check string) "resp2 body" "world" b2)
 
 (* Keep-alive across a chunked first body: drain a chunked body (consuming its
@@ -118,9 +118,9 @@ let keep_alive_chunked_then_next () =
     (let ic = ic_of_string (resp1 ^ resp2) in
      read_response_ok ic >>= fun r1 ->
      (* Drain without reading: must consume body + trailer block. *)
-     Gohttp.Body.drain r1.Gohttp.Response.body >>= fun _ ->
+     Httpg.Body.drain r1.Httpg.Response.body >>= fun _ ->
      read_response_ok ic >|= fun r2 ->
-     Alcotest.(check int) "resp2 code" 204 r2.Gohttp.Response.status_code)
+     Alcotest.(check int) "resp2 code" 204 r2.Httpg.Response.status_code)
 
 let tests =
   [

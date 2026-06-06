@@ -128,7 +128,7 @@ let write_headers_block cc ~stream_id ~end_stream (hdrs : string) =
 
 (* ---- request header encoding (Go httpcommon.EncodeHeaders) ---- *)
 
-module HC = Gohttp_internal.Httpcommon
+module HC = Httpg_internal.Httpcommon
 
 (* RequestURI of the request URL: path?query (or "/" if empty). *)
 let request_uri_of (u : Uri.t) : string =

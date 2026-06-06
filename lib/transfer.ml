@@ -8,14 +8,14 @@
    Go's [transferReader] that come from a *Request or *Response. *)
 
 (* The chunked codec now lives in the private internal package
-   (Gohttp_internal.Chunked, mirroring net/http/internal). Re-export its
+   (Httpg_internal.Chunked, mirroring net/http/internal). Re-export its
    exceptions so [transfer.ml]'s own framing code and dependent modules/tests
    keep referring to [Transfer.Chunk_error] / [Transfer.Err_line_too_long] with
    the same identity the codec raises. *)
-exception Err_line_too_long = Gohttp_internal.Chunked.Err_line_too_long
+exception Err_line_too_long = Httpg_internal.Chunked.Err_line_too_long
 (* internal.ErrLineTooLong *)
 
-exception Chunk_error = Gohttp_internal.Chunked.Chunk_error
+exception Chunk_error = Httpg_internal.Chunked.Chunk_error
 (* malformed-chunk / framing errors carrying Go's message *)
 
 exception Bad_string_error of string * string
@@ -64,7 +64,7 @@ let lower_ascii b =
   if b >= 'A' && b <= 'Z' then Char.chr (Char.code b + 32) else b
 
 (* internal/ascii.EqualFold. *)
-let ascii_equal_fold = Gohttp_internal.Ascii.equal_fold
+let ascii_equal_fold = Httpg_internal.Ascii.equal_fold
 
 (* httpguts.isOWS for token-boundary trimming. *)
 let is_ows b = b = ' ' || b = '\t'
@@ -123,26 +123,26 @@ let foreach_header_element v fn =
 (* Chunked codec (go/src/net/http/internal/chunked.go).                *)
 (*                                                                      *)
 (* The codec now lives in the private internal package                  *)
-(* [Gohttp_internal.Chunked] (mirroring net/http/internal). [transfer.ml]*)
+(* [Httpg_internal.Chunked] (mirroring net/http/internal). [transfer.ml]*)
 (* delegates to it and re-exports its surface so the public             *)
 (* [Transfer.*] API stays stable for dependents (io.ml, body.ml) and    *)
 (* tests.                                                               *)
 (* ------------------------------------------------------------------ *)
 
-let max_line_length = Gohttp_internal.Chunked.max_line_length
+let max_line_length = Httpg_internal.Chunked.max_line_length
 
 (* Re-export the chunked codec's hex parser. It now returns
    [(int64, Chunked.error) result]; map the codec's error into [Transfer.error]
    so the public surface speaks a single error type. *)
 let parse_hex_uint (v : string) : (int64, error) result =
-  match Gohttp_internal.Chunked.parse_hex_uint v with
+  match Httpg_internal.Chunked.parse_hex_uint v with
   | Ok n -> Ok n
-  | Error Gohttp_internal.Chunked.Line_too_long -> Error Line_too_long
-  | Error (Gohttp_internal.Chunked.Chunk msg) -> Error (Chunk msg)
+  | Error Httpg_internal.Chunked.Line_too_long -> Error Line_too_long
+  | Error (Httpg_internal.Chunked.Chunk msg) -> Error (Chunk msg)
 
-let new_chunked_reader = Gohttp_internal.Chunked.new_chunked_reader
-let chunked_writer_write = Gohttp_internal.Chunked.chunked_writer_write
-let chunked_writer_close = Gohttp_internal.Chunked.chunked_writer_close
+let new_chunked_reader = Httpg_internal.Chunked.new_chunked_reader
+let chunked_writer_write = Httpg_internal.Chunked.chunked_writer_write
+let chunked_writer_close = Httpg_internal.Chunked.chunked_writer_close
 
 (* Body-read window for the fixed-length and close-delimited readers. Mirrors
    the 32 KiB default copy buffer Go's [io.Copy]/[io.CopyN] use, so a large body
@@ -171,7 +171,7 @@ let has_token v token =
   if lt > lv || lt = 0 then false
   else if v = token then true
   else begin
-    let eq_fold = Gohttp_internal.Ascii.equal_fold in
+    let eq_fold = Httpg_internal.Ascii.equal_fold in
     let found = ref false in
     let sp = ref 0 in
     while (not !found) && !sp <= lv - lt do

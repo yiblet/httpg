@@ -4,11 +4,11 @@
    focused unit test for [Fs.scan_etag].
 
    Networked tests create a unique temp dir, serve it via an ephemeral loopback
-   [Httptest.Server], drive it with the gohttp [Client], and clean up in an
+   [Httptest.Server], drive it with the httpg [Client], and clean up in an
    [Lwt.finalize]. The whole run is bounded by [Net.with_timeout] so a hang
    fails rather than blocks. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 module Ts = Httptest.Server
 
@@ -17,7 +17,7 @@ module Ts = Httptest.Server
 let mktempdir () =
   let base = Filename.get_temp_dir_name () in
   let name =
-    Printf.sprintf "gohttp_fscond_%d_%d" (Unix.getpid ())
+    Printf.sprintf "httpg_fscond_%d_%d" (Unix.getpid ())
       (Random.int 1_000_000_000)
   in
   let dir = Filename.concat base name in

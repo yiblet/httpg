@@ -1,15 +1,15 @@
 (test
- (name test_gohttp)
+ (name test_httpg)
  (deps
   (glob_files ../lib/*.mli)
   (glob_files ../lib/base/*.mli)
   (glob_files ../lib/internal/*.mli)
   (glob_files ../lib/internal/http2/*.mli))
  (libraries
-  gohttp
-  gohttp_base
-  gohttp_internal
-  gohttp_http2
+  httpg
+  httpg_base
+  httpg_internal
+  httpg_http2
   alcotest
   lwt
   lwt.unix

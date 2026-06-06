@@ -1,4 +1,4 @@
-open Gohttp
+open Httpg
 open Cookie
 
 (* Ported from go/src/net/http/cookie_test.go.

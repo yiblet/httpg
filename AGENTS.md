@@ -1,6 +1,6 @@
 ## What this is
 
-`gohttp` is a **faithful 1:1 OCaml port of Go's `net/http`** — HTTP/1.0, HTTP/1.1, and HTTP/2 (over TLS via ALPN), server and client. The Go source is vendored read-only at **`go/src/net/http/`** (a git submodule) and is the **spec of record**: every `lib/` module corresponds to a Go source file and is meant to match its types, function names, and behavior. HPACK lives at `go/src/vendor/golang.org/x/net/http2/hpack/`; HTTP/2 at `go/src/net/http/internal/http2/`.
+`httpg` is a **faithful 1:1 OCaml port of Go's `net/http`** — HTTP/1.0, HTTP/1.1, and HTTP/2 (over TLS via ALPN), server and client. The Go source is vendored read-only at **`go/src/net/http/`** (a git submodule) and is the **spec of record**: every `lib/` module corresponds to a Go source file and is meant to match its types, function names, and behavior. HPACK lives at `go/src/vendor/golang.org/x/net/http2/hpack/`; HTTP/2 at `go/src/net/http/internal/http2/`.
 
 ## Non-negotiable conventions (read before editing)
 
@@ -16,31 +16,31 @@
 ```sh
 dune build                                   # build (warnings are errors)
 dune test                                    # run the full alcotest suite (alias: dune runtest)
-dune exec test/test_gohttp.exe -- test Header # run ONE suite (suite names below)
-dune exec test/test_gohttp.exe -- test Header 3 # run one case within a suite
-dune exec gohttp                             # run the demo (h1 + streaming + h2-over-TLS round trips)
+dune exec test/test_httpg.exe -- test Header # run ONE suite (suite names below)
+dune exec test/test_httpg.exe -- test Header 3 # run one case within a suite
+dune exec httpg                             # run the demo (h1 + streaming + h2-over-TLS round trips)
 opam install . --deps-only --with-test       # install deps into the switch
 ```
 
-Tests are a single alcotest runner (`test/test_gohttp.ml`) that aggregates one suite per module (`Header`, `Cookie`, `Transfer`, `Hpack`, `H2Frame`, `Fs`, `Httptest`, …). Lwt-based tests run via `Lwt_main.run` and are bounded by `Net.with_timeout` so a hang fails instead of blocking.
+Tests are a single alcotest runner (`test/test_httpg.ml`) that aggregates one suite per module (`Header`, `Cookie`, `Transfer`, `Hpack`, `H2Frame`, `Fs`, `Httptest`, …). Lwt-based tests run via `Lwt_main.run` and are bounded by `Net.with_timeout` so a hang fails instead of blocking.
 
 ## Architecture
 
 **Concurrency model:** written **directly against Lwt** (no monad/IO-functor abstraction). `Lwt_io` channels are the analogue of Go's `bufio.Reader`/`Writer`; `Lwt_unix` for sockets; `tls-lwt` for TLS. Go's goroutines + channels + `sync.Cond` map to Lwt fibers + `Lwt_condition`/`Lwt_mvar`/`Lwt_mutex` (most visible in `h2_server.ml`/`h2_transport.ml`, which use a single per-connection event-loop fiber).
 
 **Four libraries** (mirroring Go's package layout below/within `net/http`):
-- `lib/base/` → `gohttp_base`, the **foundation layer** below net/http: ports of the Go stdlib packages `net/http` and `internal/http2` both depend on — `Context` (Go's `context`) and `Textproto` (`textproto.CanonicalMIMEHeaderKey`). Re-exported publicly (e.g. `Gohttp.Context = Gohttp_base.Context`, identity-preserving). Not "internal" — it sits beneath net/http.
-- `lib/internal/` → the private `gohttp_internal` library: **the home for everything that is not part of `gohttp`'s public API.** That is (a) ports of the *loose files* of Go's `net/http/internal` — `Chunked`, `Ascii`, `Common` (sentinel errors), `Sniff` (`internal/sniff.go`; the public `Gohttp.Sniff` is a wrapper), `Httpcommon` (`internal/httpcommon`; the h1/h2-shared request/header encoding) — and (b) modules that live in Go's `net/http` package but are kept **unexported** there, so they shouldn't be exported here either: the routing internals `Pattern` (`pattern.go`), `Routing_tree` (`routingNode`), `Mapping` (`mapping.go`). Consumers in `lib/` reach them via `Gohttp_internal.Pattern` (etc.), usually behind a local module alias; they never appear under `Gohttp.*`. The rule is **"hidden from the public API," not "Go package == `net/http/internal`."** A module that Go *exports* (e.g. `http.TimeFormat`/`ParseTime` → `Http_time`, `url.Values` → `Values`, `http.DetectContentType` → `Sniff` wrapper) stays public in `lib/`.
-- `lib/internal/http2/` → the private `gohttp_http2` library, mirroring Go's `net/http/internal/http2` subdirectory: the whole HTTP/2 stack (`Hpack*`, `H2`, `H2_frame`, `H2_flow`, `H2_pipe`, `H2_databuffer`, `H2_error`, `H2_writesched`, `H2_write`, `H2_server`, `H2_transport`) plus `Api` (Go's `api.go` decoupled types). It depends on `gohttp_base`/`gohttp_internal` but **never names** the public `Request`/`Response`/`Body`/`Header`/`Status` types.
-- `lib/` → the public `gohttp` library. Flat modules, accessed as `Gohttp.Header`, `Gohttp.Server`, etc. It contains the **h1/h2 translation shims** (Go's `http2.go`): `Transport`/`Server` convert `Request.t`/`Response.t` ⇄ the `Gohttp_http2.Api` types at the ALPN boundary.
+- `lib/base/` → `httpg_base`, the **foundation layer** below net/http: ports of the Go stdlib packages `net/http` and `internal/http2` both depend on — `Context` (Go's `context`) and `Textproto` (`textproto.CanonicalMIMEHeaderKey`). Re-exported publicly (e.g. `Httpg.Context = Httpg_base.Context`, identity-preserving). Not "internal" — it sits beneath net/http.
+- `lib/internal/` → the private `httpg_internal` library: **the home for everything that is not part of `httpg`'s public API.** That is (a) ports of the *loose files* of Go's `net/http/internal` — `Chunked`, `Ascii`, `Common` (sentinel errors), `Sniff` (`internal/sniff.go`; the public `Httpg.Sniff` is a wrapper), `Httpcommon` (`internal/httpcommon`; the h1/h2-shared request/header encoding) — and (b) modules that live in Go's `net/http` package but are kept **unexported** there, so they shouldn't be exported here either: the routing internals `Pattern` (`pattern.go`), `Routing_tree` (`routingNode`), `Mapping` (`mapping.go`). Consumers in `lib/` reach them via `Httpg_internal.Pattern` (etc.), usually behind a local module alias; they never appear under `Httpg.*`. The rule is **"hidden from the public API," not "Go package == `net/http/internal`."** A module that Go *exports* (e.g. `http.TimeFormat`/`ParseTime` → `Http_time`, `url.Values` → `Values`, `http.DetectContentType` → `Sniff` wrapper) stays public in `lib/`.
+- `lib/internal/http2/` → the private `httpg_http2` library, mirroring Go's `net/http/internal/http2` subdirectory: the whole HTTP/2 stack (`Hpack*`, `H2`, `H2_frame`, `H2_flow`, `H2_pipe`, `H2_databuffer`, `H2_error`, `H2_writesched`, `H2_write`, `H2_server`, `H2_transport`) plus `Api` (Go's `api.go` decoupled types). It depends on `httpg_base`/`httpg_internal` but **never names** the public `Request`/`Response`/`Body`/`Header`/`Status` types.
+- `lib/` → the public `httpg` library. Flat modules, accessed as `Httpg.Header`, `Httpg.Server`, etc. It contains the **h1/h2 translation shims** (Go's `http2.go`): `Transport`/`Server` convert `Request.t`/`Response.t` ⇄ the `Httpg_http2.Api` types at the ALPN boundary.
 
 **Layering (bottom-up; this order avoids OCaml module cycles):**
 1. Pure data: `method`, `status`, `header`, `cookie`, `sniff`, `http_time`; URLs use the `uri` opam lib (`Uri.t`), not a `net/url` port; `values` ports `url.Values`.
-2. Framing: `transfer` (content-length/chunked), `body`, `gohttp_internal/chunked`.
+2. Framing: `transfer` (content-length/chunked), `body`, `httpg_internal/chunked`.
 3. Message read/write: `request`, `response` (records with a **parametric `'body` field**), `io` (read/write over `Lwt_io`).
 4. Net: `net` (TCP listen/accept/connect, server-side TLS + ALPN; client TLS verifies via `ca-certs` by default, with a `?insecure` opt-out).
 5. Endpoints: `server` (Handler/ServeMux/ResponseWriter), `client`, `transport` (keep-alive pool).
-6. HTTP/2: the whole stack lives in the private **`gohttp_http2`** library (`lib/internal/http2/`), mirroring Go's `net/http/internal/http2`. Like Go's package it is **decoupled** from net/http: it works in `Gohttp_http2.Api` types (`api.go` — `client_request`/`server_request`/`client_response`/`response_writer`, `Header = Hashtbl`, an `io.ReadCloser`-shaped `Body`) and never names `Request`/`Response`/`Body`/`Header`/`Status`. The public `Server`/`Transport` hold the **translation shims** (Go's `http2.go`: `http2RoundTrip` / `http2Handler.ServeHTTP`) that convert `Request.t`/`Response.t` ⇄ `Api` at the ALPN boundary, with h1 fallback. (`Status.status_text` for a response is applied by the client shim, as in Go.)
+6. HTTP/2: the whole stack lives in the private **`httpg_http2`** library (`lib/internal/http2/`), mirroring Go's `net/http/internal/http2`. Like Go's package it is **decoupled** from net/http: it works in `Httpg_http2.Api` types (`api.go` — `client_request`/`server_request`/`client_response`/`response_writer`, `Header = Hashtbl`, an `io.ReadCloser`-shaped `Body`) and never names `Request`/`Response`/`Body`/`Header`/`Status`. The public `Server`/`Transport` hold the **translation shims** (Go's `http2.go`: `http2RoundTrip` / `http2Handler.ServeHTTP`) that convert `Request.t`/`Response.t` ⇄ `Api` at the ALPN boundary, with h1 fallback. (`Status.status_text` for a response is applied by the client shim, as in Go.)
 
 **Bodies & lifecycle:** `Body.t = Empty | String of string | Stream of (unit -> string option Lwt.t)`. Read paths return a `Stream`; the connection is reused only after the body reaches EOF / `Body.drain`. `?context` (`Context.t`, an Lwt-backed port of Go's `context`, deadline/cancel only — no Values) threads through `Client`/`Transport` to bound/cancel requests.
 

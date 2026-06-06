@@ -29,9 +29,9 @@ open Lwt.Infix
    not mistaken for the Go runtime's. Mirrors Go's "<name>/<http-version>"
    shape. *)
 
-open Gohttp_http2
+open Httpg_http2
 
-let default_user_agent = "gohttp-client/1.1"
+let default_user_agent = "httpg-client/1.1"
 
 (* A pooled, reusable connection: the buffered channels plus the underlying fd
    (so we can actually close it when the connection is not reusable). *)

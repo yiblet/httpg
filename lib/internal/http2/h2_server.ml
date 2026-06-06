@@ -3,7 +3,7 @@
 
 module Body = Api.Body
 module Header = Api.Header
-module Context = Gohttp_base.Context
+module Context = Httpg_base.Context
 
 (* The handler-facing ResponseWriter and Handler now live in Api (Go's api.go). *)
 type response_writer = Api.response_writer
@@ -713,8 +713,8 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
     let authority =
       if authority = "" then Header.get header "Host" else authority
     in
-    let result : Gohttp_internal.Httpcommon.server_request_result =
-      Gohttp_internal.Httpcommon.new_server_request
+    let result : Httpg_internal.Httpcommon.server_request_result =
+      Httpg_internal.Httpcommon.new_server_request
         ~canonical:Header.canonical_header_key
         {
           sp_method = meth;

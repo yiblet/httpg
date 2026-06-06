@@ -3,11 +3,11 @@
 
    Each test starts a real loopback server on an ephemeral port via
    [Server.listen_and_serve_started], drives it with a raw client socket
-   ([Net.connect] + raw [Lwt_io], since the gohttp Client is Ticket 10), and
+   ([Net.connect] + raw [Lwt_io], since the httpg Client is Ticket 10), and
    asserts on the raw response bytes. The whole run is bounded by
    [Net.with_timeout] so a hang fails rather than blocks the suite. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 (* Registration is now a [result]; at wiring time a conflict is a programmer

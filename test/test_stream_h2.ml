@@ -1,6 +1,6 @@
 (* Stream Ticket 4 — HTTP/2 streaming alignment integration tests.
 
-   Connects a Gohttp.H2_transport client_conn to H2_server.serve over a real
+   Connects a Httpg.H2_transport client_conn to H2_server.serve over a real
    loopback TCP socket pair (as test_h2_transport.ml does) and asserts that h2
    bodies stream end-to-end: the server frames DATA per write/flush (no hidden
    whole-body buffer), a large body spanning many DATA frames (and exercising
@@ -8,8 +8,8 @@
    incrementally (first chunk before EOF). Bounded by Net.with_timeout so a hang
    fails. *)
 
-open Gohttp
-open Gohttp_http2
+open Httpg
+open Httpg_http2
 
 let ( let* ) = Lwt.bind
 

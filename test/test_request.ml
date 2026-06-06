@@ -24,7 +24,7 @@ let parse_http_version () =
   in
   List.iter
     (fun (vers, want) ->
-      let got = Gohttp.Request.parse_http_version vers in
+      let got = Httpg.Request.parse_http_version vers in
       Alcotest.(check (option (pair int int))) vers want got)
     cases
 
@@ -47,19 +47,19 @@ let parse_basic_auth () =
   in
   List.iter
     (fun (header, want) ->
-      let got = Gohttp.Request.parse_basic_auth header in
+      let got = Httpg.Request.parse_basic_auth header in
       Alcotest.(check (option (pair string string))) header want got)
     cases
 
-let dummy_req () : Gohttp.Body.t Gohttp.Request.t =
+let dummy_req () : Httpg.Body.t Httpg.Request.t =
   {
-    Gohttp.Request.meth = "GET";
+    Httpg.Request.meth = "GET";
     url = Uri.of_string "http://example.com/";
     proto = "HTTP/1.1";
     proto_major = 1;
     proto_minor = 1;
-    header = Gohttp.Header.create ();
-    body = Gohttp.Body.Empty;
+    header = Httpg.Header.create ();
+    body = Httpg.Body.Empty;
     content_length = 0L;
     transfer_encoding = [];
     close = false;
@@ -70,7 +70,7 @@ let dummy_req () : Gohttp.Body.t Gohttp.Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Gohttp.Context.background;
+    ctx = Httpg.Context.background;
   }
 
 let basic_auth_roundtrip () =
@@ -80,8 +80,8 @@ let basic_auth_roundtrip () =
   List.iter
     (fun (u, p) ->
       let r = dummy_req () in
-      Gohttp.Request.set_basic_auth r u p;
-      match Gohttp.Request.basic_auth r with
+      Httpg.Request.set_basic_auth r u p;
+      match Httpg.Request.basic_auth r with
       | Some (gu, gp) ->
           Alcotest.(check string) "user" u gu;
           Alcotest.(check string) "pass" p gp
@@ -89,17 +89,17 @@ let basic_auth_roundtrip () =
     cases;
   (* Unauthenticated request. *)
   let r = dummy_req () in
-  Alcotest.(check bool) "unauth" true (Gohttp.Request.basic_auth r = None)
+  Alcotest.(check bool) "unauth" true (Httpg.Request.basic_auth r = None)
 
 let add_cookie () =
   let r = dummy_req () in
-  Gohttp.Request.add_cookie r
-    { Gohttp.Cookie.default with name = "a"; value = "1" };
-  Gohttp.Request.add_cookie r
-    { Gohttp.Cookie.default with name = "b"; value = "2" };
+  Httpg.Request.add_cookie r
+    { Httpg.Cookie.default with name = "a"; value = "1" };
+  Httpg.Request.add_cookie r
+    { Httpg.Cookie.default with name = "b"; value = "2" };
   Alcotest.(check string)
     "cookie header" "a=1; b=2"
-    (Gohttp.Header.get r.header "Cookie")
+    (Httpg.Header.get r.header "Cookie")
 
 let tests =
   [

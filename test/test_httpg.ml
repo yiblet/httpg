@@ -1,5 +1,5 @@
 let () =
-  Alcotest.run "gohttp"
+  Alcotest.run "httpg"
     [
       ("Method", Test_method.tests);
       ("Status", Test_status.tests);

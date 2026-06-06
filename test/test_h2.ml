@@ -1,4 +1,4 @@
-open Gohttp_http2
+open Httpg_http2
 
 (* Ported from go/src/net/http/internal/http2/errors_test.go
    (TestErrCodeString) and the constant block of http2.go / frame.go. *)

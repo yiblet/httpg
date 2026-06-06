@@ -5,7 +5,7 @@
    aborts the in-flight read and closes the connection.
 
    These tests start a real loopback server on an ephemeral port via
-   [Server.listen_and_serve_started] and drive it with the gohttp [Client]:
+   [Server.listen_and_serve_started] and drive it with the httpg [Client]:
 
    - client_body_streamed (Success Criterion): a handler streams many flushed
      chunks; the client obtains a [Body.Stream] whose first chunk is readable
@@ -19,7 +19,7 @@
 
    Bounded by [Net.with_timeout] so a hang fails rather than blocks. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 (* Start a server with [handler], run [client ~port] against it, stop it. *)

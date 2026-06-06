@@ -8,7 +8,7 @@
    so a few Go rows that depend on Go's mime/multipart error surface or
    temp-file spill behavior are omitted (see the porting notes in the plan). *)
 
-open Gohttp
+open Httpg
 
 let run = Lwt_main.run
 
@@ -37,7 +37,7 @@ let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
     form = None;
     post_form = None;
     multipart_form = None;
-    ctx = Gohttp.Context.background;
+    ctx = Httpg.Context.background;
   }
 
 let values_get r_field key =
@@ -157,7 +157,7 @@ let parse_form_unknown_content_type () =
         form = None;
         post_form = None;
         multipart_form = None;
-        ctx = Gohttp.Context.background;
+        ctx = Httpg.Context.background;
       }
     in
     let res = run (Form.parse_form r) in

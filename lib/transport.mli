@@ -7,7 +7,7 @@
 val default_user_agent : string
 (** The default User-Agent advertised by {!round_trip} when the request carries
     none. Go uses ["Go-http-client/1.1"] ([request.go]'s [defaultUserAgent]);
-    this port advertises ["gohttp-client/1.1"] so the wire string is not
+    this port advertises ["httpg-client/1.1"] so the wire string is not
     mistaken for the Go runtime's. *)
 
 type t

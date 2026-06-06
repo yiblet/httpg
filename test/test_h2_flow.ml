@@ -1,7 +1,7 @@
 (* Ported from go/src/net/http/internal/http2/flow_test.go.
    Window add/take/available + int32 overflow semantics for inflow/outflow. *)
 
-module Flow = Gohttp_http2.H2_flow
+module Flow = Httpg_http2.H2_flow
 
 let i32 = Alcotest.testable (Fmt.of_to_string Int32.to_string) Int32.equal
 
@@ -57,8 +57,8 @@ let test_inflow_add_overflow () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f (Int32.of_int Flow.max_window);
   Alcotest.check_raises "overflow"
-    (Gohttp_http2.H2_error.Connection_error
-       Gohttp_http2.H2_error.FlowControlError) (fun () ->
+    (Httpg_http2.H2_error.Connection_error
+       Httpg_http2.H2_error.FlowControlError) (fun () ->
       ignore (Flow.inflow_add f 1))
 
 (* TestOutFlow *)

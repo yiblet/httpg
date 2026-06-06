@@ -1,11 +1,11 @@
-(* End-to-end streaming demo for gohttp.
+(* End-to-end streaming demo for httpg.
 
    Three round trips, all bounded by [Net.with_timeout] so the process always
    terminates:
 
    1. {!demo_stream} — the headline: a server handler writes several chunks,
       calling [w.flush] between them (so the response is framed chunked and the
-      bytes leave the server as the handler runs, not at completion). The gohttp
+      bytes leave the server as the handler runs, not at completion). The httpg
       [Client] GETs it and consumes the response [Body.Stream] *incrementally*,
       printing each chunk as it arrives — demonstrating the body is not
       pre-buffered. The connection is released back to the transport pool only
@@ -13,13 +13,13 @@
    2. {!demo_http} — a plain HTTP/1.1 GET, body read whole with [Body.read_all].
    3. {!demo_h2} — a TLS+ALPN GET negotiating HTTP/2. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 let handler =
   Server.handler_func (fun w r ->
       w.Server.write
-        (Printf.sprintf "Hello from gohttp! You requested %s\n"
+        (Printf.sprintf "Hello from httpg! You requested %s\n"
            (Uri.path r.Request.url)))
 
 (* Streaming handler: emit a sequence of chunks, flushing between each so the

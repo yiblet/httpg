@@ -3,11 +3,11 @@
    Lwt_io.pipe pair, asserting the parsed fields (round-trip). Bounded by
    Net.with_timeout so a hang fails rather than blocks the suite. *)
 
-module F = Gohttp_http2.H2_frame
-module H2 = Gohttp_http2.H2
-module H2_error = Gohttp_http2.H2_error
-module Hpack = Gohttp_http2.Hpack
-module Net = Gohttp.Net
+module F = Httpg_http2.H2_frame
+module H2 = Httpg_http2.H2
+module H2_error = Httpg_http2.H2_error
+module Hpack = Httpg_http2.Hpack
+module Net = Httpg.Net
 
 (* Run [writer] then [reader] over a fresh pipe, returning [reader]'s result.
    The writer's output channel is closed (flushing) before reading. *)

@@ -1,6 +1,6 @@
 (* Ported from go/src/net/http/pattern_test.go. *)
 
-module Pattern = Gohttp_internal.Pattern
+module Pattern = Httpg_internal.Pattern
 
 let lit name = { Pattern.s = name; wild = false; multi = false }
 let wild name = { Pattern.s = name; wild = true; multi = false }

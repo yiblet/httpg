@@ -9,7 +9,7 @@
    The TLS path of [Net.connect ~tls:true] is smoke-only (no local TLS server
    here), so it is intentionally not exercised. *)
 
-open Gohttp
+open Httpg
 
 let loopback_roundtrip () =
   let open Lwt.Syntax in

@@ -5,7 +5,7 @@
    (Slowloris). The server's duration knobs are ported from Go's
    [Server.ReadHeaderTimeout] / [IdleTimeout] (go/src/net/http/server.go:
    1007-1022, :2145-2149, :3717-3724), implemented here as child
-   {!Gohttp_base.Context} deadlines (Lwt_io has no settable socket deadline).
+   {!Httpg_base.Context} deadlines (Lwt_io has no settable socket deadline).
 
    Each test starts a real loopback server on an ephemeral port via
    [Server.listen_and_serve_started] with a small timeout, drives it with a raw
@@ -13,7 +13,7 @@
    within a bound. The whole run is wrapped in [Net.with_timeout] so a hang
    fails the test rather than blocking the suite. *)
 
-open Gohttp
+open Httpg
 open Lwt.Infix
 
 let hello_handler = Server.handler_func (fun w _r -> w.Server.write "hello")
@@ -569,7 +569,7 @@ let expect_unknown () =
 (* by streaming [Transfer], so this covers the head only.                  *)
 (*                                                                         *)
 (* These drive a RAW loopback server (a bare [Net.listen]/[Net.accept]     *)
-(* loop, NOT a gohttp [Server]) so the test can emit arbitrary/malicious    *)
+(* loop, NOT a httpg [Server]) so the test can emit arbitrary/malicious    *)
 (* bytes, against a [Client] backed by a [Transport] with a small          *)
 (* [~max_response_header_bytes]. Everything is bounded by [Net.with_timeout] *)
 (* so a hang (the failure we are guarding against) fails the test.         *)
@@ -807,12 +807,12 @@ let redirect_referer_https_to_http () =
 (* server_test.go:4257-4356; the cap is server.go:2263). Driven over    *)
 (* the same in-memory Lwt_io pipe + raw H2 framer harness as            *)
 (* test_h2_server.ml. *)
-module F = Gohttp_http2.H2_frame
-module S = Gohttp_http2.H2_server
-module H2 = Gohttp_http2.H2
-module Hpack = Gohttp_http2.Hpack
-module H2_error = Gohttp_http2.H2_error
-module Api = Gohttp_http2.Api
+module F = Httpg_http2.H2_frame
+module S = Httpg_http2.H2_server
+module H2 = Httpg_http2.H2
+module Hpack = Httpg_http2.Hpack
+module H2_error = Httpg_http2.H2_error
+module Api = Httpg_http2.Api
 
 let h2_duplex () =
   let s_ic, c_oc = Lwt_io.pipe () in
@@ -920,7 +920,7 @@ let too_many_early_resets () =
 (* Ticket 9 (Case 11): HTTP/2 MAX_HEADER_LIST_SIZE advertise/derive + HPACK
    per-string cap + Huffman bound. Refs: server.go:497-505,:778; frame.go:1716,
    :1722,:1774; hpack/hpack.go:84,:122,:488,:516. *)
-module Huff = Gohttp_http2.Hpack_huffman
+module Huff = Httpg_http2.Hpack_huffman
 
 (* Read the server's first SETTINGS frame off the wire. *)
 let rec read_first_settings ic =
@@ -1055,10 +1055,10 @@ let huffman_string_cap () =
     | Ok _ -> Hpack.close_result dec
   in
   match result with
-  | Error Gohttp_http2.Hpack.String_too_long -> ()
+  | Error Httpg_http2.Hpack.String_too_long -> ()
   | Error e ->
       Alcotest.failf "expected String_too_long, got %s"
-        (Gohttp_http2.Hpack.error_to_string e)
+        (Httpg_http2.Hpack.error_to_string e)
   | Ok () -> Alcotest.fail "expected String_too_long, got Ok"
 
 (* Ticket 10 (Case 12): HTTP/2 duplicate-SETTINGS rejection. A SETTINGS frame
@@ -1203,7 +1203,7 @@ let rec read_until_rst ic =
 (* TestH2MaxConcurrentStreamsRefused (regression): with adv_max_streams = 1,
    a second concurrent stream opened while the first is still active is refused
    with RST_STREAM REFUSED_STREAM. Ref: server.go (processHeaders over
-   maxConcurrentStreams); gohttp h2_server.ml:817-821. *)
+   maxConcurrentStreams); httpg h2_server.ml:817-821. *)
 let h2_max_concurrent_streams_refused () =
   (* The first stream's handler blocks forever, keeping cur_client_streams at
      adv_max_streams so the second stream trips the refusal. *)

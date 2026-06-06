@@ -1,4 +1,4 @@
 (library
- (name gohttp_internal)
- (package gohttp)
+ (name httpg_internal)
+ (package httpg)
  (libraries lwt lwt.unix))

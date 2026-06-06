@@ -5,7 +5,7 @@
 
    Bounded by Net.with_timeout so a hang fails instead of blocking. *)
 
-open Gohttp
+open Httpg
 
 let ic_of_string s = Lwt_io.of_bytes ~mode:Lwt_io.input (Lwt_bytes.of_string s)
 

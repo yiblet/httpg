@@ -1,4 +1,4 @@
-# gohttp
+# httpg
 
 A small starter OCaml project using Dune.
 
@@ -17,7 +17,7 @@ dune build
 ## Run
 
 ```sh
-dune exec gohttp
+dune exec httpg
 ```
 
 ## Test

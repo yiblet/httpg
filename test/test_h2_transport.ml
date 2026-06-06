@@ -1,11 +1,11 @@
-(* Integration tests for Gohttp.H2_transport: connect an H2_transport client_conn
+(* Integration tests for Httpg.H2_transport: connect an H2_transport client_conn
    to H2_server.serve (Ticket 8) over a real loopback TCP socket pair, performing
    GET / POST / concurrent round trips. Ported subset of
    go/src/net/http/internal/http2/transport_test.go (TestTransport / GET, POST,
    concurrent streams). Bounded by Net.with_timeout so a hang fails. *)
 
-open Gohttp
-open Gohttp_http2
+open Httpg
+open Httpg_http2
 
 let ( let* ) = Lwt.bind
 

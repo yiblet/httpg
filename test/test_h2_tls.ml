@@ -10,7 +10,7 @@
    concurrently. All cases are bounded by [Net.with_timeout] so a stuck
    handshake fails the test instead of hanging the suite. *)
 
-open Gohttp
+open Httpg
 
 (* Run [server]/[client] fibers against a fresh loopback TLS server advertising
    [server_alpn], with the client advertising [client_alpn]. Returns whatever

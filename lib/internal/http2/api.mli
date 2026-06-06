@@ -1,5 +1,5 @@
 (* Port of go/src/net/http/internal/http2/api.go: the decoupled types the HTTP/2
-   stack uses so it never names net/http (gohttp) types. The public library's
+   stack uses so it never names net/http (httpg) types. The public library's
    shims translate Request.t/Response.t to and from these. See api.ml. *)
 
 type header = (string, string list) Hashtbl.t
@@ -33,7 +33,7 @@ end
 val default_user_agent : string
 
 type client_request = {
-  creq_ctx : Gohttp_base.Context.t;
+  creq_ctx : Httpg_base.Context.t;
   creq_meth : string;
   creq_url : Uri.t;
   creq_header : header;
@@ -54,7 +54,7 @@ type client_response = {
 }
 
 type server_request = {
-  sreq_ctx : Gohttp_base.Context.t;
+  sreq_ctx : Httpg_base.Context.t;
   sreq_proto : string;
   sreq_proto_major : int;
   sreq_proto_minor : int;

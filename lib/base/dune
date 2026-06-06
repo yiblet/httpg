@@ -1,4 +1,4 @@
 (library
- (name gohttp_base)
- (package gohttp)
+ (name httpg_base)
+ (package httpg)
  (libraries lwt lwt.unix unix))
