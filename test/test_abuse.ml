@@ -665,6 +665,137 @@ let response_header_under_limit_ok () =
   Alcotest.(check int) "status 200" 200 code;
   Alcotest.(check string) "body intact" body b
 
+(* ---- Ticket 7: client sticky / subdomain-aware redirect header stripping +
+   Referer (Case 15, go/src/net/http/client.go:691-698, :1008-1048, :147-170).
+
+   These drive the redirect loop ({!Client.do_one}) against a stub round-tripper
+   that captures the headers seen on each hop and returns canned redirects, so
+   per-hop header presence is asserted without real DNS. *)
+
+(* Build a [Body.t Response.t] for the stub: a redirect to [location] (when
+   [Some]) carrying the [req] that produced it (so {!Response.location} resolves
+   against the request URL), else a final 200. *)
+let stub_response req ?location () : Body.t Response.t =
+  let header = Header.create () in
+  let status_code, status =
+    match location with
+    | Some loc ->
+        Header.set header "Location" loc;
+        (302, "302 Found")
+    | None -> (200, "200 OK")
+  in
+  {
+    Response.status;
+    status_code;
+    proto = "HTTP/1.1";
+    proto_major = 1;
+    proto_minor = 1;
+    header;
+    body = Body.Empty;
+    content_length = 0L;
+    transfer_encoding = [];
+    close = false;
+    uncompressed = false;
+    trailer = None;
+    request = Some req;
+  }
+
+(* Run the redirect loop with a stub that maps each request URL to either a
+   redirect target or a final response, recording the headers seen on each hop
+   (keyed by the request URL). Returns the assoc list of (url, header) seen. *)
+let drive_redirects ~start ~routes ~init_headers =
+  let seen = ref [] in
+  let round_trip (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+    seen := !seen @ [ (Uri.to_string req.Request.url, req.Request.header) ];
+    let url = Uri.to_string req.Request.url in
+    match List.assoc_opt url routes with
+    | Some next -> Lwt.return (stub_response req ~location:next ())
+    | None -> Lwt.return (stub_response req ())
+  in
+  let c = Client.create () in
+  let req = Client.make_request "GET" start in
+  List.iter (fun (k, v) -> Header.set req.Request.header k v) init_headers;
+  let run () =
+    Client.do_one ~round_trip c req >>= fun resp ->
+    Body.drain resp.Response.body >>= fun _ -> Lwt.return !seen
+  in
+  Lwt_main.run (Net.with_timeout 5. (run ()))
+
+let header_on seen url name =
+  match List.assoc_opt url seen with
+  | Some h -> Header.get h name
+  | None -> Alcotest.failf "no hop recorded for %s" url
+
+let redirect_strip_sticky_on_bounce_back () =
+  (* a.com (Authorization) -> b.com -> a.com. Once stripped crossing to b.com,
+     Authorization stays stripped even bouncing back to the initial a.com.
+     Both visits to a.com share a URL key, so this drives the loop directly and
+     records hops in order, asserting on the FINAL (bounce-back) hop. *)
+  let seen2 = ref [] in
+  let round_trip (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+    let host = Option.value ~default:"" (Uri.host req.Request.url) in
+    seen2 := !seen2 @ [ (host, req.Request.header) ];
+    match host with
+    | "a.com" when List.length !seen2 = 1 ->
+        Lwt.return (stub_response req ~location:"http://b.com/" ())
+    | "b.com" -> Lwt.return (stub_response req ~location:"http://a.com/" ())
+    | _ -> Lwt.return (stub_response req ())
+  in
+  let c = Client.create () in
+  let req = Client.make_request "GET" "http://a.com/" in
+  Header.set req.Request.header "Authorization" "Bearer secret";
+  let hops =
+    Lwt_main.run
+      (Net.with_timeout 5.
+         ( Client.do_one ~round_trip c req >>= fun resp ->
+           Body.drain resp.Response.body >>= fun _ -> Lwt.return !seen2 ))
+  in
+  Alcotest.(check int) "three hops" 3 (List.length hops);
+  let _, first_header = List.nth hops 0 in
+  Alcotest.(check string)
+    "auth present on initial a.com hop" "Bearer secret"
+    (Header.get first_header "Authorization");
+  let _, second_header = List.nth hops 1 in
+  Alcotest.(check string)
+    "auth stripped crossing to b.com" ""
+    (Header.get second_header "Authorization");
+  let _, final_header = List.nth hops 2 in
+  Alcotest.(check string)
+    "auth stripped on bounce-back a.com" ""
+    (Header.get final_header "Authorization")
+
+let redirect_keeps_header_on_subdomain () =
+  (* foo.com (Authorization) -> sub.foo.com keeps Authorization (subdomain of
+     the initial host). *)
+  let seen =
+    drive_redirects ~start:"http://foo.com/"
+      ~routes:[ ("http://foo.com/", "http://sub.foo.com/") ]
+      ~init_headers:[ ("Authorization", "Bearer secret") ]
+  in
+  Alcotest.(check string)
+    "auth kept on subdomain hop" "Bearer secret"
+    (header_on seen "http://sub.foo.com/" "Authorization")
+
+let redirect_referer_https_to_http () =
+  (* https -> https keeps/sets Referer from the previous hop; https -> http
+     omits it. *)
+  let seen_secure =
+    drive_redirects ~start:"https://a.com/page"
+      ~routes:[ ("https://a.com/page", "https://b.com/") ]
+      ~init_headers:[]
+  in
+  Alcotest.(check string)
+    "referer set on https->https hop" "https://a.com/page"
+    (header_on seen_secure "https://b.com/" "Referer");
+  let seen_downgrade =
+    drive_redirects ~start:"https://a.com/page"
+      ~routes:[ ("https://a.com/page", "http://b.com/") ]
+      ~init_headers:[]
+  in
+  Alcotest.(check string)
+    "referer omitted on https->http hop" ""
+    (header_on seen_downgrade "http://b.com/" "Referer")
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -693,4 +824,10 @@ let tests =
       response_header_too_large;
     Alcotest.test_case "response_header_under_limit_ok" `Quick
       response_header_under_limit_ok;
+    Alcotest.test_case "redirect_strip_sticky_on_bounce_back" `Quick
+      redirect_strip_sticky_on_bounce_back;
+    Alcotest.test_case "redirect_keeps_header_on_subdomain" `Quick
+      redirect_keeps_header_on_subdomain;
+    Alcotest.test_case "redirect_referer_https_to_http" `Quick
+      redirect_referer_https_to_http;
   ]

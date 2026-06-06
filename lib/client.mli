@@ -76,6 +76,41 @@ val do_ : ?context:Context.t -> t -> Body.t Request.t -> Body.t Response.t Lwt.t
     fails (Go's [cancelTimerBody]), and a body read outstanding when the
     deadline fires aborts with the timeout cause. *)
 
+val is_domain_or_subdomain : sub:string -> parent:string -> bool
+(** Go's [isDomainOrSubdomain] (client.go:1026-1048): whether host [sub] is a
+    subdomain of, or an exact match for, [parent]. Both must be in canonical
+    (hostname, no port) form. A [:] or [%] in [sub] (an IPv6 literal/zone) never
+    matches; otherwise [sub] must end in ["." ^ parent]. Exposed for the
+    redirect sensitive-header policy. *)
+
+val should_copy_header_on_redirect : initial:Uri.t -> dest:Uri.t -> bool
+(** Go's [shouldCopyHeaderOnRedirect] (client.go:1008-1024): whether sensitive
+    headers (Authorization/Cookie/...) may be copied onto a redirect from the
+    [initial] request URL to the [dest] URL — true iff [dest]'s host is the
+    [initial] host or a subdomain of it. (No IDNA normalization: hosts are used
+    as-is, matching Go's [idnaASCII] no-error fallback.) *)
+
+val referer_for_url :
+  last:Uri.t -> next:Uri.t -> explicit:string -> string option
+(** Go's [refererForURL] (client.go:147-170): the Referer to set on the next hop
+    given the previous hop's URL [last] and the destination [next]. [None] (omit
+    the Referer) when [last] is https and [next] is http; otherwise [Some] the
+    [explicit] Referer if the user set one on the original request, else [last]
+    with any userinfo stripped. *)
+
+val do_one :
+  ?round_trip:(Body.t Request.t -> Body.t Response.t Lwt.t) ->
+  t ->
+  Body.t Request.t ->
+  Body.t Response.t Lwt.t
+(** Go's [Client.do]: the redirect-following loop (without {!do_}'s timeout
+    composition). [?round_trip] overrides the per-hop round-tripper (default:
+    the client's {!Transport.round_trip}); it is exposed so the redirect loop
+    can be driven against a stub that captures per-hop headers and returns
+    canned redirects, without real DNS. Sensitive headers are stripped stickily
+    and subdomain-aware against the initial request host (client.go:691-694),
+    and the Referer is set from the previous hop (client.go:698). *)
+
 val make_request :
   ?body:Body.t -> ?content_length:int64 -> string -> string -> Body.t Request.t
 (** [make_request ?body ?content_length meth url] builds a request from a URL

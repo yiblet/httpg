@@ -492,7 +492,7 @@ Test Successful in 2.237s. 520 tests run.
 ---
 
 ### Ticket 7 — Client sticky / subdomain-aware redirect header stripping + Referer (Case 15)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Fix the sensitive-header leak where a redirect chain that returns to the original host re-attaches `Authorization`/`Cookie` (today's strip decision at `client.ml:122` is recomputed per hop against `initial_host`, non-sticky). Make stripping sticky and subdomain-aware like Go, and add Referer handling (omit on https→http).
@@ -516,7 +516,35 @@ Once sensitive headers are stripped on a cross-host hop they stay stripped for t
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/client.ml`:
+  - New pure helper `is_domain_or_subdomain ~sub ~parent` — a faithful port of Go's `isDomainOrSubdomain` (client.go:1026-1048): exact match → true; a `:` or `%` in `sub` (IPv6 literal/zone) → false; else `sub` must end in `"." ^ parent` (`String.length sub > String.length parent` + suffix-equal + the char before the suffix is `.`). Mirrors `strings.HasSuffix(sub, parent) && sub[len-len(parent)-1] == '.'` exactly (the `ls > lp` guard reproduces Go's behavior — `HasSuffix` is true for `sub == parent` but that is handled by the earlier exact-match branch, and the `[ls-lp-1]` index requires `ls > lp`).
+  - New `should_copy_header_on_redirect ~initial ~dest` = `is_domain_or_subdomain ~sub:(url_host dest) ~parent:(url_host initial)` (client.go:1008-1024). **IDNA simplification (recorded):** Go runs both hosts through `idnaASCIIFromURL` (transport.go:3187 → request.go:786 `idnaASCII`), which for already-ASCII hosts returns them unchanged (the `ascii.Is(v)` fast path). This repo has no IDNA helper, so it uses the raw `Uri.host` (= Go's `url.Hostname()`, no port) directly — exactly Go's no-error fallback for ASCII hosts. The suffix/`.`/IPv6 logic is byte-for-byte. Non-ASCII IDN hosts would not be punycode-normalized, the one divergence, noted inline.
+  - New `referer_for_url ~last ~next ~explicit` — port of `refererForURL` (client.go:147-170): `None` (omit) when `last` is https and `next` is http; else the user's `explicit` Referer if set on the original request; else `last` with userinfo stripped via `Uri.with_userinfo last None` (Go's `lastReq.String()` minus `user:pass@`).
+  - `do_one` gains an optional `?round_trip` per-hop round-tripper (default: `Transport.round_trip c.transport`), exposed as a test seam so the redirect loop can be driven against a header-capturing stub without DNS.
+  - **The fix:** replaced the per-hop, non-sticky, exact-string `let strip_sensitive = url_host loc_url <> initial_host` with a sticky `bool ref` (init `false`) carried across the loop, computed **initial-vs-dest** exactly as Go (client.go:691-694): `if (not !strip_sensitive) && url_host initial_req.url <> url_host loc_url && not (should_copy_header_on_redirect ~initial:initial_req.url ~dest:loc_url) then strip_sensitive := true`, where `initial_req = List.hd via` (Go's `reqs[0]`). Once latched it never resets (sticky across a bounce-back). `copy_headers` is called with `~strip_sensitive:!strip_sensitive` — unchanged otherwise. The now-unused `initial_host` binding was removed.
+  - **Referer (independent, previous-hop):** after copying headers, sets `Referer` from `referer_for_url ~last:req.url ~next:loc_url ~explicit:explicit_referer` (client.go:698, using `reqs[len-1].URL` = the request just made = `req`), omitting it on https→http. `explicit_referer` captures any Referer the user set on the original request.
+- `lib/client.mli`: documented the three new public helpers (`is_domain_or_subdomain`, `should_copy_header_on_redirect`, `referer_for_url`) and the `?round_trip` seam on `do_one` (kept in sync; all genuine Go ports, cited).
+- `test/test_abuse.ml`: added `redirect_strip_sticky_on_bounce_back`, `redirect_keeps_header_on_subdomain`, `redirect_referer_https_to_http`, all driving `Client.do_one ~round_trip` against a stub that records per-hop headers and returns canned 302 redirects (a `stub_response` builder sets `resp.request <- Some req` so `Response.location` resolves; absolute Location URLs keep cross-host hosts). Bounded by `Net.with_timeout`.
+
+**Precedent followed**
+- **`copy_headers` / `sensitive_header`** (client.ml:71,:85) kept as-is — the header lists already match Go (client.go:817-821) verbatim; only the `strip_sensitive` flag computation changed. **Verified against Go:** the strip lists and the 10-redirect cap were confirmed faithful; no correction needed.
+- The earlier draft's per-hop exact-string strip (`url_host loc_url <> initial_host`, non-sticky) was the **bug** this ticket corrects — confirmed against client.go:691-694 that Go compares the *initial* request host to the destination with a *sticky latch* and a *subdomain-aware* `shouldCopyHeaderOnRedirect`, not previous-vs-next exact-string. No existing test encoded the old behavior, so no test had to be weakened.
+
+**No existing test adjusted** — there were no prior client redirect tests (grep of `test/` for redirect/Location/Authorization found only fs/response cases, none asserting the strip behavior).
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  16   redirect_strip_sticky_on_bounce_b...
+  [OK]          Abuse                  17   redirect_keeps_header_on_subdomain.
+  [OK]          Abuse                  18   redirect_referer_https_to_http.
+
+Test Successful in 2.286s. 523 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (523 tests: 520 prior + 3 new).
+
+**Commit:** `okuyxtor` (`feat(client): sticky subdomain-aware redirect header strip + Referer`).
 
 ---
 

@@ -93,13 +93,65 @@ let copy_headers ~from ~into ~strip_sensitive ~strip_body =
 
 let url_host (u : Uri.t) = match Uri.host u with Some h -> h | None -> ""
 
-(* Go's Client.do: the redirect-following loop composing Transport.round_trip. *)
-let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+(* Go's isDomainOrSubdomain (client.go:1026-1048): whether [sub] is a subdomain
+   of (or an exact match for) [parent]. Both are expected in canonical (host,
+   no-port) form. An exact match keeps the headers; a [:] or [%] in [sub] marks
+   it as an IPv6 literal/zone, which never matches a hostname suffix; otherwise
+   [sub] must end in ["." ^ parent]. *)
+let is_domain_or_subdomain ~sub ~parent =
+  if String.equal sub parent then true
+  else if String.exists (function ':' | '%' -> true | _ -> false) sub then false
+  else
+    let ls = String.length sub and lp = String.length parent in
+    (* strings.HasSuffix(sub, parent) && sub[len(sub)-len(parent)-1] == '.' *)
+    ls > lp
+    && String.equal (String.sub sub (ls - lp) lp) parent
+    && Char.equal sub.[ls - lp - 1] '.'
+
+(* Go's shouldCopyHeaderOnRedirect (client.go:1008-1024): permit sending
+   auth/cookie headers from "foo.com" to "foo.com" or "sub.foo.com". Go runs
+   both hosts through idnaASCIIFromURL first; this port has no IDNA helper, so
+   it uses the raw (already-ASCII) hostnames, which is exactly Go's fallback
+   when idnaASCII reports no error (request.go:786-800). The suffix/"."/IPv6
+   logic matches isDomainOrSubdomain exactly. *)
+let should_copy_header_on_redirect ~initial ~dest =
+  is_domain_or_subdomain ~sub:(url_host dest) ~parent:(url_host initial)
+
+(* Go's refererForURL (client.go:147-170): the Referer to set on the next hop,
+   computed from the previous hop's URL. Returns [None] (omit Referer) when the
+   previous request used https and the next uses http; otherwise the previous
+   URL with any userinfo stripped. [explicit] is a Referer the user set on the
+   original request, which is preserved. *)
+let referer_for_url ~last ~next ~explicit =
+  let scheme u = match Uri.scheme u with Some s -> s | None -> "" in
+  if String.equal (scheme last) "https" && String.equal (scheme next) "http"
+  then None
+  else if explicit <> "" then Some explicit
+  else
+    (* lastReq.String() with the userinfo ("user:pass@") removed. *)
+    Some (Uri.to_string (Uri.with_userinfo last None))
+
+(* Go's Client.do: the redirect-following loop composing Transport.round_trip.
+   [round_trip] is the per-hop round-tripper (defaults to the client's
+   transport); it is a parameter so tests can drive the redirect loop against a
+   stub that captures the headers seen on each hop and returns canned
+   redirects. *)
+let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
+  let round_trip =
+    match round_trip with
+    | Some f -> f
+    | None -> fun r -> Transport.round_trip c.transport r
+  in
   let initial_header = Header.clone req.Request.header in
-  let initial_host = url_host req.Request.url in
+  (* The user's explicit Referer on the original request, preserved by
+     refererForURL across hops (client.go:147,:155-157). *)
+  let explicit_referer = Header.get req.Request.header "Referer" in
+  (* sticky strip latch: once stripped on a cross-host hop it never resets, even
+     when the chain bounces back to the initial host (client.go:691-694). *)
+  let strip_sensitive = ref false in
   let rec loop req via include_body =
     let via = via @ [ req ] in
-    Transport.round_trip c.transport req >>= fun resp ->
+    round_trip req >>= fun resp ->
     let redirect_method, should_redirect, include_body_on_hop =
       redirect_behavior ~req_method:req.Request.meth resp
     in
@@ -119,10 +171,28 @@ let do_one c (req : Body.t Request.t) : Body.t Response.t Lwt.t =
           Body.drain resp.Response.body
           >>= fun _ ->
           let include_body = include_body && include_body_on_hop in
-          let strip_sensitive = url_host loc_url <> initial_host in
+          (* Sticky, subdomain-aware strip vs the INITIAL request (client.go:
+             691-694): the initial host is [List.hd via] (the first request
+             made), [loc_url] is the destination. Once latched, stays latched. *)
+          let initial_req = List.hd via in
+          if
+            (not !strip_sensitive)
+            && url_host initial_req.Request.url <> url_host loc_url
+            && not
+                 (should_copy_header_on_redirect
+                    ~initial:initial_req.Request.url ~dest:loc_url)
+          then strip_sensitive := true;
           let new_header = Header.create () in
-          copy_headers ~from:initial_header ~into:new_header ~strip_sensitive
-            ~strip_body:(not include_body);
+          copy_headers ~from:initial_header ~into:new_header
+            ~strip_sensitive:!strip_sensitive ~strip_body:(not include_body);
+          (* Referer from the PREVIOUS hop's URL (client.go:698), omitted on
+             https->http. [req] is the request we just made (the last hop). *)
+          (match
+             referer_for_url ~last:req.Request.url ~next:loc_url
+               ~explicit:explicit_referer
+           with
+          | Some ref_ -> Header.set new_header "Referer" ref_
+          | None -> ());
           let new_req =
             {
               Request.meth = redirect_method;
