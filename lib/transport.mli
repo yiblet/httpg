@@ -77,7 +77,7 @@ val round_trip :
     {b HTTP/2:} for an ["https"] request (or when [?force_h2] is set) the dial
     advertises ALPN [["h2"; "http/1.1"]] via {!Net.connect_alpn}; if the peer
     negotiates ["h2"] the request is multiplexed over a pooled
-    {!H2_transport.client_conn} (keyed by authority, parallel to the HTTP/1.x
+    [H2_transport.client_conn] (keyed by authority, parallel to the HTTP/1.x
     idle pool), otherwise the HTTP/1.x path runs over the dialed channels.
     Plaintext ["http"] always uses HTTP/1.x. [?force_h2] (default [false])
     advertises only ["h2"] — an escape hatch for tests.

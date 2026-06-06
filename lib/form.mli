@@ -5,7 +5,7 @@
    stand-in for Go's mime/multipart). *)
 
 (** A handleable form-parsing error.
-    - {!Form} carries Go's error string for a media-type / form / multipart
+    - {!constructor-Form} carries Go's error string for a media-type / form / multipart
       parse failure (e.g. "mime: invalid media parameter", "http: POST too
       large").
     - {!Not_multipart} is Go's [ErrNotMultipart]: [parse_multipart_form] on a
@@ -19,7 +19,7 @@ exception Media_type_error of string
 (** Raised by {!parse_media_type} on an invalid media parameter (Go's
     [mime.ParseMediaType] error). This pure helper keeps Go's error-as-exception
     shape; the result-returning entrypoints
-    {!parse_form}/{!parse_multipart_form} catch it and surface {!Form}. *)
+    {!parse_form}/{!parse_multipart_form} catch it and surface {!constructor-Form}. *)
 
 val default_max_memory : int64
 (** [defaultMaxMemory] = 32 MB. *)

@@ -67,7 +67,7 @@ val new_serve_mux : unit -> serve_mux
 type error = Register of string
 
 val error_to_string : error -> string
-(** Render an {!error} as its Go message text. *)
+(** Render an {!type-error} as its Go message text. *)
 
 val handle : serve_mux -> string -> handler -> (unit, error) result
 (** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
@@ -177,10 +177,10 @@ val listen_and_serve_tls :
     [certificates] and advertising the ALPN protocols [alpn] (default
     {!default_alpn_protocols}), then serve [handler] over each accepted
     connection — dispatching to the HTTP/2 server connection
-    ({!H2_server.serve}) when the negotiated ALPN protocol is ["h2"], and to the
+    ([H2_server.serve]) when the negotiated ALPN protocol is ["h2"], and to the
     existing HTTP/1.x serve loop otherwise (incl. when no ALPN protocol was
     agreed). The same {!handler} serves both protocols (the h2 path adapts it
-    via the {!H2_server} response_writer). *)
+    via the [H2_server] response_writer). *)
 
 val listen_and_serve_tls_started :
   certificates:Tls.Config.certchain ->

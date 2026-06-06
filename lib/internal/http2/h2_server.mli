@@ -28,7 +28,7 @@
 type response_writer = Api.response_writer
 (** Go's [ResponseWriter] / [Handler], defined in {!Api} (Go's api.go) so the
     HTTP/2 stack does not name the public Request/Response types; the public
-    {!Server} shim adapts them to {!Server.response_writer} / a [Request.t]
+    [Server] shim adapts them to [Server.response_writer] / a [Request.t]
     handler. *)
 
 type handler = Api.handler

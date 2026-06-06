@@ -15,7 +15,7 @@
      segments ([s] is the wildcard name, possibly empty for a trailing
      slash). *)
 type segment = {
-  s : string;  (** literal, or wildcard name, or "/" for "/{$}". *)
+  s : string;  (** literal, or wildcard name, or "/" for ["/{$}"]. *)
   wild : bool;
   multi : bool;  (** "..." wildcard *)
 }
@@ -34,7 +34,7 @@ type error =
   | Empty_pattern  (** the empty string *)
   | Invalid_method of string  (** the bad method token *)
   | Missing_path of int  (** host/path missing the leading '/' (offset) *)
-  | Host_has_brace of int  (** host contains '{' (missing initial '/'?) *)
+  | Host_has_brace of int  (** host contains ['{'] (missing initial '/'?) *)
   | Unclean_path of int  (** non-CONNECT pattern with an unclean path *)
   | Bad_wildcard of int * string
       (** malformed wildcard segment (offset, why) *)

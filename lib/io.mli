@@ -23,7 +23,7 @@ exception Protocol_error of string
 
 exception Missing_host
 (** Retained for the {b mid-stream} body thunk; the handleable boundary error is
-    {!error}'s {!Missing_host} arm. *)
+    {!error}'s {!constructor-Missing_host} arm. *)
 
 exception Trailer_too_large
 (** The trailer block following a chunked body exceeded the bounded read budget
@@ -32,10 +32,10 @@ exception Trailer_too_large
     body reaches EOF), so this is the form callers observe — it {b raises} from
     a body pull ({!Body.read_all} / {!Body.drain}) rather than surfacing as a
     boundary [Error] from {!read_request} / {!read_response}. The corresponding
-    boundary arm is {!error}'s {!Trailer_too_large}. *)
+    boundary arm is {!error}'s {!constructor-Trailer_too_large}. *)
 
 (** Handleable error at the request/response read/write boundary. Lower-level
-    framing failures are embedded via the {!Transfer} arm.
+    framing failures are embedded via the {!constructor-Transfer} arm.
 
     {b Mid-stream policy (Resolution #1):} errors discovered inside a {!Body.t}
     [Stream] thunk {b after} {!read_request}/{!read_response} returned [Ok] keep

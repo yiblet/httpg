@@ -128,7 +128,7 @@ end
    begins serving in one step, so a started [Server] is the only useful shape
    here (noted in the plan; [new_unstarted] omitted). *)
 module Server = struct
-  type server = {
+  type t = {
     url : string;  (** Go's [Server.URL] ("http://127.0.0.1:PORT"). *)
     port : int;  (** the bound ephemeral port. *)
     tls : bool;  (** whether this is a TLS ([StartTLS]) server. *)
@@ -141,7 +141,7 @@ module Server = struct
   let port s = s.port
 
   (* NewServer: bind 127.0.0.1:0, build the URL, serve in the background. *)
-  let new_server (handler : Server.handler) : server Lwt.t =
+  let new_server (handler : Server.handler) : t Lwt.t =
     let open Lwt.Infix in
     Server.listen_and_serve_started ~addr:"127.0.0.1" ~port:0 handler
     >>= fun (srv, port, serve_loop) ->
@@ -162,7 +162,7 @@ module Server = struct
   (* NewTLSServer: like [new_server] but over TLS with the self-signed
      [Net.test_server_certificate] (Go's [testcert.LocalhostCert]); URL is
      "https://...". The matching [client] trusts the cert via [~insecure]. *)
-  let new_tls_server (handler : Server.handler) : server Lwt.t =
+  let new_tls_server (handler : Server.handler) : t Lwt.t =
     let open Lwt.Infix in
     let certificates = Net.test_server_certificate () in
     Server.listen_and_serve_tls_started ~certificates ~addr:"127.0.0.1" ~port:0
@@ -185,8 +185,8 @@ module Server = struct
      gohttp analogue for a TLS server is a client that trusts it via
      [~insecure:true] (Net.test_server_certificate's matching insecure
      opt-out). An HTTP server gets a plain default-shaped client. *)
-  let client (s : server) : Client.t =
+  let client (s : t) : Client.t =
     if s.tls then Client.create ~insecure:true () else Client.create ()
 
-  let close (s : server) : unit Lwt.t = s.close ()
+  let close (s : t) : unit Lwt.t = s.close ()
 end

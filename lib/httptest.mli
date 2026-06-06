@@ -28,7 +28,7 @@ module Response_recorder : sig
       header/body. *)
 
   val to_response_writer : t -> Server.response_writer
-  (** Adapt the recorder to a {!Server.response_writer} so a handler can run
+  (** Adapt the recorder to a {!Gohttp.Server.response_writer} so a handler can run
       against it unchanged. *)
 
   val result : t -> Body.t Response.t
@@ -52,10 +52,10 @@ end
 (** Go's [httptest.Server]: a loopback test server bound to an ephemeral
     [127.0.0.1] port. Only the started, loopback-network path is supported (the
     in-memory "fakenet" network and the [NewUnstartedServer]+[Start] split are
-    omitted, since {!Server.listen_and_serve_started} binds and serves in one
+    omitted, since {!Gohttp.Server.listen_and_serve_started} binds and serves in one
     step). *)
 module Server : sig
-  type server = {
+  type t = {
     url : string;
     port : int;
     tls : bool;
@@ -68,32 +68,32 @@ module Server : sig
         ["https://..."] for a TLS server), with no trailing slash.
       - [port] is the bound ephemeral port.
       - [tls] is whether this is a TLS server.
-      - [srv] is the underlying running {!Server.t} (Go's [Config]).
+      - [srv] is the underlying running {!Gohttp.Server.t} (Go's [Config]).
       - [serve] is the background serve-loop promise (Go's [goServe]).
       - [close] stops the server / closes the listener (Go's [Server.Close]). *)
 
-  val url : server -> string
+  val url : t -> string
   (** [url s] is [s.url]. *)
 
-  val port : server -> int
+  val port : t -> int
   (** [port s] is [s.port]. *)
 
-  val new_server : Server.handler -> server Lwt.t
+  val new_server : Server.handler -> t Lwt.t
   (** Go's [NewServer]: bind [127.0.0.1:0], build [url], and serve [handler] in
-      the background (does not block). The caller must {!close} it when done. *)
+      the background (does not block). The caller must {!val-close} it when done. *)
 
-  val new_tls_server : Server.handler -> server Lwt.t
+  val new_tls_server : Server.handler -> t Lwt.t
   (** Go's [NewTLSServer]: like {!new_server} but over TLS using the self-signed
       {!Net.test_server_certificate} (Go's [testcert.LocalhostCert]); [url] is
       ["https://..."]. The matching {!client} trusts the cert via [~insecure].
   *)
 
-  val client : server -> Client.t
+  val client : t -> Client.t
   (** Go's [Server.Client]: a {!Client.t} configured to talk to this server. For
       a TLS server it is built with [~insecure:true] (the faithful analogue of
       Go pre-loading the server's self-signed certificate into the client's
       [RootCAs]); for an HTTP server it is a plain default-shaped client. *)
 
-  val close : server -> unit Lwt.t
+  val close : t -> unit Lwt.t
   (** Go's [Server.Close]: stop accepting and close the listening socket. *)
 end

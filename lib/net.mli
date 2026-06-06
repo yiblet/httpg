@@ -125,7 +125,7 @@ val sockaddr_to_string : Unix.sockaddr -> string
 
 val with_timeout : float -> 'a Lwt.t -> 'a Lwt.t
 (** [with_timeout secs t] is [t] but fails with [Lwt_unix.Timeout] if it has not
-    completed within [secs] seconds (wraps {!Lwt_unix.with_timeout}). *)
+    completed within [secs] seconds (wraps [Lwt_unix.with_timeout]). *)
 
 val null_authenticator : X509.Authenticator.t
 (** A null [X509] authenticator that accepts any peer certificate without

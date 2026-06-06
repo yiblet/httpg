@@ -43,7 +43,7 @@ val round_trip : client_conn -> Api.client_request -> Api.client_response Lwt.t
     pseudo-headers ([:method]/[:path]/[:scheme]/[:authority]) and headers via
     HPACK, writes the HEADERS frame (and DATA frames for the request body,
     respecting flow control, with END_STREAM on the last), then awaits the
-    response HEADERS and returns a {!Response.t} whose body is a {!Body.Stream}
+    response HEADERS and returns a [Response.t] whose body is a [Body.Stream]
     fed by DATA frames through a per-stream {!H2_pipe}. Mirrors Go's
     [ClientConn.roundTrip]/[clientStream.writeRequest] +
     [clientConnReadLoop.handleResponse]. *)

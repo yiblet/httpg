@@ -6,51 +6,13 @@
 
 open Lwt.Infix
 
-(* ---- Date header (Go's TimeFormat: "Mon, 02 Jan 2006 15:04:05 GMT") ---- *)
-
-let weekday_names = [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |]
-
-let month_names =
-  [|
-    "Jan";
-    "Feb";
-    "Mar";
-    "Apr";
-    "May";
-    "Jun";
-    "Jul";
-    "Aug";
-    "Sep";
-    "Oct";
-    "Nov";
-    "Dec";
-  |]
-
-let utc_of_unix t =
-  let secs = int_of_float (Float.floor t) in
-  let days = if secs >= 0 then secs / 86400 else (secs - 86399) / 86400 in
-  let rem = secs - (days * 86400) in
-  let h = rem / 3600 in
-  let mi = rem mod 3600 / 60 in
-  let s = rem mod 60 in
-  let weekday = ((((days mod 7) + 4) mod 7) + 7) mod 7 in
-  let z = days + 719468 in
-  let era = (if z >= 0 then z else z - 146096) / 146097 in
-  let doe = z - (era * 146097) in
-  let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365 in
-  let y = yoe + (era * 400) in
-  let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100)) in
-  let mp = ((5 * doy) + 2) / 153 in
-  let d = doy - (((153 * mp) + 2) / 5) + 1 in
-  let m = if mp < 10 then mp + 3 else mp - 9 in
-  let y = if m <= 2 then y + 1 else y in
-  (y, m, d, h, mi, s, weekday)
-
 (* Go's http.TimeFormat applied to the current time. *)
 let http_time_now () =
-  let y, mo, d, h, mi, s, wd = utc_of_unix (Unix.gettimeofday ()) in
-  Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT" weekday_names.(wd) d
-    month_names.(mo - 1)
+  let y, mo, d, h, mi, s, wd = Http_time.utc_of_unix (Unix.gettimeofday ()) in
+  Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT"
+    Http_time.weekday_names.(wd)
+    d
+    Http_time.month_names.(mo - 1)
     y h mi s
 
 (* ---- ResponseWriter / Handler ---- *)

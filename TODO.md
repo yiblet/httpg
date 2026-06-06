@@ -201,6 +201,29 @@ divergence.
   Fix: give `Body.Stream` a closer (the faithful `io.ReadCloser` shape); covers
   the handler-close, client-2 KB-bound, and (with drain-before-flush) the
   `Connection: close` cases.
+- Missing **pre-response body drain** (deadlock, Go Issue 15527). Go drains the
+  unconsumed request body in *two* places: `finishRequest` (`server.go:1690-1711`,
+  always closes the body) **and** the `WriteHeader` path *before* the response is
+  flushed (`server.go:1404-1463`: when `ContentLength != 0 && !closeAfterReply &&
+  !fullDuplex`, `io.CopyN(io.Discard, reqBody, maxPostHandlerReadBytes+1)`). The
+  port only does the former — the post-handler `drain_request_body` in the serve
+  loop (`server.ml:967-969`, `:634-640`). The pre-response discard exists to avoid
+  a TCP deadlock: a client that writes its whole request body and *then* reads the
+  response can deadlock against a server that starts writing a (large) response
+  while the request body is still unconsumed and both send buffers fill. Lwt's
+  channel buffering shifts the exact window vs Go's blocking sockets, but the
+  deadlock is still reachable for a handler that emits a large response without
+  reading a large request body. There is also no `fullDuplex` opt-out
+  (`ResponseController.EnableFullDuplex`) to *disable* the pre-drain when a handler
+  intentionally streams both directions.
+  Fix: before flushing response headers in `serve_one` (`server.ml`), if
+  `content_length <> 0 && keep_alive && not full_duplex`, run a bounded
+  `Body.drain ~limit:max_post_handler_read_bytes` on the request body (set
+  `close_after_reply` on too-big / read-error, as Go's `requestTooLarge` /
+  `closeAfterReply` do); add a per-request `full_duplex` flag to opt out. Couples
+  with the `Body` closer item above (drain-before-flush is what also unblocks the
+  `Connection: close` injection on the too-big path). Ref: `server.go:1404-1463`,
+  `:1690-1711`; Go Issue 15527.
 - `Request.Clone` (`clone.go`); `Header.clone` already exists.
 - Multipart: enforce `max_memory` (temp-file spill) + a streaming `MultipartReader`; currently the `multipart_form-lwt` stand-in.
 - `mime.TypeByExtension` database (today a small built-in table + `Sniff` fallback).

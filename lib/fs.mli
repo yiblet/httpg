@@ -67,7 +67,7 @@ val dir : string -> file_system
     given directory. The open path is cleaned and
     {b rejected if it escapes the root} (contains a [".."] element, mirroring
     Go's [path.Clean("/"+name)] + [containsDotDot] guard). OS errors map to
-    {!Not_found} (missing) or a permission error. An empty root is treated as
+    {!Not_exist} (missing) or a permission error. An empty root is treated as
     ["."]. *)
 
 val contains_dot_dot : string -> bool

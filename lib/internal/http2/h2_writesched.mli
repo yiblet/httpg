@@ -17,7 +17,7 @@ type stream = { id : int; flow : H2_flow.outflow; mutable max_frame_size : int }
     caller (the server connection) and shared by reference. *)
 
 val make_stream : ?max_frame_size:int -> int -> stream
-(** [make_stream ?max_frame_size id] creates a {!stream} with a fresh
+(** [make_stream ?max_frame_size id] creates a {!type-stream} with a fresh
     zero-valued outflow and the given (default {!H2.initial_max_frame_size}) max
     frame size. *)
 
