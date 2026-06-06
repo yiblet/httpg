@@ -1061,6 +1061,96 @@ let huffman_string_cap () =
         (Gohttp_http2.Hpack.error_to_string e)
   | Ok () -> Alcotest.fail "expected String_too_long, got Ok"
 
+(* Ticket 10 (Case 12): HTTP/2 duplicate-SETTINGS rejection. A SETTINGS frame
+   whose entries repeat a setting ID is a connection PROTOCOL_ERROR (GOAWAY),
+   mirroring Go's f.HasDuplicates() guard in processSettings
+   (server.go:1616-1620; HasDuplicates frame.go:832). *)
+
+(* TestH2RejectsDuplicateSettings: a single SETTINGS frame carrying two entries
+   for the same ID trips a PROTOCOL_ERROR GOAWAY. *)
+let rejects_duplicate_settings () =
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    rw.Api.rw_flush ()
+  in
+  let code =
+    Lwt_main.run
+      (Net.with_timeout 10.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server = S.serve s_ic s_oc ~handler in
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          (* One SETTINGS frame, two entries for the SAME id (duplicate). *)
+          F.write_settings c_oc
+            [
+              { H2.id = H2.Initial_window_size; value = 65535l };
+              { H2.id = H2.Initial_window_size; value = 1024l };
+            ]
+          >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          read_until_goaway c_ic >>= fun code ->
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () -> Lwt.return code))
+  in
+  Alcotest.(check bool)
+    "GOAWAY error code is PROTOCOL_ERROR" true
+    (code = H2_error.ProtocolError)
+
+(* TestH2AcceptsDistinctSettings: a single SETTINGS frame whose entries all have
+   distinct IDs is accepted; a following GET is served normally (status 200, no
+   GOAWAY). This is the negative control for [rejects_duplicate_settings] — the
+   duplicate must be within one frame, not across the handshake. *)
+let accepts_distinct_settings () =
+  let handler (rw : S.response_writer) (_req : Api.server_request) =
+    rw.Api.rw_write "ok" >>= fun () -> rw.Api.rw_flush ()
+  in
+  let status =
+    Lwt_main.run
+      (Net.with_timeout 10.
+         (let s_ic, s_oc, c_ic, c_oc = h2_duplex () in
+          let server = S.serve s_ic s_oc ~handler in
+          Lwt_io.write c_oc H2.client_preface >>= fun () ->
+          (* A SETTINGS frame with several DISTINCT setting IDs. *)
+          F.write_settings c_oc
+            [
+              { H2.id = H2.Initial_window_size; value = 65535l };
+              { H2.id = H2.Max_concurrent_streams; value = 100l };
+              { H2.id = H2.Header_table_size; value = 4096l };
+            ]
+          >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          h2_open c_oc ~stream_id:1 >>= fun () ->
+          Lwt_io.flush c_oc >>= fun () ->
+          (* Read the server's first HEADERS frame and pull out :status. *)
+          let dec =
+            Hpack.new_decoder H2.initial_header_table_size (fun _ -> ())
+          in
+          let rec read_status () =
+            F.read_frame c_ic >>= function
+            | Ok (F.Headers (_, hf)) ->
+                let fields = ref [] in
+                Hpack.set_emit_func dec (fun (h : Hpack.header_field) ->
+                    fields := (h.name, h.value) :: !fields);
+                ignore (Hpack.write dec hf.header_frag);
+                Hpack.close dec;
+                Lwt.return (List.assoc_opt ":status" !fields)
+            | Ok (F.GoAway (_, gf)) ->
+                Alcotest.failf "unexpected GOAWAY %s"
+                  (H2_error.err_code_string gf.error_code)
+            | Ok _ -> read_status ()
+            | Error e -> raise (H2_error.to_exception e)
+          in
+          read_status () >>= fun status ->
+          Lwt_io.close c_oc >>= fun () ->
+          Lwt.catch
+            (fun () -> Lwt.pick [ server; Lwt_unix.sleep 1.0 ])
+            (fun _ -> Lwt.return_unit)
+          >>= fun () -> Lwt.return status))
+  in
+  Alcotest.(check (option string))
+    "distinct SETTINGS accepted; GET served 200" (Some "200") status
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Quick
@@ -1101,4 +1191,8 @@ let tests =
     Alcotest.test_case "rejects_header_list_bomb" `Quick
       rejects_header_list_bomb;
     Alcotest.test_case "huffman_string_cap" `Quick huffman_string_cap;
+    Alcotest.test_case "rejects_duplicate_settings" `Quick
+      rejects_duplicate_settings;
+    Alcotest.test_case "accepts_distinct_settings" `Quick
+      accepts_distinct_settings;
   ]

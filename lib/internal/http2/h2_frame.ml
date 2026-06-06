@@ -42,6 +42,16 @@ type priority_frame = { priority : priority_param }
 type rst_stream_frame = { error_code : H2_error.err_code }
 type settings_frame = { settings : H2.setting list; ack : bool }
 
+(* Mirrors SettingsFrame.HasDuplicates (frame.go:832-850): reports whether
+   the frame contains any repeated setting ID. *)
+let settings_has_duplicates (f : settings_frame) : bool =
+  let rec loop = function
+    | [] -> false
+    | (s : H2.setting) :: rest ->
+        List.exists (fun (s' : H2.setting) -> s'.id = s.id) rest || loop rest
+  in
+  loop f.settings
+
 type push_promise_frame = {
   promise_id : int;
   header_frag : string;

@@ -668,7 +668,7 @@ Test Successful in 2.249s. 527 tests run.
 ---
 
 ### Ticket 10 — HTTP/2 duplicate-SETTINGS rejection (Case 12)
-Status: Planned
+Status: Done
 
 **A) Scope**
 Reject a SETTINGS frame containing duplicate setting IDs with `PROTOCOL_ERROR`, matching Go's `f.HasDuplicates()` check (the `>100` count check is already present). Low severity (frame already bounded), fidelity item.
@@ -690,7 +690,28 @@ A SETTINGS frame with repeated IDs is a connection `PROTOCOL_ERROR`; valid frame
 `dune build` clean; `dune test` green; `dune fmt`.
 
 **G) Execution Record**
-_(to be filled)_
+
+**What changed**
+- `lib/internal/http2/h2_frame.ml`: new `settings_has_duplicates : settings_frame -> bool`, placed right after the `settings_frame` type. Mirrors Go's `SettingsFrame.HasDuplicates` (frame.go:832-850): scans the `settings` list for any repeated `s.id` (an O(n²) `List.exists` over the tail of each element — Go's small-frame n² path, fine here since the count is already capped at 100).
+- `lib/internal/http2/h2_frame.mli`: added the `settings_has_duplicates` signature with a doc comment citing Go.
+- `lib/internal/http2/h2_server.ml` `process_settings` (the non-ack branch, was the `> 100` guard): changed to `if List.length sf.settings > 100 || H2_frame.settings_has_duplicates sf then Error H2_error.ProtocolError`, with a comment citing server.go:1616-1620. This rides the existing `outcome_of_result`→`Conn_error`→`go_away` path unchanged, exactly like the sibling count check.
+- `test/test_abuse.ml`: added `rejects_duplicate_settings` and `accepts_distinct_settings`, both using the existing in-memory `h2_duplex`/raw-framer harness, bounded by `Net.with_timeout`. Wired both into the `Abuse` `tests` list.
+
+**Precedent followed**
+- The `> 100` count check in `process_settings` (`h2_server.ml`, the sibling guard in the same non-ack branch). It already returns `Error H2_error.ProtocolError`; the duplicate check was added on the same `||` expression, in the same form, citing the same Go lines. **Verified against Go** (`go/src/net/http/internal/http2/server.go:1616-1620`): the guard is literally `if f.NumSettings() > 100 || f.HasDuplicates()`, so combining both into one `if ... then Error ProtocolError` is faithful. The `HasDuplicates` helper mirrors `frame.go:832-850` (n² scan over setting IDs). No precedent divergence found; no correction needed. `H2_error.ProtocolError` already maps to the GOAWAY `PROTOCOL_ERROR` wire code via the existing serve-loop conversion.
+
+**Test note:** the harness's normal handshake sends an *empty* SETTINGS frame, and the server's own initial SETTINGS uses distinct IDs — neither trips the new check. The duplicate-rejection test deliberately puts both repeated entries in a *single* frame (two `Initial_window_size` entries); the accepts-distinct test sends three distinct IDs in one frame and then completes a GET (status 200, no GOAWAY) as the negative control.
+
+**Alcotest tail**
+```
+  [OK]          Abuse                  23   rejects_duplicate_settings.
+  [OK]          Abuse                  24   accepts_distinct_settings.
+
+Test Successful in 2.296s. 529 tests run.
+```
+`dune build` clean (warnings-as-errors), `dune fmt` applied, full `dune test --force` green (529 tests: 527 prior + 2 new).
+
+**Commit:** `olxqvkmy` (`feat(h2): reject duplicate-SETTINGS frames with PROTOCOL_ERROR`).
 
 ---
 

@@ -944,7 +944,11 @@ let process_settings sc (sf : H2_frame.settings_frame) :
     sc.unacked_settings <- sc.unacked_settings - 1;
     if sc.unacked_settings < 0 then Error H2_error.ProtocolError else Ok ()
   end
-  else if List.length sf.settings > 100 then Error H2_error.ProtocolError
+  else if List.length sf.settings > 100 || H2_frame.settings_has_duplicates sf
+  then
+    (* server.go:1616-1620: hang up on suspiciously large settings frames or
+       those with duplicate entries (f.NumSettings() > 100 || f.HasDuplicates). *)
+    Error H2_error.ProtocolError
   else begin
     let err = ref None in
     List.iter

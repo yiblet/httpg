@@ -43,6 +43,10 @@ type settings_frame = { settings : H2.setting list; ack : bool }
 (** Mirrors Go's [SettingsFrame]. [ack] is true for an empty SETTINGS ACK; then
     [settings] is empty. *)
 
+val settings_has_duplicates : settings_frame -> bool
+(** [settings_has_duplicates f] reports whether [f] contains any repeated
+    setting ID. Mirrors Go's [SettingsFrame.HasDuplicates] (frame.go:832). *)
+
 type push_promise_frame = {
   promise_id : int;
   header_frag : string;
