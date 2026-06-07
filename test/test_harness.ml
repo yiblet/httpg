@@ -30,6 +30,13 @@ let with_fs ?(secs = 10.) fn =
   Eio.Time.with_timeout_exn clock secs @@ fun () ->
   Eio.Switch.run @@ fun sw -> fn ~net ~clock ~sw ~fs
 
+(* Tests tagged [`Slow] (high iteration counts / real-clock timeout waits) are
+   skipped by default so [dune test] stays fast; set HTTPG_SLOW=1 to run them.
+   Wired into Alcotest's [quick_only] in test_httpg.ml — alcotest's own default
+   runs slow tests, and its CLI [-q] can only force quick-only on, so this env
+   gate is what lets the default stay fast while still allowing opt-in. *)
+let run_slow = Sys.getenv_opt "HTTPG_SLOW" <> None
+
 (* An in-memory Buf_read over a string (the strings.NewReader analogue). *)
 let buf_read_of_string = Eio.Buf_read.of_string
 

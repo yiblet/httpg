@@ -533,9 +533,10 @@ let tests =
       test_graceful_drains_inflight;
     Alcotest.test_case "graceful_refuses_new_stream" `Quick
       test_graceful_refuses_new_stream;
-    Alcotest.test_case "read_timeout_closes_idle_peer" `Quick
+    (* Real-clock timeout waits: slow, gated by HTTPG_SLOW. *)
+    Alcotest.test_case "read_timeout_closes_idle_peer" `Slow
       test_read_timeout_closes_idle_peer;
-    Alcotest.test_case "idle_timeout_goaway" `Quick test_idle_timeout_goaway;
+    Alcotest.test_case "idle_timeout_goaway" `Slow test_idle_timeout_goaway;
     Alcotest.test_case "forced_close_still_works" `Quick
       test_forced_close_still_works;
   ]

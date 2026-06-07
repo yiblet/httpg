@@ -15,14 +15,15 @@
 
 ```sh
 dune build                                   # build (warnings are errors)
-dune test                                    # run the full alcotest suite (alias: dune runtest)
+dune test                                    # run the suite, fast (skips `Slow tests; alias: dune runtest)
+HTTPG_SLOW=1 dune test                       # include the slow stress/timeout tests too
 dune exec test/test_httpg.exe -- test Header # run ONE suite (suite names below)
 dune exec test/test_httpg.exe -- test Header 3 # run one case within a suite
 dune exec httpg                             # run the demo (h1 + streaming + h2-over-TLS round trips)
 opam install . --deps-only --with-test       # install deps into the switch
 ```
 
-Tests are a single alcotest runner (`test/test_httpg.ml`) that aggregates one suite per module (`Header`, `Cookie`, `Transfer`, `Hpack`, `H2Frame`, `Fs`, `Httptest`, …). Eio-based tests run under `Eio_main.run` and are bounded by `Net.with_timeout` (an `Eio.Time` deadline) so a hang fails instead of blocking.
+Tests are a single alcotest runner (`test/test_httpg.ml`) that aggregates one suite per module (`Header`, `Cookie`, `Transfer`, `Hpack`, `H2Frame`, `Fs`, `Httptest`, …). Eio-based tests run under `Eio_main.run` and are bounded by `Net.with_timeout` (an `Eio.Time` deadline) so a hang fails instead of blocking. A handful of slow stress/timeout tests are tagged `` `Slow `` (alcotest speed level) and skipped by default; `Test_harness.run_slow` (set by `HTTPG_SLOW=1`) feeds alcotest's `~quick_only` to include them. Tag new high-iteration or real-clock-wait tests `` `Slow `` rather than letting them bloat the default run.
 
 ## Architecture
 

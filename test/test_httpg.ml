@@ -8,7 +8,8 @@ let () =
       [ ("Multicore", Test_multicore.tests) ]
     else []
   in
-  Alcotest.run "httpg"
+  (* [`Slow]-tagged tests are skipped unless HTTPG_SLOW=1 (see Test_harness). *)
+  Alcotest.run ~quick_only:(not Test_harness.run_slow) "httpg"
     ([
        ("Header", Test_header.tests);
        ("Cookie", Test_cookie.tests);

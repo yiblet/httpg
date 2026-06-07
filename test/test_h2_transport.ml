@@ -331,9 +331,10 @@ let tests =
       test_closed_conn_raises_unusable;
     Alcotest.test_case "post_echo" `Quick test_post_echo;
     Alcotest.test_case "concurrent" `Quick test_concurrent;
-    Alcotest.test_case "many_concurrent_respects_max" `Quick
+    (* Stress/leak tests with high iteration counts: slow, gated by HTTPG_SLOW. *)
+    Alcotest.test_case "many_concurrent_respects_max" `Slow
       test_many_concurrent_respects_max;
-    Alcotest.test_case "early_return_undrained_no_leak" `Quick
+    Alcotest.test_case "early_return_undrained_no_leak" `Slow
       test_early_return_undrained_no_leak;
     Alcotest.test_case "cancel_aborts_stream" `Quick test_cancel_aborts_stream;
     Alcotest.test_case "slot_accounting_free_after_body" `Quick
