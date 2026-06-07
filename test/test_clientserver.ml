@@ -35,7 +35,7 @@ let get_roundtrip () =
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = Client.get ~sw (Client.create ~net ~clock ()) url in
-    ( Httpg_base.Status.to_int resp.Response.status_code,
+    ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
   in
   let status, body = with_server hello_handler client in
@@ -52,7 +52,7 @@ let post_body () =
         (Client.create ~net ~clock ())
         url ~content_type:"text/plain" (Body.of_string payload)
     in
-    ( Httpg_base.Status.to_int resp.Response.status_code,
+    ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
   in
   let status, body = with_server echo_handler client in
@@ -106,7 +106,7 @@ let tls_handshake_failure_is_typed () =
           (* Opt-out: ~insecure still completes the handshake and round trips. *)
           let insecure = Client.create ~net ~clock ~insecure:true () in
           let resp = Client.get ~sw insecure url in
-          ( Httpg_base.Status.to_int resp.Response.status_code,
+          ( Httpg_base.Status.to_int resp.Response.status,
             Body.read_all resp.Response.body )))
   |> fun (code, body) ->
   Alcotest.(check int) "insecure status" 200 code;

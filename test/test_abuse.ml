@@ -428,7 +428,7 @@ let response_header_under_limit_ok () =
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = Client.get ~sw c url in
-    ( Httpg_base.Status.to_int resp.Response.status_code,
+    ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
   in
   let code, b = with_raw_server ~secs:5. ~serve client in
@@ -440,16 +440,15 @@ let response_header_under_limit_ok () =
 
 let stub_response req ?location () : Body.t Response.t =
   let header = Header.create () in
-  let status_code, status =
+  let status =
     match location with
     | Some loc ->
         Header.set header "Location" loc;
-        (Httpg_base.Status.Found, "302 Found")
-    | None -> (Httpg_base.Status.Ok, "200 OK")
+        Httpg_base.Status.Found
+    | None -> Httpg_base.Status.Ok
   in
   {
     Response.status;
-    status_code;
     proto = Httpg_base.Protocol.Http11;
     header;
     body = Body.Empty;

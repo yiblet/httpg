@@ -12,8 +12,8 @@ let i64 = Int64.to_string
 let http10_close () =
   let raw = "HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nBody here\n" in
   let r = read raw in
-  Alcotest.(check string) "status" "200 OK" r.status;
-  Alcotest.(check int) "code" 200 (Httpg_base.Status.to_int r.status_code);
+  Alcotest.(check string) "reason" "OK" (Httpg_base.Status.to_string r.status);
+  Alcotest.(check int) "code" 200 (Httpg_base.Status.to_int r.status);
   Alcotest.(check string)
     "proto" "HTTP/1.0"
     (Httpg_base.Protocol.to_string r.proto);
@@ -33,7 +33,7 @@ let http11_no_length () =
 let no_content () =
   let raw = "HTTP/1.1 204 No Content\r\n\r\nBody should not be read!\n" in
   let r = read raw in
-  Alcotest.(check int) "code" 204 (Httpg_base.Status.to_int r.status_code);
+  Alcotest.(check int) "code" 204 (Httpg_base.Status.to_int r.status);
   Alcotest.(check bool) "close" false r.close;
   Alcotest.(check string) "content_length" "0" (i64 r.content_length);
   Alcotest.(check string) "body" "" (body_of r)

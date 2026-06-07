@@ -383,11 +383,7 @@ let client_request_of_request (req : Body.t Request.t) : Api.client_request =
 
 let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
   {
-    Response.status =
-      string_of_int (Httpg_base.Status.to_int cr.cres_status_code)
-      ^ " "
-      ^ Httpg_base.Status.to_string cr.cres_status_code;
-    status_code = cr.cres_status_code;
+    Response.status = cr.cres_status_code;
     proto = Httpg_base.Protocol.Http20;
     header = cr.cres_header;
     body = body_of_api_body cr.cres_body;

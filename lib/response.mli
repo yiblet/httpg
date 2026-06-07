@@ -3,8 +3,9 @@
    is intentionally omitted (deferred). *)
 
 type 'body t = {
-  mutable status : string;  (** e.g. "200 OK" *)
-  mutable status_code : Httpg_base.Status.t;  (** e.g. 200 *)
+  mutable status : Httpg_base.Status.t;
+      (** Go [Status]/[StatusCode], collapsed; the wire reason phrase is the
+          canonical {!Httpg_base.Status.to_string} *)
   mutable proto : Httpg_base.Protocol.t;
       (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;

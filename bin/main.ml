@@ -58,8 +58,8 @@ let demo_stream ~net ~clock ~sw =
   Printf.printf "Streaming GET %s\n" url;
   let resp = Client.get ~sw client url in
   Printf.printf "-> %d %s (consuming body incrementally)\n"
-    (Httpg_base.Status.to_int resp.Response.status_code)
-    (Httpg_base.Status.to_string resp.Response.status_code);
+    (Httpg_base.Status.to_int resp.Response.status)
+    (Httpg_base.Status.to_string resp.Response.status);
   (* Pull the streaming body one chunk at a time; we never call [read_all]. *)
   match resp.Response.body with
   | Body.Stream next ->
@@ -81,8 +81,8 @@ let demo_http ~net ~clock ~sw =
   let resp = Client.get ~sw client url in
   let body = Body.read_all resp.Response.body in
   Printf.printf "GET %s\n-> %d %s\n%s" url
-    (Httpg_base.Status.to_int resp.Response.status_code)
-    (Httpg_base.Status.to_string resp.Response.status_code)
+    (Httpg_base.Status.to_int resp.Response.status)
+    (Httpg_base.Status.to_string resp.Response.status)
     body
 
 (* TLS + ALPN round trip: the server advertises ["h2"; "http/1.1"] and the
@@ -95,8 +95,8 @@ let demo_h2 ~net ~clock ~sw =
   let body = Body.read_all resp.Response.body in
   Printf.printf "GET %s (h2 round trips: %d)\n-> %d %s\n%s" url
     (Transport.h2_round_trip_count transport)
-    (Httpg_base.Status.to_int resp.Response.status_code)
-    (Httpg_base.Status.to_string resp.Response.status_code)
+    (Httpg_base.Status.to_int resp.Response.status)
+    (Httpg_base.Status.to_string resp.Response.status)
     body
 
 let () =

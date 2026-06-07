@@ -501,8 +501,7 @@ let read_response_raising ?(request : Body.t Request.t option)
           let res = read_transfer_or_raise msg r in
           let resp =
             {
-              Response.status;
-              status_code;
+              Response.status = status_code;
               proto = proto_t;
               header;
               body = Body.Empty;
@@ -627,28 +626,18 @@ let write_request w r : (unit, error) result =
 
 let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
   let out = Eio.Buf_write.string w in
-  let itoa = string_of_int (Httpg_base.Status.to_int r.Response.status_code) in
+  let itoa = string_of_int (Httpg_base.Status.to_int r.Response.status) in
+  (* Canonical reason phrase (Go preserves the raw wire text; this port uses the
+     canonical text — see Response.status). *)
   let text =
-    if r.Response.status <> "" then begin
-      (* Strip a leading "<code> " prefix to reduce stutter. *)
-      let prefix = itoa ^ " " in
-      if
-        String.length r.Response.status >= String.length prefix
-        && String.sub r.Response.status 0 (String.length prefix) = prefix
-      then
-        String.sub r.Response.status (String.length prefix)
-          (String.length r.Response.status - String.length prefix)
-      else r.Response.status
-    end
-    else
-      let st = Httpg_base.Status.to_string r.Response.status_code in
-      if st <> "" then st else "status code " ^ itoa
+    let st = Httpg_base.Status.to_string r.Response.status in
+    if st <> "" then st else "status code " ^ itoa
   in
   out
     (Printf.sprintf "HTTP/%d.%d %03d %s\r\n"
        (Httpg_base.Protocol.major r.Response.proto)
        (Httpg_base.Protocol.minor r.Response.proto)
-       (Httpg_base.Status.to_int r.Response.status_code)
+       (Httpg_base.Status.to_int r.Response.status)
        text);
   (* Clone fields we may modify (r1). *)
   let content_length = ref r.Response.content_length in
@@ -695,7 +684,7 @@ let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
     && (not (Transfer.chunked r.Response.transfer_encoding))
     && (not content_length_already_sent)
     && Transfer.body_allowed_for_status
-         (Httpg_base.Status.to_int r.Response.status_code)
+         (Httpg_base.Status.to_int r.Response.status)
   then out "Content-Length: 0\r\n";
   out "\r\n";
   Transfer.write_body w tw

@@ -78,7 +78,7 @@ let keep_alive_two_responses () =
   let r2 = read_response_ok r in
   Alcotest.(check int)
     "resp2 code" 200
-    (Httpg_base.Status.to_int r2.Httpg.Response.status_code);
+    (Httpg_base.Status.to_int r2.Httpg.Response.status);
   Alcotest.(check string)
     "resp2 body" "world"
     (Httpg.Body.read_all r2.Httpg.Response.body)
@@ -96,7 +96,7 @@ let keep_alive_chunked_then_next () =
   let r2 = read_response_ok r in
   Alcotest.(check int)
     "resp2 code" 204
-    (Httpg_base.Status.to_int r2.Httpg.Response.status_code)
+    (Httpg_base.Status.to_int r2.Httpg.Response.status)
 
 let tests =
   [

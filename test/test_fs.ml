@@ -43,7 +43,7 @@ let serve_known_file () =
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = Client.get ~sw c (url ^ "/hello.txt") in
                 let body = Body.read_all resp.Response.body in
-                ( Httpg_base.Status.to_int resp.Response.status_code,
+                ( Httpg_base.Status.to_int resp.Response.status,
                   body,
                   Header.get resp.Response.header "Content-Type",
                   Header.get resp.Response.header "Last-Modified",
@@ -65,7 +65,7 @@ let dir_listing () =
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = Client.get ~sw c (url ^ "/") in
                 let body = Body.read_all resp.Response.body in
-                ( Httpg_base.Status.to_int resp.Response.status_code,
+                ( Httpg_base.Status.to_int resp.Response.status,
                   body,
                   Header.get resp.Response.header "Content-Type" ))))
   in
@@ -90,7 +90,7 @@ let traversal_blocked () =
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = Client.get ~sw c (url ^ "/../../../../etc/passwd") in
                 ignore (Body.drain resp.Response.body);
-                Httpg_base.Status.to_int resp.Response.status_code)))
+                Httpg_base.Status.to_int resp.Response.status)))
   in
   (* path.Clean("/../../etc/passwd") = "/etc/passwd", absent in the temp root
      → 404 (never escapes). *)
@@ -104,7 +104,7 @@ let missing_file () =
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = Client.get ~sw c (url ^ "/nope.txt") in
                 ignore (Body.drain resp.Response.body);
-                Httpg_base.Status.to_int resp.Response.status_code)))
+                Httpg_base.Status.to_int resp.Response.status)))
   in
   Alcotest.(check int) "missing file 404" 404 status
 
@@ -129,7 +129,7 @@ let dir_redirect () =
                     in
                     let resp = Transport.round_trip tr req in
                     ignore (Body.drain resp.Response.body);
-                    ( Httpg_base.Status.to_int resp.Response.status_code,
+                    ( Httpg_base.Status.to_int resp.Response.status,
                       Header.get resp.Response.header "Location" )))
               ~finally:(fun () -> Ts.close s)))
   in

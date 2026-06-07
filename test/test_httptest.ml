@@ -23,8 +23,10 @@ let recorder_basic () =
   let res = R.result rec_ in
   Alcotest.(check int)
     "result.status_code" 201
-    (Httpg_base.Status.to_int res.status_code);
-  Alcotest.(check string) "result.status" "201 Created" res.status;
+    (Httpg_base.Status.to_int res.status);
+  Alcotest.(check string)
+    "result.reason" "Created"
+    (Httpg_base.Status.to_string res.status);
   Alcotest.(check string)
     "result header X-Custom" "yes"
     (Header.get res.header "X-Custom");
@@ -37,7 +39,7 @@ let default_200 () =
   Alcotest.(check string) "body" "" (R.body_string rec_);
   Alcotest.(check int)
     "result status_code" 200
-    (Httpg_base.Status.to_int (R.result rec_).status_code)
+    (Httpg_base.Status.to_int (R.result rec_).status)
 
 (* "first code only" — first WriteHeader wins. *)
 let first_code_only () =

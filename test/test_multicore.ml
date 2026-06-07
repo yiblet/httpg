@@ -51,7 +51,7 @@ let hammer ~net ~clock ~sw ~url n =
     (List.init n (fun _ () ->
          let resp = Client.get ~sw client url in
          ignore (Body.read_all resp.Response.body);
-         if Httpg_base.Status.to_int resp.Response.status_code = 200 then
+         if Httpg_base.Status.to_int resp.Response.status = 200 then
            Atomic.incr ok));
   Atomic.get ok
 
@@ -172,7 +172,7 @@ let multicore_tls () =
              let client = Client.create ~net ~clock ~transport () in
              let resp = Client.get ~sw client url in
              let body = Body.read_all resp.Response.body in
-             if Httpg_base.Status.to_int resp.Response.status_code = 200 then
+             if Httpg_base.Status.to_int resp.Response.status = 200 then
                Atomic.incr ok;
              if body = "tls-ok" then Atomic.incr bodies));
       Server.close srv;
@@ -264,8 +264,7 @@ let multicore_client () =
                    | resp ->
                        let body = Body.read_all resp.Response.body in
                        if
-                         Httpg_base.Status.to_int resp.Response.status_code
-                         = 200
+                         Httpg_base.Status.to_int resp.Response.status = 200
                          && body = expect
                        then Atomic.incr ok
                    | exception e ->
@@ -324,7 +323,7 @@ let multicore_client_parallel_tls () =
           let c = Client.create ~net ~clock ~transport:tr () in
           let resp = Client.get ~sw:rsw c url in
           ignore (Body.read_all resp.Response.body);
-          Httpg_base.Status.to_int resp.Response.status_code = 200
+          Httpg_base.Status.to_int resp.Response.status = 200
         in
         let n = min cores 6 in
         let per = 8 in

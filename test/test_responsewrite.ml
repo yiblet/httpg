@@ -32,13 +32,12 @@ let header pairs =
   List.iter (fun (k, v) -> Httpg.Header.add h k v) pairs;
   h
 
-let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
+let resp ~status_code ?(proto_major = 1) ?(proto_minor = 1)
     ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?request
     () : Httpg.Body.t Httpg.Response.t =
   {
-    Httpg.Response.status;
-    status_code =
+    Httpg.Response.status =
       (match Httpg_base.Status.of_int_result status_code with
       | Ok s -> s
       | Error _ -> Httpg_base.Status.Custom status_code);
@@ -189,29 +188,21 @@ let post_negative_content_length () =
   Alcotest.(check string)
     "post -1 CL" "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabcdef" (write r)
 
+(* Canonical-reason deviation from Go: this port collapses Response.Status into
+   Status.t, so the wire reason is always the canonical Status text (a custom
+   code with no dedicated variant renders as "Custom"). The %03d zero-padding
+   and length behaviors these cases exercise are unaffected. *)
 let status_zero_pad () =
-  let r =
-    resp ~status_code:7 ~status:"license to violate specs" ~proto_minor:0
-      ~request:(dummy_req ()) ()
-  in
+  let r = resp ~status_code:7 ~proto_minor:0 ~request:(dummy_req ()) () in
   Alcotest.(check string)
-    "zero pad"
-    "HTTP/1.0 007 license to violate specs\r\nContent-Length: 0\r\n\r\n"
-    (write r)
+    "zero pad" "HTTP/1.0 007 Custom\r\nContent-Length: 0\r\n\r\n" (write r)
 
 let status_1xx_no_length () =
-  let r =
-    resp ~status_code:123 ~status:"123 Sesame Street" ~proto_minor:0
-      ~request:(dummy_req ()) ()
-  in
-  Alcotest.(check string)
-    "1xx no len" "HTTP/1.0 123 Sesame Street\r\n\r\n" (write r)
+  let r = resp ~status_code:123 ~proto_minor:0 ~request:(dummy_req ()) () in
+  Alcotest.(check string) "1xx no len" "HTTP/1.0 123 Custom\r\n\r\n" (write r)
 
 let status_204_no_length () =
-  let r =
-    resp ~status_code:204 ~status:"No Content" ~proto_minor:0
-      ~request:(dummy_req ()) ()
-  in
+  let r = resp ~status_code:204 ~proto_minor:0 ~request:(dummy_req ()) () in
   Alcotest.(check string)
     "204 no len" "HTTP/1.0 204 No Content\r\n\r\n" (write r)
 

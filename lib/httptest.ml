@@ -95,16 +95,11 @@ module Response_recorder = struct
       | Ok s -> s
       | Error _ -> Httpg_base.Status.Custom code_int
     in
-    let status =
-      Printf.sprintf "%03d %s" code_int
-        (Httpg_base.Status.to_string status_code)
-    in
     let content_length =
       parse_content_length (Header.get snap "Content-Length")
     in
     {
-      Response.status;
-      status_code;
+      Response.status = status_code;
       proto = Httpg_base.Protocol.Http11;
       header = snap;
       body = Body.String (Buffer.contents t.body);
