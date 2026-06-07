@@ -118,10 +118,12 @@ let redirect w (r : Body.t Request.t) url code =
   let h = w.header () in
   let had_ct = Header.has h "Content-Type" in
   Header.set h "Location" url;
-  if (not had_ct) && (r.meth = "GET" || r.meth = "HEAD") then
-    Header.set h "Content-Type" "text/html; charset=utf-8";
+  if
+    (not had_ct)
+    && (r.meth = Httpg_base.Method.Get || r.meth = Httpg_base.Method.Head)
+  then Header.set h "Content-Type" "text/html; charset=utf-8";
   w.write_header code;
-  if (not had_ct) && r.meth = "GET" then
+  if (not had_ct) && r.meth = Httpg_base.Method.Get then
     let body =
       "<a href=\"" ^ html_escape url ^ "\">" ^ Httpg_base.Status.to_string code
       ^ "</a>.\n"
@@ -225,7 +227,9 @@ let matching_methods mux host path =
   Routing_tree.matching_methods mux.tree ~host ~path ms;
   if not (String.length path > 0 && path.[String.length path - 1] = '/') then
     Routing_tree.matching_methods mux.tree ~host ~path:(path ^ "/") ms;
-  let keys = Hashtbl.fold (fun k _ acc -> k :: acc) ms [] in
+  let keys =
+    Hashtbl.fold (fun k _ acc -> Httpg_base.Method.to_string k :: acc) ms []
+  in
   List.sort String.compare keys
 
 (* Go's matchOrRedirect: match in the tree, with trailing-slash redirection. *)
@@ -272,7 +276,7 @@ let find_handler mux (r : Body.t Request.t) =
   let raw_query =
     match Uri.verbatim_query r.url with Some q -> q | None -> ""
   in
-  if r.meth = "CONNECT" then begin
+  if r.meth = Httpg_base.Method.Connect then begin
     let host = match Uri.host r.url with Some h -> h | None -> "" in
     let _, redir =
       match_or_redirect mux ~host ~method_:r.meth ~path:escaped_path
@@ -352,7 +356,7 @@ let serve_one w (r : Body.t Request.t) (h : handler) : bool =
   let chunking = ref false in
   let handler_done = ref false in
   let body_buf = Buffer.create 256 in
-  let is_head = r.meth = "HEAD" in
+  let is_head = r.meth = Httpg_base.Method.Head in
   let req_should_close = r.close in
   let close_after_reply = ref req_should_close in
   let proto = if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0" in

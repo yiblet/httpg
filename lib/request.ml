@@ -37,7 +37,7 @@ let remove_multipart_files (file : (string, file_header list) Hashtbl.t) : unit
     file
 
 type 'body t = {
-  mutable meth : string;
+  mutable meth : Httpg_base.Method.t;
   mutable url : Uri.t;
   mutable proto : string;
   mutable proto_major : int;

@@ -8,7 +8,7 @@ let capture (f : Eio.Buf_write.t -> unit) : string =
 let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
     Httpg.Body.t Httpg.Request.t =
   {
-    Httpg.Request.meth;
+    Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string "/";
     proto = Printf.sprintf "HTTP/1.%d" proto_minor;
     proto_major = 1;

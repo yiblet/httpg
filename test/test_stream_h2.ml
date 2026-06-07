@@ -16,7 +16,7 @@ let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
     | _ -> 0L
   in
   {
-    Api.creq_meth = meth;
+    Api.creq_meth = Httpg_base.Method.of_string meth;
     creq_url = Uri.of_string ("https://example.com" ^ path);
     creq_header = Api.Header.create ();
     creq_trailer = Api.Header.create ();
@@ -62,7 +62,10 @@ let test_server_streams_multiple_data () =
     Eio.Promise.resolve release ();
     let rest = Api.Body.read_all resp.cres_body in
     let full = (match first_chunk with Some s -> s | None -> "") ^ rest in
-    ((Httpg_base.Status.to_int resp.cres_status_code), first_chunk, handler_suspended_when_first_seen, full)
+    ( Httpg_base.Status.to_int resp.cres_status_code,
+      first_chunk,
+      handler_suspended_when_first_seen,
+      full )
   in
   let code, first_chunk, suspended, full = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -86,7 +89,7 @@ let test_large_body () =
     let req = mk_request ~meth:"GET" ~path:"/big" () in
     let resp = H2_transport.round_trip cc req in
     let body = Api.Body.read_all resp.cres_body in
-    ((Httpg_base.Status.to_int resp.cres_status_code), body)
+    (Httpg_base.Status.to_int resp.cres_status_code, body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -114,7 +117,7 @@ let test_incremental_client_read () =
     let first_len = match first with Some s -> String.length s | None -> 0 in
     let rest = Api.Body.read_all resp.cres_body in
     let total = first_len + String.length rest in
-    ((Httpg_base.Status.to_int resp.cres_status_code), first_len, total)
+    (Httpg_base.Status.to_int resp.cres_status_code, first_len, total)
   in
   let code, first_len, total = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;

@@ -12,7 +12,8 @@ let test_handler =
   Server.handler_func
     (fun (w : Server.response_writer) (r : Body.t Request.t) ->
       match (r.Request.meth, Uri.path r.Request.url) with
-      | "POST", "/echo" -> w.Server.write (Body.read_all r.Request.body)
+      | Httpg_base.Method.Post, "/echo" ->
+          w.Server.write (Body.read_all r.Request.body)
       | _, _ -> w.Server.write "hello, h2")
 
 (* Start a TLS server on an ephemeral port advertising [alpn], run [body] with
@@ -50,9 +51,9 @@ let test_clientserver_roundtrip () =
             (Body.String "ping-pong")
         in
         let post_body = Body.read_all post_resp.Response.body in
-        ( (Httpg_base.Status.to_int get_resp.Response.status_code),
+        ( Httpg_base.Status.to_int get_resp.Response.status_code,
           get_body,
-          (Httpg_base.Status.to_int post_resp.Response.status_code),
+          Httpg_base.Status.to_int post_resp.Response.status_code,
           post_body,
           Transport.h2_round_trip_count transport ))
   in
@@ -73,7 +74,7 @@ let test_http11_fallback () =
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let resp = Client.get ~sw client (base ^ "/hello") in
         let body = Body.read_all resp.Response.body in
-        ( (Httpg_base.Status.to_int resp.Response.status_code),
+        ( Httpg_base.Status.to_int resp.Response.status_code,
           body,
           Transport.h2_round_trip_count transport ))
   in
@@ -93,7 +94,8 @@ let test_concurrent_multiplexing_one_conn () =
         let _ = Body.read_all r.Request.body in
         let path = Uri.path r.Request.url in
         w.Server.write
-          ((if r.Request.meth = "POST" then "post:" else "get:") ^ path))
+          ((if r.Request.meth = Httpg_base.Method.Post then "post:" else "get:")
+          ^ path))
   in
   let dials, h2_count, results =
     with_tls_server ~handler ~alpn:[ "h2"; "http/1.1" ]
@@ -109,7 +111,9 @@ let test_concurrent_multiplexing_one_conn () =
                 (Body.String "ping")
             else Client.get ~sw client (base ^ path)
           in
-          ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body, i)
+          ( Httpg_base.Status.to_int resp.Response.status_code,
+            Body.read_all resp.Response.body,
+            i )
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,
@@ -153,7 +157,7 @@ let test_h2_dead_pooled_conn_redials_and_retries () =
             Transport.close_pooled_h2_conn transport ~host:"127.0.0.1" ~port);
         let r2 = Client.get ~sw client (base ^ "/b") in
         let b2 = Body.read_all r2.Response.body in
-        ( (Httpg_base.Status.to_int r2.Response.status_code),
+        ( Httpg_base.Status.to_int r2.Response.status_code,
           b2,
           (d1, Transport.dial_count transport),
           !fired ))
@@ -248,7 +252,8 @@ let test_h2_pool_scales_out_when_saturated () =
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let do_rt i =
           let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
-          ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body)
+          ( Httpg_base.Status.to_int resp.Response.status_code,
+            Body.read_all resp.Response.body )
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,
@@ -277,7 +282,7 @@ let test_h2_pool_single_conn_below_saturation () =
         let do_rt i =
           let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
           let _ = Body.read_all resp.Response.body in
-          (Httpg_base.Status.to_int resp.Response.status_code)
+          Httpg_base.Status.to_int resp.Response.status_code
         in
         let codes = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,

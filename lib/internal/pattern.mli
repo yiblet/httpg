@@ -22,7 +22,7 @@ type segment = {
 
 type t = {
   str : string;  (** original string *)
-  method_ : string;
+  method_ : Httpg_base.Method.t;  (** [Custom ""] means "any method" *)
   host : string;
   segments : segment list;
 }

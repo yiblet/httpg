@@ -68,7 +68,7 @@ let chunked () =
 let location () =
   let request =
     {
-      Httpg.Request.meth = "GET";
+      Httpg.Request.meth = Httpg_base.Method.Get;
       url = Uri.of_string "http://example.com/from";
       proto = "HTTP/1.1";
       proto_major = 1;

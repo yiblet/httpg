@@ -123,7 +123,7 @@ let dir_redirect () =
               (fun () ->
                 let tr = Transport.create ~net ~clock () in
                 Transport.run tr ~sw (fun () ->
-                    let req = Client.make_request "GET" (Ts.url s ^ "/sub") in
+                    let req = Client.make_request Httpg_base.Method.Get (Ts.url s ^ "/sub") in
                     let resp = Transport.round_trip tr req in
                     ignore (Body.drain resp.Response.body);
                     ( (Httpg_base.Status.to_int resp.Response.status_code),

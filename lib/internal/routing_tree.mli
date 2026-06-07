@@ -17,7 +17,7 @@ val add_pattern : 'h t -> Pattern.t -> 'h -> unit
 val match_ :
   'h t ->
   host:string ->
-  method_:string ->
+  method_:Httpg_base.Method.t ->
   path:string ->
   ((Pattern.t * 'h) * string list) option
 (** [match_ root ~host ~method_ ~path] returns the matching leaf node's pattern
@@ -25,7 +25,11 @@ val match_ :
     [None] (Go's [routingNode.match]). *)
 
 val matching_methods :
-  'h t -> host:string -> path:string -> (string, bool) Hashtbl.t -> unit
+  'h t ->
+  host:string ->
+  path:string ->
+  (Httpg_base.Method.t, bool) Hashtbl.t ->
+  unit
 (** [matching_methods root ~host ~path set] adds to [set] every method that
     would match (Go's [routingNode.matchingMethods]). *)
 

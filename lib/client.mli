@@ -97,7 +97,11 @@ val do_one :
     previous hop. *)
 
 val make_request :
-  ?body:Body.t -> ?content_length:int64 -> string -> string -> Body.t Request.t
+  ?body:Body.t ->
+  ?content_length:int64 ->
+  Httpg_base.Method.t ->
+  string ->
+  Body.t Request.t
 (** [make_request ?body ?content_length meth url] builds a request from a URL
     string (Go's [NewRequest]). The default body is empty. *)
 

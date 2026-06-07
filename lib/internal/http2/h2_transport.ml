@@ -786,7 +786,7 @@ let round_trip ?sw cc (req : Api.client_request) : Api.client_response =
      anything, so the request is untouched and replayable on a fresh dial. *)
   if cc.closed || cc.closing then raise Conn_unusable
   else begin
-    let is_head = req.creq_meth = "HEAD" in
+    let is_head = req.creq_meth = Httpg_base.Method.Head in
     let acl = actual_content_length req in
     let has_body = acl <> 0 in
     (* await a slot + allocate stream id + write HEADERS under req_header_mu (Go

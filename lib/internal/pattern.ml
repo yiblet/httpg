@@ -6,7 +6,7 @@ type segment = { s : string; wild : bool; multi : bool }
 
 type t = {
   str : string;
-  method_ : string;
+  method_ : Httpg_base.Method.t;
   host : string;
   segments : segment list;
 }
@@ -270,7 +270,13 @@ let parse s : (t, error) result =
           end
         end
       done;
-      Ok { str = s; method_; host; segments = List.rev !segments }
+      Ok
+        {
+          str = s;
+          method_ = Httpg_base.Method.of_string method_;
+          host;
+          segments = List.rev !segments;
+        }
     with Parse_error e -> Error e
   end
 
@@ -307,11 +313,12 @@ let combine_relationships r1 r2 =
       | _ -> r2)
 
 let compare_methods p1 p2 =
+  let open Httpg_base.Method in
   if p1.method_ = p2.method_ then Equivalent
-  else if p1.method_ = "" then More_general
-  else if p2.method_ = "" then More_specific
-  else if p1.method_ = "GET" && p2.method_ = "HEAD" then More_general
-  else if p2.method_ = "GET" && p1.method_ = "HEAD" then More_specific
+  else if p1.method_ = Custom "" then More_general
+  else if p2.method_ = Custom "" then More_specific
+  else if p1.method_ = Get && p2.method_ = Head then More_general
+  else if p2.method_ = Get && p1.method_ = Head then More_specific
   else Disjoint
 
 let compare_segments s1 s2 =

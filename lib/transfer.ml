@@ -174,7 +174,8 @@ let has_token v token =
   end
 
 (* noResponseBodyExpected. *)
-let no_response_body_expected request_method = request_method = "HEAD"
+let no_response_body_expected request_method =
+  request_method = Httpg_base.Method.Head
 
 (* bodyAllowedForStatus (RFC 7230 3.3). *)
 let body_allowed_for_status status =
@@ -336,7 +337,7 @@ type message = {
   is_response : bool;
   header : Header.t;
   status_code : Httpg_base.Status.t; (* responses; requests use 200 *)
-  request_method : string;
+  request_method : Httpg_base.Method.t;
   proto_major : int;
   proto_minor : int;
   close : bool; (* request: rr.Close; response: shouldClose-derived *)
@@ -382,7 +383,7 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
     fix_length ~is_response ~status ~request_method ~header ~chunked:is_chunked
   in
   let* content_length =
-    if is_response && request_method = "HEAD" then
+    if is_response && request_method = Httpg_base.Method.Head then
       parse_content_length (Header.values header "Content-Length")
     else Ok real_length
   in
@@ -454,7 +455,7 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
 (* The sanitized writer triple, mirroring transferWriter (the fields needed to
    write a body). Construct with [make_transfer_writer]. *)
 type transfer_writer = {
-  tw_method : string;
+  tw_method : Httpg_base.Method.t;
   mutable tw_body : Body.t;
   tw_response_to_head : bool;
   mutable tw_content_length : int64; (* -1 unknown, 0 none *)
@@ -468,7 +469,9 @@ type transfer_writer = {
 
 (* requestMethodUsuallyLacksBody (request.go:1578). *)
 let request_method_usually_lacks_body = function
-  | "GET" | "HEAD" | "DELETE" | "OPTIONS" | "PROPFIND" | "SEARCH" -> true
+  | Httpg_base.Method.Get | Head | Delete | Options
+  | Custom ("PROPFIND" | "SEARCH") ->
+      true
   | _ -> false
 
 (* probeRequestBody (transfer.go): pull one chunk to see whether the body has
@@ -501,13 +504,13 @@ let probe_request_body (body : Body.t ref) : bool =
    Body-lacking methods (GET/HEAD/...) are probed so a content-less ReadCloser
    isn't sent as a spurious chunked GET (Issue 18257); all other methods chunk. *)
 let should_send_chunked_request_body ~method_ (body : Body.t ref) : bool =
-  if method_ = "CONNECT" then false
+  if method_ = Httpg_base.Method.Connect then false
   else if request_method_usually_lacks_body method_ then probe_request_body body
   else true
 
 (* newTransferWriter's Body/ContentLength/TransferEncoding sanitization. Ports
    transfer.go:96 chunked auto-select for unknown-length request bodies. *)
-let make_transfer_writer ?(is_response = false) ?(method_ = "GET")
+let make_transfer_writer ?(is_response = false) ?(method_ = Httpg_base.Method.Get)
     ?(response_to_head = false) ?(trailer = None) ?(at_least_http11 = true)
     ?(close = false) ?header ~(body : Body.t) ~(content_length : int64)
     ~(transfer_encoding : string list) () : transfer_writer =
@@ -551,12 +554,16 @@ let should_send_content_length (t : transfer_writer) : bool =
   if chunked t.tw_transfer_encoding then false
   else if Int64.compare t.tw_content_length 0L > 0 then true
   else if Int64.compare t.tw_content_length 0L < 0 then false
-  else if t.tw_method = "POST" || t.tw_method = "PUT" || t.tw_method = "PATCH"
+  else if
+    t.tw_method = Httpg_base.Method.Post
+    || t.tw_method = Put || t.tw_method = Patch
   then true
   else if
     Int64.compare t.tw_content_length 0L = 0
     && is_identity t.tw_transfer_encoding
-  then if t.tw_method = "GET" || t.tw_method = "HEAD" then false else true
+  then
+    if t.tw_method = Httpg_base.Method.Get || t.tw_method = Head then false
+    else true
   else false
 
 (* transferWriter.writeHeader: write Connection/Content-Length/Transfer-Encoding/

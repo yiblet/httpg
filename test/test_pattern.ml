@@ -27,128 +27,142 @@ let test_parse_pattern () =
   let cases =
     [
       ( "/",
-        { Pattern.str = ""; method_ = ""; host = ""; segments = [ multi "" ] }
-      );
+        {
+          Pattern.str = "";
+          method_ = Httpg_base.Method.Custom "";
+          host = "";
+          segments = [ multi "" ];
+        } );
       ( "/a",
-        { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "a" ] } );
+        {
+          Pattern.str = "";
+          method_ = Httpg_base.Method.Custom "";
+          host = "";
+          segments = [ lit "a" ];
+        } );
       ( "/a/",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit "a"; multi "" ];
         } );
       ( "/path/to/something",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit "path"; lit "to"; lit "something" ];
         } );
       ( "/{w1}/lit/{w2}",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ wild "w1"; lit "lit"; wild "w2" ];
         } );
       ( "/{w1}/lit/{w2}/",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ wild "w1"; lit "lit"; wild "w2"; multi "" ];
         } );
       ( "example.com/",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "example.com";
           segments = [ multi "" ];
         } );
       ( "GET /",
         {
           Pattern.str = "";
-          method_ = "GET";
+          method_ = Httpg_base.Method.Get;
           host = "";
           segments = [ multi "" ];
         } );
       ( "POST example.com/foo/{w}",
         {
           Pattern.str = "";
-          method_ = "POST";
+          method_ = Httpg_base.Method.Post;
           host = "example.com";
           segments = [ lit "foo"; wild "w" ];
         } );
       ( "/{$}",
-        { Pattern.str = ""; method_ = ""; host = ""; segments = [ lit "/" ] } );
+        {
+          Pattern.str = "";
+          method_ = Httpg_base.Method.Custom "";
+          host = "";
+          segments = [ lit "/" ];
+        } );
       ( "DELETE example.com/a/{foo12}/{$}",
         {
           Pattern.str = "";
-          method_ = "DELETE";
+          method_ = Httpg_base.Method.Delete;
           host = "example.com";
           segments = [ lit "a"; wild "foo12"; lit "/" ];
         } );
       ( "/foo/{$}",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit "foo"; lit "/" ];
         } );
       ( "/{a}/foo/{rest...}",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ wild "a"; lit "foo"; multi "rest" ];
         } );
       ( "//",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit ""; multi "" ];
         } );
       ( "/foo///./../bar",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit "foo"; lit ""; lit ""; lit "."; lit ".."; lit "bar" ];
         } );
       ( "a.com/foo//",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "a.com";
           segments = [ lit "foo"; lit ""; multi "" ];
         } );
       ( "/%61%62/%7b/%",
         {
           Pattern.str = "";
-          method_ = "";
+          method_ = Httpg_base.Method.Custom "";
           host = "";
           segments = [ lit "ab"; lit "{"; lit "%" ];
         } );
       ( "GET\t  /",
         {
           Pattern.str = "";
-          method_ = "GET";
+          method_ = Httpg_base.Method.Get;
           host = "";
           segments = [ multi "" ];
         } );
       ( "POST \t  example.com/foo/{w}",
         {
           Pattern.str = "";
-          method_ = "POST";
+          method_ = Httpg_base.Method.Post;
           host = "example.com";
           segments = [ lit "foo"; wild "w" ];
         } );
       ( "DELETE    \texample.com/a/{foo12}/{$}",
         {
           Pattern.str = "";
-          method_ = "DELETE";
+          method_ = Httpg_base.Method.Delete;
           host = "example.com";
           segments = [ lit "a"; wild "foo12"; lit "/" ];
         } );
@@ -162,7 +176,10 @@ let test_parse_pattern () =
           "%S:\n\
           \ got  method=%S host=%S segs=%s\n\
           \ want method=%S host=%S segs=%s"
-          in_ got.method_ got.host (segs_str got.segments) want.Pattern.method_
+          in_
+          (Httpg_base.Method.to_string got.method_)
+          got.host (segs_str got.segments)
+          (Httpg_base.Method.to_string want.Pattern.method_)
           want.host (segs_str want.segments))
     cases
 

@@ -474,7 +474,7 @@ let drive_redirects ~start:start_url ~routes ~init_headers =
         | None -> stub_response req ()
       in
       let c = Client.create ~net () in
-      let req = Client.make_request "GET" start_url in
+      let req = Client.make_request Httpg_base.Method.Get start_url in
       List.iter (fun (k, v) -> Header.set req.Request.header k v) init_headers;
       let resp = Client.do_one ~round_trip c req in
       ignore (Body.drain resp.Response.body);
@@ -499,7 +499,7 @@ let redirect_strip_sticky_on_bounce_back () =
           | _ -> stub_response req ()
         in
         let c = Client.create ~net () in
-        let req = Client.make_request "GET" "http://a.com/" in
+        let req = Client.make_request Httpg_base.Method.Get "http://a.com/" in
         Header.set req.Request.header "Authorization" "Bearer secret";
         let resp = Client.do_one ~round_trip c req in
         ignore (Body.drain resp.Response.body);

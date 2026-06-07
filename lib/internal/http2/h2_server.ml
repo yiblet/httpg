@@ -527,7 +527,7 @@ let write_chunk sc (rws : rws) (p : string) : unit =
     rws.wrote_header <- true;
     rws.status <- 200
   end;
-  let is_head = rws.rws_req.sreq_meth = "HEAD" in
+  let is_head = rws.rws_req.sreq_meth = Httpg_base.Method.Head in
   let header_ended_stream =
     if not rws.sent_header then begin
       rws.sent_header <- true;
@@ -782,7 +782,7 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
       Httpg_internal.Httpcommon.new_server_request
         ~canonical:Header.canonical_header_key
         {
-          sp_method = meth;
+          sp_method = Httpg_base.Method.of_string meth;
           sp_scheme = scheme;
           sp_authority = authority;
           sp_path = path;
@@ -812,7 +812,7 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
       in
       let req : Api.server_request =
         {
-          sreq_meth = meth;
+          sreq_meth = Httpg_base.Method.of_string meth;
           sreq_url = url;
           sreq_proto = "HTTP/2.0";
           sreq_proto_major = 2;

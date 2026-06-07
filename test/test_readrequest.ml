@@ -20,7 +20,7 @@ let baseline () =
     ^ "Proxy-Connection: keep-alive\r\n\r\n" ^ "abcdef\n???"
   in
   let r = read raw in
-  Alcotest.(check string) "method" "GET" r.meth;
+  Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
   Alcotest.(check string) "proto" "HTTP/1.1" r.proto;
   Alcotest.(check int) "major" 1 r.proto_major;
   Alcotest.(check int) "minor" 1 r.proto_minor;
@@ -41,7 +41,7 @@ let baseline () =
 (* Simple GET, no body. *)
 let simple_get () =
   let r = read "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n" in
-  Alcotest.(check string) "method" "GET" r.meth;
+  Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
   Alcotest.(check string) "host" "foo.com" r.host;
   Alcotest.(check string) "request_uri" "/" r.request_uri;
   Alcotest.(check string)
@@ -57,7 +57,7 @@ let chunked_trailer () =
     ^ "0\r\n" ^ "Trailer-Key: Trailer-Value\r\n" ^ "\r\n"
   in
   let r = read raw in
-  Alcotest.(check string) "method" "POST" r.meth;
+  Alcotest.(check string) "method" "POST" (Httpg_base.Method.to_string r.meth);
   Alcotest.(check (list string)) "te" [ "chunked" ] r.transfer_encoding;
   Alcotest.(check string)
     "content_length" "-1"

@@ -24,7 +24,8 @@ val remove_multipart_files : (string, file_header list) Hashtbl.t -> unit
     and clear their [tmpfile]. Idempotent. *)
 
 type 'body t = {
-  mutable meth : string;  (** Go [Method]; "" means GET for client requests *)
+  mutable meth : Httpg_base.Method.t;
+      (** Go [Method]; [Custom ""] means GET for client requests *)
   mutable url : Uri.t;  (** Go [URL] (a [*url.URL] modeled as [Uri.t]) *)
   mutable proto : string;  (** e.g. "HTTP/1.0" *)
   mutable proto_major : int;

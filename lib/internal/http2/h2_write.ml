@@ -14,7 +14,7 @@ type write_res_headers = {
 type write_push_promise = {
   pp_stream_id : int;
   pp_promised_id : int;
-  pp_method : string;
+  pp_method : Httpg_base.Method.t;
   pp_scheme : string;
   pp_authority : string;
   pp_path : string;
@@ -136,7 +136,7 @@ let write_res_headers_frame oc enc (w : write_res_headers) =
 let write_push_promise_frame oc enc (w : write_push_promise) =
   let block =
     encode_block enc (fun () ->
-        enc_kv enc ":method" w.pp_method;
+        enc_kv enc ":method" (Httpg_base.Method.to_string w.pp_method);
         enc_kv enc ":scheme" w.pp_scheme;
         enc_kv enc ":authority" w.pp_authority;
         enc_kv enc ":path" w.pp_path;

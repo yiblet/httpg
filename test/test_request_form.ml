@@ -22,7 +22,7 @@ let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
   | Some ct -> Header.set header "Content-Type" ct
   | None -> ());
   {
-    Request.meth;
+    Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;
     proto = "HTTP/1.1";
     proto_major = 1;
@@ -141,7 +141,7 @@ let parse_form_unknown_content_type () =
       | Some ct -> Header.set header "Content-Type" ct
       | None -> ());
       {
-        Request.meth = "POST";
+        Request.meth = Httpg_base.Method.Post;
         url = Uri.of_string "http://x/";
         proto = "HTTP/1.1";
         proto_major = 1;

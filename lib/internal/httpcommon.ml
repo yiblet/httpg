@@ -14,7 +14,7 @@ type request = {
   url_host : string;
   request_uri : string;
   url_opaque : string;
-  meth : string;
+  meth : Httpg_base.Method.t;
   host : string;
   header : (string, string list) Hashtbl.t;
   trailer : (string, string list) Hashtbl.t;
@@ -31,7 +31,7 @@ type encode_headers_param = {
 type encode_headers_result = { has_body : bool; has_trailers : bool }
 
 type server_request_param = {
-  sp_method : string;
+  sp_method : Httpg_base.Method.t;
   sp_scheme : string;
   sp_authority : string;
   sp_path : string;
@@ -102,13 +102,14 @@ let valid_pseudo_path v = (String.length v > 0 && v.[0] = '/') || v = "*"
 let should_send_req_content_length meth content_length =
   if content_length > 0L then true
   else if content_length < 0L then false
-  else match meth with "POST" | "PUT" | "PATCH" -> true | _ -> false
+  else
+    match meth with Httpg_base.Method.Post | Put | Patch -> true | _ -> false
 
 let is_request_gzip meth header disable_compression =
   (not disable_compression)
   && hget header "Accept-Encoding" = []
   && hget header "Range" = []
-  && meth <> "HEAD"
+  && meth <> Httpg_base.Method.Head
 
 (* Go checkConnHeaders: raise on invalid connection-level headers. *)
 let check_conn_headers h =
@@ -184,8 +185,8 @@ let encode_headers ~canonical param headerf =
     match hget req.header ":protocol" with v :: _ -> v | [] -> ""
   in
   let is_normal_connect =
-    if req.meth = "CONNECT" && protocol = "" then true
-    else if protocol <> "" && req.meth <> "CONNECT" then
+    if req.meth = Httpg_base.Method.Connect && protocol = "" then true
+    else if protocol <> "" && req.meth <> Httpg_base.Method.Connect then
       raise (Error "invalid :protocol header in non-CONNECT request")
     else false
   in
@@ -219,7 +220,11 @@ let encode_headers ~canonical param headerf =
   let trailers = comma_separated_trailers ~canonical req.trailer in
   let enumerate f =
     f ":authority" host;
-    let m = if req.meth = "" then "GET" else req.meth in
+    let m =
+      match req.meth with
+      | Httpg_base.Method.Custom "" -> "GET"
+      | m -> Httpg_base.Method.to_string m
+    in
     f ":method" m;
     if not is_normal_connect then begin
       f ":path" path;
@@ -315,7 +320,8 @@ let new_server_request ~canonical param =
       sr_needs_continue = false;
       sr_invalid_reason = "userinfo_in_authority";
     }
-  else if param.sp_method = "CONNECT" && param.sp_protocol = "" then
+  else if param.sp_method = Httpg_base.Method.Connect && param.sp_protocol = ""
+  then
     {
       sr_request_uri = param.sp_authority;
       sr_trailer = !trailer;

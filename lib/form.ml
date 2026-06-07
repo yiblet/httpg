@@ -135,7 +135,11 @@ let parse_form (r : Body.t Request.t) : (unit, error) result =
   | Some _ -> ()
   | None -> (
       let meth = r.Request.meth in
-      if meth = "POST" || meth = "PUT" || meth = "PATCH" then (
+      if
+        meth = Httpg_base.Method.Post
+        || meth = Httpg_base.Method.Put
+        || meth = Httpg_base.Method.Patch
+      then (
         let pf, res = parse_post_form r in
         set_err res;
         r.Request.post_form <- Some pf);

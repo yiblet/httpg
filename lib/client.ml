@@ -45,7 +45,10 @@ let redirect_behavior ~req_method (resp : Body.t Response.t) =
   match resp.Response.status_code |> Httpg_base.Status.to_int with
   | 301 | 302 | 303 ->
       let redirect_method =
-        if req_method <> "GET" && req_method <> "HEAD" then "GET"
+        if
+          req_method <> Httpg_base.Method.Get
+          && req_method <> Httpg_base.Method.Head
+        then Httpg_base.Method.Get
         else req_method
       in
       (redirect_method, true, false)
@@ -214,8 +217,8 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     multipart_form = None;
   }
 
-let get ~sw c url = do_ ~sw c (make_request Method.get url)
-let head ~sw c url = do_ ~sw c (make_request Method.head url)
+let get ~sw c url = do_ ~sw c (make_request Httpg_base.Method.get url)
+let head ~sw c url = do_ ~sw c (make_request Httpg_base.Method.head url)
 
 let post ~sw c url ~content_type body =
   let len =
@@ -224,6 +227,6 @@ let post ~sw c url ~content_type body =
     | Body.Empty -> 0L
     | Body.Stream _ -> -1L
   in
-  let req = make_request ~body ~content_length:len Method.post url in
+  let req = make_request ~body ~content_length:len Httpg_base.Method.post url in
   Header.set req.Request.header "Content-Type" content_type;
   do_ ~sw c req

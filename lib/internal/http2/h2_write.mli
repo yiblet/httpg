@@ -26,7 +26,7 @@ type write_res_headers = {
 type write_push_promise = {
   pp_stream_id : int;
   pp_promised_id : int;
-  pp_method : string;
+  pp_method : Httpg_base.Method.t;
   pp_scheme : string;
   pp_authority : string;
   pp_path : string;

@@ -69,7 +69,7 @@ let rec add_segments n (segs : Pattern.segment list) p h =
 (* addPattern: host -> method -> path. *)
 let add_pattern root (p : Pattern.t) h =
   let n = add_child root p.Pattern.host in
-  let n = add_child n p.Pattern.method_ in
+  let n = add_child n (Httpg_base.Method.to_string p.Pattern.method_) in
   add_segments n p.Pattern.segments p h
 
 (* firstSegment splits path into its first segment and the rest. *)
@@ -142,6 +142,7 @@ let match_method_and_path (n : 'h node option) method_ path =
           | None -> match_path n.empty_child path []))
 
 let match_ root ~host ~method_ ~path =
+  let method_ = Httpg_base.Method.to_string method_ in
   if host <> "" then
     match match_method_and_path (find_child root host) method_ path with
     | Some _ as r -> r
@@ -155,14 +156,16 @@ let matching_methods_path (n : 'h node option) path set =
   | Some n ->
       Mapping.each_pair n.children (fun method_ c ->
           (match match_path (Some c) path [] with
-          | Some _ -> Hashtbl.replace set method_ true
+          | Some _ ->
+              Hashtbl.replace set (Httpg_base.Method.of_string method_) true
           | None -> ());
           true)
 
 let matching_methods root ~host ~path set =
   if host <> "" then matching_methods_path (find_child root host) path set;
   matching_methods_path root.empty_child path set;
-  if Hashtbl.mem set "GET" then Hashtbl.replace set "HEAD" true
+  if Hashtbl.mem set Httpg_base.Method.Get then
+    Hashtbl.replace set Httpg_base.Method.Head true
 
 (* print: Go's routingNode.print. Renders patterns/keys with Go %q quoting. *)
 let go_quote s =

@@ -71,7 +71,7 @@ let default_user_agent = "Go-http-client/1.1"
    Deadline/cancel travel via Eio (Switch/Time) threaded at the call site, not a
    ctx field. *)
 type client_request = {
-  creq_meth : string;
+  creq_meth : Httpg_base.Method.t;
   creq_url : Uri.t;
   creq_header : header;
   creq_trailer : header;
@@ -98,7 +98,7 @@ type server_request = {
   sreq_proto : string;
   sreq_proto_major : int;
   sreq_proto_minor : int;
-  sreq_meth : string;
+  sreq_meth : Httpg_base.Method.t;
   sreq_url : Uri.t;
   sreq_header : header;
   sreq_trailer : header;

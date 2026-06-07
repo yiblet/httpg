@@ -345,7 +345,10 @@ let check_if_none_match w (r : Body.t Request.t) =
 
 (* Go checkIfModifiedSince. *)
 let check_if_modified_since (r : Body.t Request.t) ~modtime =
-  if r.Request.meth <> "GET" && r.Request.meth <> "HEAD" then Cond_none
+  if
+    r.Request.meth <> Httpg_base.Method.Get
+    && r.Request.meth <> Httpg_base.Method.Head
+  then Cond_none
   else begin
     let ims = Header.get r.Request.header "If-Modified-Since" in
     if ims = "" || is_zero_time modtime then Cond_none
@@ -359,7 +362,10 @@ let check_if_modified_since (r : Body.t Request.t) ~modtime =
 
 (* Go checkIfRange. *)
 let check_if_range w (r : Body.t Request.t) ~modtime =
-  if r.Request.meth <> "GET" && r.Request.meth <> "HEAD" then Cond_none
+  if
+    r.Request.meth <> Httpg_base.Method.Get
+    && r.Request.meth <> Httpg_base.Method.Head
+  then Cond_none
   else begin
     let ir = Header.get r.Request.header "If-Range" in
     if ir = "" then Cond_none
@@ -409,7 +415,10 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
   else
     begin match check_if_none_match w r with
     | Cond_false ->
-        if r.Request.meth = "GET" || r.Request.meth = "HEAD" then begin
+        if
+          r.Request.meth = Httpg_base.Method.Get
+          || r.Request.meth = Httpg_base.Method.Head
+        then begin
           write_not_modified w;
           (true, "")
         end
@@ -634,7 +643,7 @@ let serve_full w (r : Body.t Request.t) ~h ~size ~read_window =
   if Header.get h "Content-Encoding" = "" then
     Header.set h "Content-Length" (Int64.to_string size);
   w.Server.write_header Httpg_base.Status.Ok;
-  if r.Request.meth = "HEAD" then ()
+  if r.Request.meth = Httpg_base.Method.Head then ()
   else stream_window w ~read_window ~start:0L ~length:size
 
 let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
@@ -685,7 +694,7 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
             Header.set h "Content-Range" (content_range ra size);
             Header.set h "Content-Length" (Int64.to_string ra.length);
             w.Server.write_header Httpg_base.Status.PartialContent;
-            if r.Request.meth = "HEAD" then ()
+            if r.Request.meth = Httpg_base.Method.Head then ()
             else stream_window w ~read_window ~start:ra.start ~length:ra.length
         | ranges ->
             (* multiple ranges → 206 multipart/byteranges *)
@@ -694,7 +703,7 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
               ("multipart/byteranges; boundary=" ^ multipart_boundary);
             Header.set h "Content-Length" (Int64.to_string send_size);
             w.Server.write_header Httpg_base.Status.PartialContent;
-            if r.Request.meth = "HEAD" then ()
+            if r.Request.meth = Httpg_base.Method.Head then ()
             else begin
               List.iteri
                 (fun idx ra ->

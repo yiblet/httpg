@@ -22,7 +22,7 @@ type request = {
   url_host : string;
   request_uri : string; (* URL.RequestURI(): path?query, precomputed *)
   url_opaque : string; (* URL.Opaque (only used in a :path error message) *)
-  meth : string;
+  meth : Httpg_base.Method.t;
   host : string;
   header : (string, string list) Hashtbl.t;
   trailer : (string, string list) Hashtbl.t;
@@ -39,7 +39,7 @@ type encode_headers_param = {
 type encode_headers_result = { has_body : bool; has_trailers : bool }
 
 type server_request_param = {
-  sp_method : string;
+  sp_method : Httpg_base.Method.t;
   sp_scheme : string;
   sp_authority : string;
   sp_path : string;
@@ -74,10 +74,11 @@ val valid_header_field_value : string -> bool
 val valid_pseudo_path : string -> bool
 
 (* Go shouldSendReqContentLength (contentLength: 0 = 0, -1 = unknown). *)
-val should_send_req_content_length : string -> int64 -> bool
+val should_send_req_content_length : Httpg_base.Method.t -> int64 -> bool
 
 (* Go IsRequestGzip. *)
-val is_request_gzip : string -> (string, string list) Hashtbl.t -> bool -> bool
+val is_request_gzip :
+  Httpg_base.Method.t -> (string, string list) Hashtbl.t -> bool -> bool
 
 (* Go EncodeHeaders: validates the request and calls [headerf name value] for
    each (lower-cased, validated) pseudo-header and header. May raise [Error] or

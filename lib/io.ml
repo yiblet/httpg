@@ -372,6 +372,8 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           Transfer.should_close ~major:proto_major ~minor:proto_minor ~header
             ~remove_close_header:false
         in
+        (* The wire method token is validated above; carry it typed from here. *)
+        let meth = Httpg_base.Method.of_string meth in
         let msg =
           {
             Transfer.is_response = false;
@@ -483,7 +485,9 @@ let read_response_raising ?(request : Body.t Request.t option)
           in
           fix_pragma_cache_control header;
           let request_method =
-            match request with Some req -> req.Request.meth | None -> "GET"
+            match request with
+            | Some req -> req.Request.meth
+            | None -> Httpg_base.Method.Get
           in
           let msg =
             {
@@ -554,14 +558,20 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Body.t Request.t) : unit =
     && r.Request.host = ""
   then raise missing_host_sentinel;
   let ruri =
-    if r.Request.meth = "CONNECT" && Uri.path r.Request.url = "" then host
+    if r.Request.meth = Httpg_base.Method.Connect && Uri.path r.Request.url = ""
+    then host
     else request_uri_of r.Request.url
   in
   if string_contains_ctl_byte ruri then
     raise
       (Protocol_error "net/http: can't write control character in Request.URL");
-  let meth = if r.Request.meth = "" then "GET" else r.Request.meth in
-  out (Printf.sprintf "%s %s HTTP/1.1\r\n" meth ruri);
+  let meth =
+    match r.Request.meth with
+    | Httpg_base.Method.Custom "" -> Httpg_base.Method.Get
+    | m -> m
+  in
+  out
+    (Printf.sprintf "%s %s HTTP/1.1\r\n" (Httpg_base.Method.to_string meth) ruri);
   out (Printf.sprintf "Host: %s\r\n" host);
   (* User-Agent: default unless present (a present blank value suppresses it). *)
   let user_agent =
@@ -663,7 +673,9 @@ let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
     && not r.Response.uncompressed
   then close := true;
   let method_ =
-    match r.Response.request with Some req -> req.Request.meth | None -> ""
+    match r.Response.request with
+    | Some req -> req.Request.meth
+    | None -> Httpg_base.Method.Custom ""
   in
   let response_to_head = Transfer.no_response_body_expected method_ in
   let tw =

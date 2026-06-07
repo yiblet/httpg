@@ -62,8 +62,8 @@ val chunked : string list -> bool
 val is_identity : string list -> bool
 (** [is_identity te]: is [te] exactly [["identity"]]? *)
 
-val no_response_body_expected : string -> bool
-(** [noResponseBodyExpected]: true iff the request method is ["HEAD"]. *)
+val no_response_body_expected : Httpg_base.Method.t -> bool
+(** [noResponseBodyExpected]: true iff the request method is [Head]. *)
 
 val body_allowed_for_status : int -> bool
 (** [bodyAllowedForStatus] (RFC 7230 3.3): 1xx, 204 and 304 forbid a body. *)
@@ -75,7 +75,7 @@ val parse_content_length : string list -> (int64, error) result
 val fix_length :
   is_response:bool ->
   status:int ->
-  request_method:string ->
+  request_method:Httpg_base.Method.t ->
   header:Header.t ->
   chunked:bool ->
   (int64, error) result
@@ -109,7 +109,7 @@ type message = {
   is_response : bool;
   header : Header.t;
   status_code : Httpg_base.Status.t;
-  request_method : string;
+  request_method : Httpg_base.Method.t;
   proto_major : int;
   proto_minor : int;
   close : bool;
@@ -139,7 +139,7 @@ val read_transfer : message -> Eio.Buf_read.t -> (result, error) Stdlib.result
 (* --- write_body. --- *)
 
 type transfer_writer = {
-  tw_method : string;
+  tw_method : Httpg_base.Method.t;
   mutable tw_body : Body.t;
   tw_response_to_head : bool;
   mutable tw_content_length : int64;
@@ -155,7 +155,7 @@ type transfer_writer = {
 
 val make_transfer_writer :
   ?is_response:bool ->
-  ?method_:string ->
+  ?method_:Httpg_base.Method.t ->
   ?response_to_head:bool ->
   ?trailer:Header.t option ->
   ?at_least_http11:bool ->

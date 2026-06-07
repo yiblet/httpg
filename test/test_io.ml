@@ -8,7 +8,7 @@ let r_of_string = Eio.Buf_read.of_string
 
 let req_no_host () : Body.t Request.t =
   {
-    Request.meth = "GET";
+    Request.meth = Httpg_base.Method.Get;
     url = Uri.of_string "/just/a/path";
     proto = "HTTP/1.1";
     proto_major = 1;
@@ -54,7 +54,9 @@ let read_request_malformed () =
      Io.read_request (r_of_string "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n")
    with
   | Ok r ->
-      Alcotest.(check string) "method" "GET" r.Request.meth;
+      Alcotest.(check string)
+        "method" "GET"
+        (Httpg_base.Method.to_string r.Request.meth);
       Alcotest.(check string) "host" "foo.com" r.Request.host
   | Error e ->
       Alcotest.failf "well-formed request -> Error %s; want Ok"

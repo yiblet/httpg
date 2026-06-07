@@ -18,7 +18,7 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false)
     ?(host = "") url : Httpg.Body.t Httpg.Request.t =
   {
-    Httpg.Request.meth;
+    Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;
     proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
     proto_major;

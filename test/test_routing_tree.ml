@@ -85,7 +85,11 @@ let run_match_cases name tree cases =
   List.iter
     (fun (method_, host, path, want_pat, want_matches) ->
       let got_pat, got_matches =
-        match Routing_tree.match_ tree ~host ~method_ ~path with
+        match
+          Routing_tree.match_ tree ~host
+            ~method_:(Httpg_base.Method.of_string method_)
+            ~path
+        with
         | None -> ("", None)
         | Some ((p, ()), m) -> (Pattern.to_string p, Some m)
       in
@@ -221,7 +225,9 @@ let test_matching_methods () =
       let set = Hashtbl.create 8 in
       Routing_tree.matching_methods tree ~host ~path set;
       let keys =
-        Hashtbl.fold (fun k _ acc -> k :: acc) set []
+        Hashtbl.fold
+          (fun k _ acc -> Httpg_base.Method.to_string k :: acc)
+          set []
         |> List.sort String.compare
       in
       let got = String.concat "," keys in

@@ -26,7 +26,7 @@ let write_file dir name contents =
 (* Send a GET with extra headers, return (status, body, headers). 206/416 are
    not redirects, so [Client.do_] returns them directly. *)
 let request_with_headers ~sw c url headers =
-  let req = Client.make_request "GET" url in
+  let req = Client.make_request Httpg_base.Method.Get url in
   List.iter (fun (k, v) -> Header.set req.Request.header k v) headers;
   let resp = Client.do_ ~sw c req in
   ( (Httpg_base.Status.to_int resp.Response.status_code),
