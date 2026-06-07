@@ -5,9 +5,8 @@
 type 'body t = {
   mutable status : string;  (** e.g. "200 OK" *)
   mutable status_code : Httpg_base.Status.t;  (** e.g. 200 *)
-  mutable proto : string;  (** e.g. "HTTP/1.0" *)
-  mutable proto_major : int;
-  mutable proto_minor : int;
+  mutable proto : Httpg_base.Protocol.t;
+      (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;
   mutable body : 'body;
   mutable content_length : int64;  (** -1 means unknown *)

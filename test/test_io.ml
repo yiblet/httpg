@@ -10,9 +10,7 @@ let req_no_host () : Body.t Request.t =
   {
     Request.meth = Httpg_base.Method.Get;
     url = Uri.of_string "/just/a/path";
-    proto = "HTTP/1.1";
-    proto_major = 1;
-    proto_minor = 1;
+    proto = Httpg_base.Protocol.Http11;
     header = Header.create ();
     body = Body.Empty;
     content_length = 0L;

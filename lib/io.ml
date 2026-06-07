@@ -318,9 +318,11 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
       | Some t -> t
     in
     if not (is_token meth) then raise (bad_string_error "invalid method" meth);
-    match Request.parse_http_version proto with
+    match Httpg_base.Protocol.of_string proto with
     | None -> raise (bad_string_error "malformed HTTP version" proto)
-    | Some (proto_major, proto_minor) ->
+    | Some proto_t ->
+        let proto_major = Httpg_base.Protocol.major proto_t in
+        let proto_minor = Httpg_base.Protocol.minor proto_t in
         let just_authority =
           meth = "CONNECT"
           && not (String.length request_uri > 0 && request_uri.[0] = '/')
@@ -380,8 +382,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
             header;
             status_code = Httpg_base.Status.Custom 0;
             request_method = meth;
-            proto_major;
-            proto_minor;
+            proto = proto_t;
             close;
           }
         in
@@ -392,9 +393,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           {
             Request.meth;
             url;
-            proto;
-            proto_major;
-            proto_minor;
+            proto = proto_t;
             header;
             body = Body.Empty;
             content_length = res.Transfer.content_length;
@@ -470,9 +469,9 @@ let read_response_raising ?(request : Body.t Request.t option)
   | None -> bad_status ()
   | Some sc when sc < 0 -> bad_status ()
   | Some status_code -> (
-      match Request.parse_http_version proto with
+      match Httpg_base.Protocol.of_string proto with
       | None -> raise (bad_string_error "malformed HTTP version" proto)
-      | Some (proto_major, proto_minor) ->
+      | Some proto_t ->
           let status_code =
             match Httpg_base.Status.of_int_result status_code with
             | Ok s -> s
@@ -495,8 +494,7 @@ let read_response_raising ?(request : Body.t Request.t option)
               header;
               status_code;
               request_method;
-              proto_major;
-              proto_minor;
+              proto = proto_t;
               close = false;
             }
           in
@@ -505,9 +503,7 @@ let read_response_raising ?(request : Body.t Request.t option)
             {
               Response.status;
               status_code;
-              proto;
-              proto_major;
-              proto_minor;
+              proto = proto_t;
               header;
               body = Body.Empty;
               content_length = res.Transfer.content_length;
@@ -571,7 +567,9 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Body.t Request.t) : unit =
     | m -> m
   in
   out
-    (Printf.sprintf "%s %s HTTP/1.1\r\n" (Httpg_base.Method.to_string meth) ruri);
+    (Printf.sprintf "%s %s HTTP/1.1\r\n"
+       (Httpg_base.Method.to_string meth)
+       ruri);
   out (Printf.sprintf "Host: %s\r\n" host);
   (* User-Agent: default unless present (a present blank value suppresses it). *)
   let user_agent =
@@ -647,8 +645,9 @@ let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
       if st <> "" then st else "status code " ^ itoa
   in
   out
-    (Printf.sprintf "HTTP/%d.%d %03d %s\r\n" r.Response.proto_major
-       r.Response.proto_minor
+    (Printf.sprintf "HTTP/%d.%d %03d %s\r\n"
+       (Httpg_base.Protocol.major r.Response.proto)
+       (Httpg_base.Protocol.minor r.Response.proto)
        (Httpg_base.Status.to_int r.Response.status_code)
        text);
   (* Clone fields we may modify (r1). *)

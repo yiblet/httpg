@@ -110,8 +110,7 @@ type message = {
   header : Header.t;
   status_code : Httpg_base.Status.t;
   request_method : Httpg_base.Method.t;
-  proto_major : int;
-  proto_minor : int;
+  proto : Httpg_base.Protocol.t;
   close : bool;
 }
 (** The subset of *Request / *Response fields driving transfer reading,

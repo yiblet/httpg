@@ -428,7 +428,8 @@ let response_header_under_limit_ok () =
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = Client.get ~sw c url in
-    ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body)
+    ( Httpg_base.Status.to_int resp.Response.status_code,
+      Body.read_all resp.Response.body )
   in
   let code, b = with_raw_server ~secs:5. ~serve client in
   Alcotest.(check int) "status 200" 200 code;
@@ -449,9 +450,7 @@ let stub_response req ?location () : Body.t Response.t =
   {
     Response.status;
     status_code;
-    proto = "HTTP/1.1";
-    proto_major = 1;
-    proto_minor = 1;
+    proto = Httpg_base.Protocol.Http11;
     header;
     body = Body.Empty;
     content_length = 0L;

@@ -388,9 +388,7 @@ let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
       ^ " "
       ^ Httpg_base.Status.to_string cr.cres_status_code;
     status_code = cr.cres_status_code;
-    proto = "HTTP/2.0";
-    proto_major = 2;
-    proto_minor = 0;
+    proto = Httpg_base.Protocol.Http20;
     header = cr.cres_header;
     body = body_of_api_body cr.cres_body;
     content_length = cr.cres_content_length;

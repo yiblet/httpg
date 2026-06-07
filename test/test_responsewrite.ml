@@ -10,9 +10,9 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
   {
     Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string "/";
-    proto = Printf.sprintf "HTTP/1.%d" proto_minor;
-    proto_major = 1;
-    proto_minor;
+    proto =
+      Option.get
+        (Httpg_base.Protocol.of_string (Printf.sprintf "HTTP/1.%d" proto_minor));
     header = Httpg.Header.create ();
     body = Httpg.Body.Empty;
     content_length = 0L;
@@ -42,9 +42,10 @@ let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
       (match Httpg_base.Status.of_int_result status_code with
       | Ok s -> s
       | Error _ -> Httpg_base.Status.Custom status_code);
-    proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
-    proto_major;
-    proto_minor;
+    proto =
+      Option.get
+        (Httpg_base.Protocol.of_string
+           (Printf.sprintf "HTTP/%d.%d" proto_major proto_minor));
     header;
     body;
     content_length;

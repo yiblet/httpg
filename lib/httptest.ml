@@ -105,9 +105,7 @@ module Response_recorder = struct
     {
       Response.status;
       status_code;
-      proto = "HTTP/1.1";
-      proto_major = 1;
-      proto_minor = 1;
+      proto = Httpg_base.Protocol.Http11;
       header = snap;
       body = Body.String (Buffer.contents t.body);
       content_length;

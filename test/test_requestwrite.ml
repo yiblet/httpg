@@ -20,9 +20,10 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
   {
     Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;
-    proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
-    proto_major;
-    proto_minor;
+    proto =
+      Option.get
+        (Httpg_base.Protocol.of_string
+           (Printf.sprintf "HTTP/%d.%d" proto_major proto_minor));
     header;
     body;
     content_length;

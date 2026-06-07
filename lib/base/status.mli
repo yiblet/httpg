@@ -75,8 +75,8 @@ val to_int : t -> int
 
 val of_int_result : int -> (t, error) result
 (** Map a numeric code to its variant. Codes in [0, 999] with no dedicated
-    variant map to {!Custom}; anything outside that range is [Error
-    InvalidStatus]. *)
+    variant map to {!Custom}; anything outside that range is
+    [Error InvalidStatus]. *)
 
 val of_string_result : string -> (t, error) result
 (** Parse a status reason phrase (case/whitespace-insensitive), e.g.

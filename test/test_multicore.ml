@@ -51,7 +51,8 @@ let hammer ~net ~clock ~sw ~url n =
     (List.init n (fun _ () ->
          let resp = Client.get ~sw client url in
          ignore (Body.read_all resp.Response.body);
-         if (Httpg_base.Status.to_int resp.Response.status_code) = 200 then Atomic.incr ok));
+         if Httpg_base.Status.to_int resp.Response.status_code = 200 then
+           Atomic.incr ok));
   Atomic.get ok
 
 (* ---- the multicore parallelism gate ---- *)
@@ -171,7 +172,8 @@ let multicore_tls () =
              let client = Client.create ~net ~clock ~transport () in
              let resp = Client.get ~sw client url in
              let body = Body.read_all resp.Response.body in
-             if (Httpg_base.Status.to_int resp.Response.status_code) = 200 then Atomic.incr ok;
+             if Httpg_base.Status.to_int resp.Response.status_code = 200 then
+               Atomic.incr ok;
              if body = "tls-ok" then Atomic.incr bodies));
       Server.close srv;
       Printf.printf "[multicore-tls] cores=%d handshakes=%d ok=%d bodies=%d\n%!"
@@ -261,8 +263,11 @@ let multicore_client () =
                    match Client.get ~sw:dsw client url with
                    | resp ->
                        let body = Body.read_all resp.Response.body in
-                       if (Httpg_base.Status.to_int resp.Response.status_code) = 200 && body = expect then
-                         Atomic.incr ok
+                       if
+                         Httpg_base.Status.to_int resp.Response.status_code
+                         = 200
+                         && body = expect
+                       then Atomic.incr ok
                    | exception e ->
                        if contains (Printexc.to_string e) "Stream_aborted" then
                          Atomic.incr aborts;
@@ -319,7 +324,7 @@ let multicore_client_parallel_tls () =
           let c = Client.create ~net ~clock ~transport:tr () in
           let resp = Client.get ~sw:rsw c url in
           ignore (Body.read_all resp.Response.body);
-          (Httpg_base.Status.to_int resp.Response.status_code) = 200
+          Httpg_base.Status.to_int resp.Response.status_code = 200
         in
         let n = min cores 6 in
         let per = 8 in

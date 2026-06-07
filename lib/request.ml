@@ -39,9 +39,7 @@ let remove_multipart_files (file : (string, file_header list) Hashtbl.t) : unit
 type 'body t = {
   mutable meth : Httpg_base.Method.t;
   mutable url : Uri.t;
-  mutable proto : string;
-  mutable proto_major : int;
-  mutable proto_minor : int;
+  mutable proto : Httpg_base.Protocol.t;
   mutable header : Header.t;
   mutable body : 'body;
   mutable content_length : int64;
@@ -70,33 +68,16 @@ let remove_multipart_temp_files (r : 'a t) : unit =
 (* defaultUserAgent (request.go). *)
 let default_user_agent = "Go-http-client/1.1"
 
-(* ParseHTTPVersion(vers). *)
+(* ParseHTTPVersion(vers): kept as Go's package-level helper; the parsing logic
+   now lives in {!Httpg_base.Protocol.of_string}. *)
 let parse_http_version (vers : string) : (int * int) option =
-  match vers with
-  | "HTTP/1.1" -> Some (1, 1)
-  | "HTTP/1.0" -> Some (1, 0)
-  | _ ->
-      let prefix = "HTTP/" in
-      let n = String.length vers in
-      if n <> String.length "HTTP/X.Y" then None
-      else if not (String.length vers >= 5 && String.sub vers 0 5 = prefix) then
-        None
-      else if vers.[6] <> '.' then None
-      else begin
-        (* strconv.ParseUint on a single digit: reject non-digit, '+', leading
-         signs. Single char so leading zeros are not an issue here. *)
-        let parse_digit c =
-          if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0')
-          else None
-        in
-        match (parse_digit vers.[5], parse_digit vers.[7]) with
-        | Some maj, Some min -> Some (maj, min)
-        | _ -> None
-      end
+  match Httpg_base.Protocol.of_string vers with
+  | Some p -> Some (Httpg_base.Protocol.major p, Httpg_base.Protocol.minor p)
+  | None -> None
 
 (* Request.ProtoAtLeast. *)
 let proto_at_least (r : 'a t) major minor =
-  r.proto_major > major || (r.proto_major = major && r.proto_minor >= minor)
+  Httpg_base.Protocol.at_least r.proto major minor
 
 (* Request.expectsContinue (request.go:1518): true when the "Expect" header
    carries the [100-continue] token (case-insensitive, token-boundary aware).

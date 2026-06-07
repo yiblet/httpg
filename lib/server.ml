@@ -125,7 +125,8 @@ let redirect w (r : Body.t Request.t) url code =
   w.write_header code;
   if (not had_ct) && r.meth = Httpg_base.Method.Get then
     let body =
-      "<a href=\"" ^ html_escape url ^ "\">" ^ Httpg_base.Status.to_string code
+      "<a href=\"" ^ html_escape url ^ "\">"
+      ^ Httpg_base.Status.to_string code
       ^ "</a>.\n"
     in
     fprintln w body
@@ -648,7 +649,8 @@ let write_read_error_response w (e : Io.error) : unit =
       write
         (Printf.sprintf "HTTP/1.1 %d %s%sUnsupported transfer encoding"
            (Httpg_base.Status.to_int code)
-           (Httpg_base.Status.to_string code) error_headers)
+           (Httpg_base.Status.to_string code)
+           error_headers)
   | Io.Unexpected_eof -> () (* Common net read error: don't reply. *)
   | Io.Request_too_large ->
       (* errTooLarge -> 431 + close (server.go:2053-2062). *)
@@ -669,11 +671,14 @@ let write_read_error_response w (e : Io.error) : unit =
 let write_expectation_failed w : unit =
   let code = Httpg_base.Status.ExpectationFailed in
   let code_int = Httpg_base.Status.to_int code in
-  let body = Printf.sprintf "%d %s" code_int (Httpg_base.Status.to_string code) in
+  let body =
+    Printf.sprintf "%d %s" code_int (Httpg_base.Status.to_string code)
+  in
   try
     Eio.Buf_write.string w
       (Printf.sprintf "HTTP/1.1 %d %s%s%s" code_int
-         (Httpg_base.Status.to_string code) error_headers body);
+         (Httpg_base.Status.to_string code)
+         error_headers body);
     Eio.Buf_write.flush w
   with _ -> ()
 
@@ -937,8 +942,6 @@ let request_of_server_request (r : Httpg_http2.Api.server_request) :
     meth = r.sreq_meth;
     url = r.sreq_url;
     proto = r.sreq_proto;
-    proto_major = r.sreq_proto_major;
-    proto_minor = r.sreq_proto_minor;
     header = r.sreq_header;
     body = body_of_api_body r.sreq_body;
     content_length = r.sreq_content_length;

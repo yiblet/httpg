@@ -68,7 +68,7 @@ let request_with_headers ~sw c url headers =
   let req = Client.make_request Httpg_base.Method.Get url in
   List.iter (fun (k, v) -> Header.set req.Request.header k v) headers;
   let resp = Client.do_ ~sw c req in
-  ( (Httpg_base.Status.to_int resp.Response.status_code),
+  ( Httpg_base.Status.to_int resp.Response.status_code,
     Body.read_all resp.Response.body,
     resp.Response.header )
 

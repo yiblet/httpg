@@ -95,9 +95,7 @@ type client_response = {
 
 (* A ServerRequest is a Request used by the HTTP/2 server. *)
 type server_request = {
-  sreq_proto : string;
-  sreq_proto_major : int;
-  sreq_proto_minor : int;
+  sreq_proto : Httpg_base.Protocol.t;
   sreq_meth : Httpg_base.Method.t;
   sreq_url : Uri.t;
   sreq_header : header;

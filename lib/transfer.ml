@@ -338,8 +338,7 @@ type message = {
   header : Header.t;
   status_code : Httpg_base.Status.t; (* responses; requests use 200 *)
   request_method : Httpg_base.Method.t;
-  proto_major : int;
-  proto_minor : int;
+  proto : Httpg_base.Protocol.t;
   close : bool; (* request: rr.Close; response: shouldClose-derived *)
 }
 
@@ -363,8 +362,9 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
   let request_method = msg.request_method in
   (* Default to HTTP/1.1 when proto is 0.0. *)
   let major, minor =
-    if msg.proto_major = 0 && msg.proto_minor = 0 then (1, 1)
-    else (msg.proto_major, msg.proto_minor)
+    match msg.proto with
+    | Httpg_base.Protocol.Other (0, 0) -> (1, 1)
+    | p -> (Httpg_base.Protocol.major p, Httpg_base.Protocol.minor p)
   in
   let status = Httpg_base.Status.to_int msg.status_code in
   let is_response = msg.is_response in
@@ -510,9 +510,10 @@ let should_send_chunked_request_body ~method_ (body : Body.t ref) : bool =
 
 (* newTransferWriter's Body/ContentLength/TransferEncoding sanitization. Ports
    transfer.go:96 chunked auto-select for unknown-length request bodies. *)
-let make_transfer_writer ?(is_response = false) ?(method_ = Httpg_base.Method.Get)
-    ?(response_to_head = false) ?(trailer = None) ?(at_least_http11 = true)
-    ?(close = false) ?header ~(body : Body.t) ~(content_length : int64)
+let make_transfer_writer ?(is_response = false)
+    ?(method_ = Httpg_base.Method.Get) ?(response_to_head = false)
+    ?(trailer = None) ?(at_least_http11 = true) ?(close = false) ?header
+    ~(body : Body.t) ~(content_length : int64)
     ~(transfer_encoding : string list) () : transfer_writer =
   let header = match header with Some h -> h | None -> Header.create () in
   let te = ref transfer_encoding in

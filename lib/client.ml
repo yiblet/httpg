@@ -155,9 +155,7 @@ let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t =
             {
               Request.meth = redirect_method;
               url = loc_url;
-              proto = "HTTP/1.1";
-              proto_major = 1;
-              proto_minor = 1;
+              proto = Httpg_base.Protocol.Http11;
               header = new_header;
               body = (if include_body then req.Request.body else Body.Empty);
               content_length =
@@ -200,9 +198,7 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
   {
     Request.meth;
     url;
-    proto = "HTTP/1.1";
-    proto_major = 1;
-    proto_minor = 1;
+    proto = Httpg_base.Protocol.Http11;
     header;
     body;
     content_length;

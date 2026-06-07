@@ -5,9 +5,8 @@
 type 'body t = {
   mutable status : string;  (** e.g. "200 OK" *)
   mutable status_code : Httpg_base.Status.t;  (** e.g. 200 *)
-  mutable proto : string;  (** e.g. "HTTP/1.0" *)
-  mutable proto_major : int;
-  mutable proto_minor : int;
+  mutable proto : Httpg_base.Protocol.t;
+      (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;
   mutable body : 'body;
   mutable content_length : int64;  (** -1 means unknown *)
@@ -23,7 +22,7 @@ let cookies (r : 'a t) = Cookie.read_set_cookies r.header
 
 (* Response.ProtoAtLeast. *)
 let proto_at_least (r : 'a t) major minor =
-  r.proto_major > major || (r.proto_major = major && r.proto_minor >= minor)
+  Httpg_base.Protocol.at_least r.proto major minor
 
 (* Response.Location: the "Location" header resolved against the request URL.
    Returns None when no Location header is present (Go's ErrNoLocation). *)

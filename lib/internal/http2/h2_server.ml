@@ -814,9 +814,7 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
         {
           sreq_meth = Httpg_base.Method.of_string meth;
           sreq_url = url;
-          sreq_proto = "HTTP/2.0";
-          sreq_proto_major = 2;
-          sreq_proto_minor = 0;
+          sreq_proto = Httpg_base.Protocol.Http20;
           sreq_header = header;
           sreq_body = Body.Empty;
           sreq_content_length = content_length;

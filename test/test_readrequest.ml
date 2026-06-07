@@ -21,9 +21,11 @@ let baseline () =
   in
   let r = read raw in
   Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
-  Alcotest.(check string) "proto" "HTTP/1.1" r.proto;
-  Alcotest.(check int) "major" 1 r.proto_major;
-  Alcotest.(check int) "minor" 1 r.proto_minor;
+  Alcotest.(check string)
+    "proto" "HTTP/1.1"
+    (Httpg_base.Protocol.to_string r.proto);
+  Alcotest.(check int) "major" 1 (Httpg_base.Protocol.major r.proto);
+  Alcotest.(check int) "minor" 1 (Httpg_base.Protocol.minor r.proto);
   Alcotest.(check string) "host" "www.techcrunch.com" r.host;
   Alcotest.(check string)
     "request_uri" "http://www.techcrunch.com/" r.request_uri;
@@ -93,8 +95,10 @@ let http10 () =
     "GET /index.html HTTP/1.0\r\nHost: foo.com\r\nContent-Length: 3\r\n\r\nabc"
   in
   let r = read raw in
-  Alcotest.(check string) "proto" "HTTP/1.0" r.proto;
-  Alcotest.(check int) "minor" 0 r.proto_minor;
+  Alcotest.(check string)
+    "proto" "HTTP/1.0"
+    (Httpg_base.Protocol.to_string r.proto);
+  Alcotest.(check int) "minor" 0 (Httpg_base.Protocol.minor r.proto);
   Alcotest.(check bool) "close (1.0 default)" true r.close;
   Alcotest.(check string) "body" "abc" (body_of r)
 

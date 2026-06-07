@@ -198,8 +198,7 @@ let test_parse_content_length_result () =
   Hashtbl.replace h "Content-Length" [ "5"; "6" ];
   match
     Transfer.fix_length ~is_response:false ~status:200
-      ~request_method:Httpg_base.Method.Post
-      ~header:h ~chunked:false
+      ~request_method:Httpg_base.Method.Post ~header:h ~chunked:false
   with
   | Error (Transfer.Chunk _) ->
       Alcotest.(check pass) "conflicting CL -> Error (Chunk _)" () ()
@@ -299,8 +298,7 @@ let test_fix_length () =
   Hashtbl.replace hc "Content-Length" [ "5"; "6" ];
   match
     Transfer.fix_length ~is_response:false ~status:200
-      ~request_method:Httpg_base.Method.Post
-      ~header:hc ~chunked:false
+      ~request_method:Httpg_base.Method.Post ~header:hc ~chunked:false
   with
   | Ok n -> Alcotest.failf "conflicting CL = %Ld; want error" n
   | Error (Transfer.Chunk _) ->
@@ -362,8 +360,8 @@ let test_fix_trailer () =
 let test_write_body_chunked () =
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(Body.of_string "hello")
-      ~content_length:(-1L) ~transfer_encoding:[ "chunked" ] ()
+      ~body:(Body.of_string "hello") ~content_length:(-1L)
+      ~transfer_encoding:[ "chunked" ] ()
   in
   let out = with_output_string (fun w -> Transfer.write_body w tw) in
   Alcotest.(check string) "chunked write_body" "5\r\nhello\r\n0\r\n\r\n" out
@@ -371,8 +369,7 @@ let test_write_body_chunked () =
 let test_write_body_fixed () =
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(Body.of_string "hello")
-      ~content_length:5L ~transfer_encoding:[] ()
+      ~body:(Body.of_string "hello") ~content_length:5L ~transfer_encoding:[] ()
   in
   let out = with_output_string (fun w -> Transfer.write_body w tw) in
   Alcotest.(check string) "fixed-length write_body" "hello" out
@@ -380,8 +377,7 @@ let test_write_body_fixed () =
 let test_write_body_length_mismatch () =
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(Body.of_string "hello")
-      ~content_length:3L ~transfer_encoding:[] ()
+      ~body:(Body.of_string "hello") ~content_length:3L ~transfer_encoding:[] ()
   in
   match with_output_string (fun w -> Transfer.write_body w tw) with
   | _ -> Alcotest.fail "expected ContentLength mismatch error"
@@ -402,8 +398,8 @@ let test_write_body_chunked_stream () =
   let chunks = [ "alpha"; "beta"; "gamma" ] in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(stream_body chunks)
-      ~content_length:(-1L) ~transfer_encoding:[ "chunked" ] ()
+      ~body:(stream_body chunks) ~content_length:(-1L)
+      ~transfer_encoding:[ "chunked" ] ()
   in
   let out = with_output_string (fun w -> Transfer.write_body w tw) in
   Alcotest.(check string)
@@ -419,8 +415,8 @@ let test_write_body_fixed_stream () =
   let total = String.length (String.concat "" chunks) in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(stream_body chunks)
-      ~content_length:(Int64.of_int total) ~transfer_encoding:[] ()
+      ~body:(stream_body chunks) ~content_length:(Int64.of_int total)
+      ~transfer_encoding:[] ()
   in
   let out = with_output_string (fun w -> Transfer.write_body w tw) in
   Alcotest.(check string)
@@ -434,8 +430,7 @@ let test_write_body_fixed_stream_mismatch () =
   in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Put
-      ~body:(stream_body chunks)
-      ~content_length:20L ~transfer_encoding:[] ()
+      ~body:(stream_body chunks) ~content_length:20L ~transfer_encoding:[] ()
   in
   match with_output_string (fun w -> Transfer.write_body w tw) with
   | _ -> Alcotest.fail "expected ContentLength mismatch error"
@@ -452,8 +447,7 @@ let test_read_transfer_chunked () =
       header = h;
       status_code = Httpg_base.Status.Ok;
       request_method = Httpg_base.Method.Get;
-      proto_major = 1;
-      proto_minor = 1;
+      proto = Httpg_base.Protocol.Http11;
       close = false;
     }
   in
@@ -479,8 +473,7 @@ let test_read_transfer_content_length () =
       header = h;
       status_code = Httpg_base.Status.Ok;
       request_method = Httpg_base.Method.Post;
-      proto_major = 1;
-      proto_minor = 1;
+      proto = Httpg_base.Protocol.Http11;
       close = false;
     }
   in
@@ -505,8 +498,7 @@ let test_read_transfer_bad_chunk () =
       header;
       status_code = Httpg_base.Status.Ok;
       request_method = Httpg_base.Method.Post;
-      proto_major = 1;
-      proto_minor = 1;
+      proto = Httpg_base.Protocol.Http11;
       close = false;
     }
   in
@@ -553,8 +545,7 @@ let test_chunked_auto_select_post () =
   let body = stream_of_list [ "hello"; " world" ] in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Post ~body
-      ~content_length:(-1L)
-      ~transfer_encoding:[] ()
+      ~content_length:(-1L) ~transfer_encoding:[] ()
   in
   Alcotest.(check (list string))
     "POST cl<0 no-TE -> chunked auto-selected" [ "chunked" ]
@@ -574,8 +565,7 @@ let test_chunked_auto_select_get_empty () =
   let body = stream_of_list [] in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Get ~body
-      ~content_length:(-1L)
-      ~transfer_encoding:[] ()
+      ~content_length:(-1L) ~transfer_encoding:[] ()
   in
   Alcotest.(check (list string))
     "GET empty body -> no chunking" [] tw.Transfer.tw_transfer_encoding;
@@ -589,8 +579,7 @@ let test_chunked_auto_select_get_nonempty () =
   let body = stream_of_list [ "ab"; "cd" ] in
   let tw =
     Transfer.make_transfer_writer ~method_:Httpg_base.Method.Get ~body
-      ~content_length:(-1L)
-      ~transfer_encoding:[] ()
+      ~content_length:(-1L) ~transfer_encoding:[] ()
   in
   Alcotest.(check (list string))
     "GET non-empty body -> chunked" [ "chunked" ]

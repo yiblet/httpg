@@ -9,12 +9,15 @@ let () =
     else []
   in
   (* [`Slow]-tagged tests are skipped unless HTTPG_SLOW=1 (see Test_harness). *)
-  Alcotest.run ~quick_only:(not Test_harness.run_slow) "httpg"
+  Alcotest.run
+    ~quick_only:(not Test_harness.run_slow)
+    "httpg"
     ([
        ("Header", Test_header.tests);
        ("Cookie", Test_cookie.tests);
        ("Http_time", Test_http_time.tests);
        ("Method", Test_method.tests);
+       ("Protocol", Test_protocol.tests);
        ("Status", Test_status.tests);
        ("Values", Test_values.tests);
        ("Ascii", Test_ascii.tests);

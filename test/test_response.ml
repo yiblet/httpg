@@ -14,7 +14,9 @@ let http10_close () =
   let r = read raw in
   Alcotest.(check string) "status" "200 OK" r.status;
   Alcotest.(check int) "code" 200 (Httpg_base.Status.to_int r.status_code);
-  Alcotest.(check string) "proto" "HTTP/1.0" r.proto;
+  Alcotest.(check string)
+    "proto" "HTTP/1.0"
+    (Httpg_base.Protocol.to_string r.proto);
   Alcotest.(check bool) "close" true r.close;
   Alcotest.(check string) "content_length" "-1" (i64 r.content_length);
   Alcotest.(check string) "body" "Body here\n" (body_of r)
@@ -70,9 +72,7 @@ let location () =
     {
       Httpg.Request.meth = Httpg_base.Method.Get;
       url = Uri.of_string "http://example.com/from";
-      proto = "HTTP/1.1";
-      proto_major = 1;
-      proto_minor = 1;
+      proto = Httpg_base.Protocol.Http11;
       header = Httpg.Header.create ();
       body = Httpg.Body.Empty;
       content_length = 0L;

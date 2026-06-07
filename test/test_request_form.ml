@@ -24,9 +24,7 @@ let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
   {
     Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;
-    proto = "HTTP/1.1";
-    proto_major = 1;
-    proto_minor = 1;
+    proto = Httpg_base.Protocol.Http11;
     header;
     body = Body.of_string body;
     content_length = Int64.of_int (String.length body);
@@ -143,9 +141,7 @@ let parse_form_unknown_content_type () =
       {
         Request.meth = Httpg_base.Method.Post;
         url = Uri.of_string "http://x/";
-        proto = "HTTP/1.1";
-        proto_major = 1;
-        proto_minor = 1;
+        proto = Httpg_base.Protocol.Http11;
         header;
         body = Body.of_string "body";
         content_length = 4L;

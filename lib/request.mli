@@ -27,9 +27,8 @@ type 'body t = {
   mutable meth : Httpg_base.Method.t;
       (** Go [Method]; [Custom ""] means GET for client requests *)
   mutable url : Uri.t;  (** Go [URL] (a [*url.URL] modeled as [Uri.t]) *)
-  mutable proto : string;  (** e.g. "HTTP/1.0" *)
-  mutable proto_major : int;
-  mutable proto_minor : int;
+  mutable proto : Httpg_base.Protocol.t;
+      (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;
   mutable body : 'body;
   mutable content_length : int64;  (** -1 means unknown *)

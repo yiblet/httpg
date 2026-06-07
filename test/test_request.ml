@@ -55,9 +55,7 @@ let dummy_req () : Httpg.Body.t Httpg.Request.t =
   {
     Httpg.Request.meth = Httpg_base.Method.Get;
     url = Uri.of_string "http://example.com/";
-    proto = "HTTP/1.1";
-    proto_major = 1;
-    proto_minor = 1;
+    proto = Httpg_base.Protocol.Http11;
     header = Httpg.Header.create ();
     body = Httpg.Body.Empty;
     content_length = 0L;

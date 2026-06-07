@@ -21,7 +21,8 @@ let recorder_basic () =
         w.write "hello body")
   in
   let res = R.result rec_ in
-  Alcotest.(check int) "result.status_code" 201
+  Alcotest.(check int)
+    "result.status_code" 201
     (Httpg_base.Status.to_int res.status_code);
   Alcotest.(check string) "result.status" "201 Created" res.status;
   Alcotest.(check string)
@@ -34,7 +35,8 @@ let default_200 () =
   let rec_ = run (fun _w -> ()) in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "" (R.body_string rec_);
-  Alcotest.(check int) "result status_code" 200
+  Alcotest.(check int)
+    "result status_code" 200
     (Httpg_base.Status.to_int (R.result rec_).status_code)
 
 (* "first code only" — first WriteHeader wins. *)
