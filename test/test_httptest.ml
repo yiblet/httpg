@@ -17,11 +17,12 @@ let recorder_basic () =
   let rec_ =
     run (fun w ->
         Header.set (w.header ()) "X-Custom" "yes";
-        w.write_header 201;
+        w.write_header Httpg_base.Status.Created;
         w.write "hello body")
   in
   let res = R.result rec_ in
-  Alcotest.(check int) "result.status_code" 201 res.status_code;
+  Alcotest.(check int) "result.status_code" 201
+    (Httpg_base.Status.to_int res.status_code);
   Alcotest.(check string) "result.status" "201 Created" res.status;
   Alcotest.(check string)
     "result header X-Custom" "yes"
@@ -33,14 +34,15 @@ let default_200 () =
   let rec_ = run (fun _w -> ()) in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "" (R.body_string rec_);
-  Alcotest.(check int) "result status_code" 200 (R.result rec_).status_code
+  Alcotest.(check int) "result status_code" 200
+    (Httpg_base.Status.to_int (R.result rec_).status_code)
 
 (* "first code only" — first WriteHeader wins. *)
 let first_code_only () =
   let rec_ =
     run (fun w ->
-        w.write_header 201;
-        w.write_header 202;
+        w.write_header Httpg_base.Status.Created;
+        w.write_header Httpg_base.Status.Accepted;
         w.write "hi")
   in
   Alcotest.(check int) "code" 201 (R.code rec_);
@@ -51,8 +53,8 @@ let implicit_write_header () =
   let rec_ =
     run (fun w ->
         w.write "hi first";
-        w.write_header 201;
-        w.write_header 202)
+        w.write_header Httpg_base.Status.Created;
+        w.write_header Httpg_base.Status.Accepted)
   in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check string) "body" "hi first" (R.body_string rec_);
@@ -74,7 +76,7 @@ let flush_sets_flushed () =
   let rec_ =
     run (fun w ->
         w.flush ();
-        w.write_header 201)
+        w.write_header Httpg_base.Status.Created)
   in
   Alcotest.(check int) "code" 200 (R.code rec_);
   Alcotest.(check bool) "flushed true" true rec_.flushed;
@@ -105,7 +107,7 @@ let header_snapshot () =
     run (fun w ->
         let h = w.header () in
         Header.set h "Key" "correct";
-        w.write_header 200;
+        w.write_header Httpg_base.Status.Ok;
         Header.set h "Key" "incorrect")
   in
   Alcotest.(check string)

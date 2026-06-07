@@ -27,7 +27,7 @@ let http_time_now () =
    first use); [flush] forces the framing decision and pushes buffered bytes. *)
 type response_writer = {
   header : unit -> Header.t;
-  write_header : int -> unit;
+  write_header : Httpg_base.Status.t -> unit;
   write : string -> unit;
   flush : unit -> unit;
 }
@@ -52,7 +52,7 @@ let error w msg code =
   w.write_header code;
   fprintln w msg
 
-let not_found w _r = error w "404 page not found" Status.status_not_found
+let not_found w _r = error w "404 page not found" Httpg_base.Status.NotFound
 let not_found_handler () = handler_func not_found
 
 (* Go's htmlEscape (htmlReplacer). *)
@@ -123,7 +123,7 @@ let redirect w (r : Body.t Request.t) url code =
   w.write_header code;
   if (not had_ct) && r.meth = "GET" then
     let body =
-      "<a href=\"" ^ html_escape url ^ "\">" ^ Status.status_text code
+      "<a href=\"" ^ html_escape url ^ "\">" ^ Httpg_base.Status.to_string code
       ^ "</a>.\n"
     in
     fprintln w body
@@ -262,8 +262,8 @@ let find_handler_finish mux ~host ~path m =
             let hd = w.header () in
             Header.set hd "Allow" (String.concat ", " allowed);
             error w
-              (Status.status_text Status.status_method_not_allowed)
-              Status.status_method_not_allowed)
+              (Httpg_base.Status.to_string Httpg_base.Status.MethodNotAllowed)
+              Httpg_base.Status.MethodNotAllowed)
       else not_found_handler ()
 
 (* Go's findHandler. *)
@@ -279,7 +279,7 @@ let find_handler mux (r : Body.t Request.t) =
         ~try_redirect:true ~raw_query
     in
     match redir with
-    | Some u -> redirect_handler u Status.status_temporary_redirect
+    | Some u -> redirect_handler u Httpg_base.Status.TemporaryRedirect
     | None ->
         let m, _ =
           match_or_redirect mux ~host:r.host ~method_:r.meth ~path:escaped_path
@@ -295,11 +295,11 @@ let find_handler mux (r : Body.t Request.t) =
         ~raw_query
     in
     match redir with
-    | Some u -> redirect_handler u Status.status_temporary_redirect
+    | Some u -> redirect_handler u Httpg_base.Status.TemporaryRedirect
     | None ->
         if path <> escaped_path then begin
           let u = if raw_query <> "" then path ^ "?" ^ raw_query else path in
-          redirect_handler u Status.status_temporary_redirect
+          redirect_handler u Httpg_base.Status.TemporaryRedirect
         end
         else find_handler_finish mux ~host ~path m
   end
@@ -309,7 +309,7 @@ let serve_mux_serve_http mux w (r : Body.t Request.t) =
   if r.request_uri = "*" then begin
     if Request.proto_at_least r 1 1 then
       Header.set (w.header ()) "Connection" "close";
-    w.write_header Status.status_bad_request
+    w.write_header Httpg_base.Status.BadRequest
   end
   else (find_handler mux r).serve_http w r
 
@@ -323,9 +323,10 @@ let excluded_headers = [ "Content-Length"; "Transfer-Encoding"; "Connection" ]
 
 (* bodyAllowedForStatus: 1xx, 204, 304 carry no body. *)
 let body_allowed_for_status status =
-  if status >= 100 && status <= 199 then false
-  else if status = Status.status_no_content then false
-  else if status = Status.status_not_modified then false
+  let code = Httpg_base.Status.to_int status in
+  if code >= 100 && code <= 199 then false
+  else if code = 204 then false
+  else if code = 304 then false
   else true
 
 (* Go's bufferBeforeChunkingSize (server.go:342): the response is buffered into a
@@ -345,7 +346,7 @@ let buffer_before_chunking_size = 2048
      Connection: close, raw bytes, close at EOF. *)
 let serve_one w (r : Body.t Request.t) (h : handler) : bool =
   let header = Header.create () in
-  let status = ref Status.status_ok in
+  let status = ref Httpg_base.Status.Ok in
   let wrote_header = ref false in
   let headers_emitted = ref false in
   let chunking = ref false in
@@ -427,11 +428,12 @@ let serve_one w (r : Body.t Request.t) (h : handler) : bool =
       else close_after_reply := true
       end;
     let keep_alive = not !close_after_reply in
-    let status_text = Status.status_text code in
+    let status_text = Httpg_base.Status.to_string code in
+    let code_int = Httpg_base.Status.to_int code in
     let status_line =
       if status_text = "" then
-        Printf.sprintf "%s %03d status code %d\r\n" proto code code
-      else Printf.sprintf "%s %03d %s\r\n" proto code status_text
+        Printf.sprintf "%s %03d status code %d\r\n" proto code_int code_int
+      else Printf.sprintf "%s %03d %s\r\n" proto code_int status_text
     in
     let out = Buffer.create 256 in
     Buffer.add_string out status_line;
@@ -459,7 +461,7 @@ let serve_one w (r : Body.t Request.t) (h : handler) : bool =
   let ensure_status () =
     if not !wrote_header then begin
       wrote_header := true;
-      status := Status.status_ok
+      status := Httpg_base.Status.Ok
     end
   in
   let rw =
@@ -638,10 +640,11 @@ let write_read_error_response w (e : Io.error) : unit =
   in
   match e with
   | Io.Transfer (Transfer.Unsupported_transfer_encoding _) ->
-      let code = Status.status_not_implemented in
+      let code = Httpg_base.Status.NotImplemented in
       write
-        (Printf.sprintf "HTTP/1.1 %d %s%sUnsupported transfer encoding" code
-           (Status.status_text code) error_headers)
+        (Printf.sprintf "HTTP/1.1 %d %s%sUnsupported transfer encoding"
+           (Httpg_base.Status.to_int code)
+           (Httpg_base.Status.to_string code) error_headers)
   | Io.Unexpected_eof -> () (* Common net read error: don't reply. *)
   | Io.Request_too_large ->
       (* errTooLarge -> 431 + close (server.go:2053-2062). *)
@@ -660,12 +663,13 @@ let write_read_error_response w (e : Io.error) : unit =
 (* Go's response.sendExpectationFailed (server.go:2236-2252): a non-100-continue
    Expect gets 417 + Connection: close, handler NOT run. *)
 let write_expectation_failed w : unit =
-  let code = Status.status_expectation_failed in
-  let body = Printf.sprintf "%d %s" code (Status.status_text code) in
+  let code = Httpg_base.Status.ExpectationFailed in
+  let code_int = Httpg_base.Status.to_int code in
+  let body = Printf.sprintf "%d %s" code_int (Httpg_base.Status.to_string code) in
   try
     Eio.Buf_write.string w
-      (Printf.sprintf "HTTP/1.1 %d %s%s%s" code (Status.status_text code)
-         error_headers body);
+      (Printf.sprintf "HTTP/1.1 %d %s%s%s" code_int
+         (Httpg_base.Status.to_string code) error_headers body);
     Eio.Buf_write.flush w
   with _ -> ()
 
@@ -955,7 +959,8 @@ let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
   let w =
     {
       header = h2w.Httpg_http2.Api.rw_header;
-      write_header = h2w.rw_write_header;
+      write_header =
+        (fun code -> h2w.rw_write_header (Httpg_base.Status.to_int code));
       write = h2w.rw_write;
       flush = h2w.rw_flush;
     }

@@ -37,7 +37,7 @@ let test_get () =
     let req = mk_request ~meth:"GET" ~path:"/" () in
     let resp = H2_transport.round_trip cc req in
     let body = Api.Body.read_all resp.cres_body in
-    (resp.cres_status_code, body)
+    ((Httpg_base.Status.to_int resp.cres_status_code), body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -56,7 +56,7 @@ let test_post_echo () =
     in
     let resp = H2_transport.round_trip cc req in
     let body = Api.Body.read_all resp.cres_body in
-    (resp.cres_status_code, body)
+    ((Httpg_base.Status.to_int resp.cres_status_code), body)
   in
   let code, body = run ~handler client in
   Alcotest.(check int) "status 200" 200 code;
@@ -74,7 +74,7 @@ let test_concurrent () =
       let req = mk_request ~meth:"GET" ~path () in
       let resp = H2_transport.round_trip cc req in
       let body = Api.Body.read_all resp.cres_body in
-      (resp.cres_status_code, body)
+      ((Httpg_base.Status.to_int resp.cres_status_code), body)
     in
     Eio.Fiber.pair (fun () -> do_rt "/a") (fun () -> do_rt "/b")
   in
@@ -104,7 +104,7 @@ let test_many_concurrent_respects_max () =
         let resp =
           H2_transport.round_trip cc (mk_request ~meth:"GET" ~path ())
         in
-        (resp.cres_status_code, Api.Body.read_all resp.cres_body)
+        ((Httpg_base.Status.to_int resp.cres_status_code), Api.Body.read_all resp.cres_body)
       in
       Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1))
     in
@@ -156,7 +156,7 @@ let test_early_return_undrained_no_leak () =
         }
       in
       let resp = H2_transport.round_trip ~sw cc req in
-      Alcotest.(check int) "status 200" 200 resp.cres_status_code;
+      Alcotest.(check int) "status 200" 200 (Httpg_base.Status.to_int resp.cres_status_code);
       (* return WITHOUT reading resp.cres_body; leaving [sw] runs cleanup. *)
       ()
     done;
@@ -229,7 +229,7 @@ let test_slot_accounting_free_after_body () =
     let resp1 =
       H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/a" ())
     in
-    Alcotest.(check int) "status1 200" 200 resp1.cres_status_code;
+    Alcotest.(check int) "status1 200" 200 (Httpg_base.Status.to_int resp1.cres_status_code);
     (* pull the body chunk(s) WITHOUT reading EOF — this forces the read loop to
        have processed the DATA+END_STREAM frame (peer half-close), so the stream
        is half-closed but, under the new accounting, its slot is held until the
@@ -265,7 +265,7 @@ let test_slot_accounting_free_after_body () =
         let resp2 =
           H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/b" ())
         in
-        c2 := resp2.cres_status_code;
+        c2 := (Httpg_base.Status.to_int resp2.cres_status_code);
         b2 := Api.Body.read_all resp2.cres_body;
         done2 := true)
       (fun () ->

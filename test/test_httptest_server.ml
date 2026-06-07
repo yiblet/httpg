@@ -21,7 +21,7 @@ let server_get () =
           (fun () ->
             let c = Ts.client s in
             let resp = Client.get ~sw c (Ts.url s ^ "/foo") in
-            (resp.Response.status_code, Body.read_all resp.Response.body)))
+            ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body)))
   in
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "body is request path" "/foo" body
@@ -37,7 +37,7 @@ let server_tls () =
           (fun () ->
             let c = Ts.client s in
             let resp = Client.get ~sw c (Ts.url s) in
-            ( resp.Response.status_code,
+            ( (Httpg_base.Status.to_int resp.Response.status_code),
               Body.read_all resp.Response.body,
               Ts.url s )))
   in
@@ -68,7 +68,7 @@ let server_close () =
                 false)
           with _ -> true
         in
-        (resp.Response.status_code, refused))
+        ((Httpg_base.Status.to_int resp.Response.status_code), refused))
   in
   Alcotest.(check int) "served 200 before close" 200 pre_status;
   Alcotest.(check bool) "connect refused after close" true refused

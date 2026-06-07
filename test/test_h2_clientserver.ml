@@ -50,9 +50,9 @@ let test_clientserver_roundtrip () =
             (Body.String "ping-pong")
         in
         let post_body = Body.read_all post_resp.Response.body in
-        ( get_resp.Response.status_code,
+        ( (Httpg_base.Status.to_int get_resp.Response.status_code),
           get_body,
-          post_resp.Response.status_code,
+          (Httpg_base.Status.to_int post_resp.Response.status_code),
           post_body,
           Transport.h2_round_trip_count transport ))
   in
@@ -73,7 +73,7 @@ let test_http11_fallback () =
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let resp = Client.get ~sw client (base ^ "/hello") in
         let body = Body.read_all resp.Response.body in
-        ( resp.Response.status_code,
+        ( (Httpg_base.Status.to_int resp.Response.status_code),
           body,
           Transport.h2_round_trip_count transport ))
   in
@@ -109,7 +109,7 @@ let test_concurrent_multiplexing_one_conn () =
                 (Body.String "ping")
             else Client.get ~sw client (base ^ path)
           in
-          (resp.Response.status_code, Body.read_all resp.Response.body, i)
+          ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body, i)
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,
@@ -153,7 +153,7 @@ let test_h2_dead_pooled_conn_redials_and_retries () =
             Transport.close_pooled_h2_conn transport ~host:"127.0.0.1" ~port);
         let r2 = Client.get ~sw client (base ^ "/b") in
         let b2 = Body.read_all r2.Response.body in
-        ( r2.Response.status_code,
+        ( (Httpg_base.Status.to_int r2.Response.status_code),
           b2,
           (d1, Transport.dial_count transport),
           !fired ))
@@ -248,7 +248,7 @@ let test_h2_pool_scales_out_when_saturated () =
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let do_rt i =
           let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
-          (resp.Response.status_code, Body.read_all resp.Response.body)
+          ((Httpg_base.Status.to_int resp.Response.status_code), Body.read_all resp.Response.body)
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,
@@ -277,7 +277,7 @@ let test_h2_pool_single_conn_below_saturation () =
         let do_rt i =
           let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
           let _ = Body.read_all resp.Response.body in
-          resp.Response.status_code
+          (Httpg_base.Status.to_int resp.Response.status_code)
         in
         let codes = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,

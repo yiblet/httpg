@@ -108,7 +108,7 @@ val parse_transfer_encoding :
 type message = {
   is_response : bool;
   header : Header.t;
-  status_code : int;
+  status_code : Httpg_base.Status.t;
   request_method : string;
   proto_major : int;
   proto_minor : int;

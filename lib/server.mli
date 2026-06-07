@@ -7,7 +7,7 @@
 
 type response_writer = {
   header : unit -> Header.t;
-  write_header : int -> unit;
+  write_header : Httpg_base.Status.t -> unit;
   write : string -> unit;
   flush : unit -> unit;
 }
@@ -32,7 +32,7 @@ type handler = { serve_http : response_writer -> Body.t Request.t -> unit }
 val handler_func : (response_writer -> Body.t Request.t -> unit) -> handler
 (** Go's [HandlerFunc]: adapt a function to a {!handler}. *)
 
-val error : response_writer -> string -> int -> unit
+val error : response_writer -> string -> Httpg_base.Status.t -> unit
 (** Go's [Error]: reply with a plain-text error message and status [code],
     resetting Content-Type, deleting Content-Length and setting the nosniff
     option. *)
@@ -43,11 +43,12 @@ val not_found : response_writer -> Body.t Request.t -> unit
 val not_found_handler : unit -> handler
 (** Go's [NotFoundHandler]. *)
 
-val redirect : response_writer -> Body.t Request.t -> string -> int -> unit
+val redirect :
+  response_writer -> Body.t Request.t -> string -> Httpg_base.Status.t -> unit
 (** Go's [Redirect]: reply with a redirect to [url] (which may be relative to
     the request path) using status [code]. *)
 
-val redirect_handler : string -> int -> handler
+val redirect_handler : string -> Httpg_base.Status.t -> handler
 (** Go's [RedirectHandler]. *)
 
 (* ---- ServeMux ---- *)

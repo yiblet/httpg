@@ -42,7 +42,7 @@ let create ~net ?clock ?transport ?(check_redirect = default_check_redirect)
 
 (* Go's redirectBehavior: (redirect_method, should_redirect, include_body). *)
 let redirect_behavior ~req_method (resp : Body.t Response.t) =
-  match resp.Response.status_code with
+  match resp.Response.status_code |> Httpg_base.Status.to_int with
   | 301 | 302 | 303 ->
       let redirect_method =
         if req_method <> "GET" && req_method <> "HEAD" then "GET"

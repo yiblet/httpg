@@ -76,7 +76,7 @@ val contains_dot_dot : string -> bool
 (** Go's [containsDotDot]: whether the '/'- or '\'-separated path [v] has a
     [".."] element. *)
 
-val to_http_error : error -> string * int
+val to_http_error : error -> string * Httpg_base.Status.t
 (** Go's [toHTTPError]: map an open/stat {!error} to a (message, status) pair —
     {!Not_exist}/{!Invalid_unsafe_path} → ["404 page not found"]/404,
     {!Permission} → ["403 Forbidden"]/403, else

@@ -62,7 +62,8 @@ module Response_recorder = struct
   let to_response_writer (t : t) : Server.response_writer =
     {
       header = (fun () -> t.header);
-      write_header = (fun code -> write_header_code t code);
+      write_header =
+        (fun code -> write_header_code t (Httpg_base.Status.to_int code));
       write = (fun s -> write t s);
       flush = (fun () -> flush t);
     }
@@ -88,9 +89,15 @@ module Response_recorder = struct
           t.snap_header <- Some h;
           h
     in
-    let status_code = if t.code = 0 then 200 else t.code in
+    let code_int = if t.code = 0 then 200 else t.code in
+    let status_code =
+      match Httpg_base.Status.of_int_result code_int with
+      | Ok s -> s
+      | Error _ -> Httpg_base.Status.Custom code_int
+    in
     let status =
-      Printf.sprintf "%03d %s" status_code (Status.status_text status_code)
+      Printf.sprintf "%03d %s" code_int
+        (Httpg_base.Status.to_string status_code)
     in
     let content_length =
       parse_content_length (Header.get snap "Content-Length")

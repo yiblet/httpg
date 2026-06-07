@@ -335,7 +335,7 @@ let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
 type message = {
   is_response : bool;
   header : Header.t;
-  status_code : int; (* responses; requests use 200 *)
+  status_code : Httpg_base.Status.t; (* responses; requests use 200 *)
   request_method : string;
   proto_major : int;
   proto_minor : int;
@@ -365,7 +365,7 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
     if msg.proto_major = 0 && msg.proto_minor = 0 then (1, 1)
     else (msg.proto_major, msg.proto_minor)
   in
-  let status = msg.status_code in
+  let status = Httpg_base.Status.to_int msg.status_code in
   let is_response = msg.is_response in
 
   (* Close: for responses it's shouldClose-derived (caller passes it via

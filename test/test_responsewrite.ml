@@ -38,7 +38,10 @@ let resp ?(status = "") ~status_code ?(proto_major = 1) ?(proto_minor = 1)
     () : Httpg.Body.t Httpg.Response.t =
   {
     Httpg.Response.status;
-    status_code;
+    status_code =
+      (match Httpg_base.Status.of_int_result status_code with
+      | Ok s -> s
+      | Error _ -> Httpg_base.Status.Custom status_code);
     proto = Printf.sprintf "HTTP/%d.%d" proto_major proto_minor;
     proto_major;
     proto_minor;

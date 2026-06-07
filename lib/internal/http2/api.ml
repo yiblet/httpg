@@ -82,9 +82,10 @@ type client_request = {
 }
 
 (* A ClientResponse is a Response produced by the HTTP/2 client. The status TEXT
-   (Status.status_text) is applied by the shim, so only the code travels here. *)
+   (Httpg_base.Status.to_string) is applied by the shim, so only the code
+   travels here. *)
 type client_response = {
-  cres_status_code : int;
+  cres_status_code : Httpg_base.Status.t;
   cres_content_length : int64;
   cres_uncompressed : bool;
   cres_header : header;

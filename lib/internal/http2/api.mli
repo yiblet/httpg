@@ -44,7 +44,7 @@ type client_request = {
 }
 
 type client_response = {
-  cres_status_code : int;
+  cres_status_code : Httpg_base.Status.t;
   cres_content_length : int64;
   cres_uncompressed : bool;
   cres_header : header;

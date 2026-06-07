@@ -354,7 +354,7 @@ let round_trip_over pc (req : Body.t Request.t) : Body.t Response.t =
 (* ---- net/http <-> http2 translation shim (Go's http2.go: http2RoundTrip) ----
    The HTTP/2 stack works in its own decoupled {!Api} types so it never names the
    public Request/Response/Body types; these convert across the boundary, and
-   [Status.status_text] is applied client-side (as Go does). *)
+   [Httpg_base.Status.to_string] is applied client-side (as Go does). *)
 
 let api_body_of_body (b : Body.t) : Api.Body.t =
   match b with
@@ -384,9 +384,9 @@ let client_request_of_request (req : Body.t Request.t) : Api.client_request =
 let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
   {
     Response.status =
-      string_of_int cr.cres_status_code
+      string_of_int (Httpg_base.Status.to_int cr.cres_status_code)
       ^ " "
-      ^ Status.status_text cr.cres_status_code;
+      ^ Httpg_base.Status.to_string cr.cres_status_code;
     status_code = cr.cres_status_code;
     proto = "HTTP/2.0";
     proto_major = 2;

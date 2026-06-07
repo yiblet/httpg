@@ -376,7 +376,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           {
             Transfer.is_response = false;
             header;
-            status_code = 0;
+            status_code = Httpg_base.Status.Custom 0;
             request_method = meth;
             proto_major;
             proto_minor;
@@ -471,6 +471,11 @@ let read_response_raising ?(request : Body.t Request.t option)
       match Request.parse_http_version proto with
       | None -> raise (bad_string_error "malformed HTTP version" proto)
       | Some (proto_major, proto_minor) ->
+          let status_code =
+            match Httpg_base.Status.of_int_result status_code with
+            | Ok s -> s
+            | Error _ -> bad_status ()
+          in
           let header =
             try read_mime_header_raising ?limit r
             with e when e == request_too_large_sentinel ->
@@ -614,7 +619,7 @@ let write_request w r : (unit, error) result =
 
 let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
   let out = Eio.Buf_write.string w in
-  let itoa = string_of_int r.Response.status_code in
+  let itoa = string_of_int (Httpg_base.Status.to_int r.Response.status_code) in
   let text =
     if r.Response.status <> "" then begin
       (* Strip a leading "<code> " prefix to reduce stutter. *)
@@ -628,12 +633,14 @@ let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
       else r.Response.status
     end
     else
-      let st = Status.status_text r.Response.status_code in
+      let st = Httpg_base.Status.to_string r.Response.status_code in
       if st <> "" then st else "status code " ^ itoa
   in
   out
     (Printf.sprintf "HTTP/%d.%d %03d %s\r\n" r.Response.proto_major
-       r.Response.proto_minor r.Response.status_code text);
+       r.Response.proto_minor
+       (Httpg_base.Status.to_int r.Response.status_code)
+       text);
   (* Clone fields we may modify (r1). *)
   let content_length = ref r.Response.content_length in
   let body = ref r.Response.body in
@@ -676,7 +683,8 @@ let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
     Int64.compare !content_length 0L = 0
     && (not (Transfer.chunked r.Response.transfer_encoding))
     && (not content_length_already_sent)
-    && Transfer.body_allowed_for_status r.Response.status_code
+    && Transfer.body_allowed_for_status
+         (Httpg_base.Status.to_int r.Response.status_code)
   then out "Content-Length: 0\r\n";
   out "\r\n";
   Transfer.write_body w tw

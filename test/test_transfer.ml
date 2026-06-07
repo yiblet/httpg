@@ -440,7 +440,7 @@ let test_read_transfer_chunked () =
     {
       Transfer.is_response = true;
       header = h;
-      status_code = 200;
+      status_code = Httpg_base.Status.Ok;
       request_method = "GET";
       proto_major = 1;
       proto_minor = 1;
@@ -467,7 +467,7 @@ let test_read_transfer_content_length () =
     {
       Transfer.is_response = false;
       header = h;
-      status_code = 200;
+      status_code = Httpg_base.Status.Ok;
       request_method = "POST";
       proto_major = 1;
       proto_minor = 1;
@@ -493,7 +493,7 @@ let test_read_transfer_bad_chunk () =
     {
       Transfer.is_response = false;
       header;
-      status_code = 200;
+      status_code = Httpg_base.Status.Ok;
       request_method = "POST";
       proto_major = 1;
       proto_minor = 1;

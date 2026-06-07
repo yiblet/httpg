@@ -330,10 +330,15 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
               None)
     end
   in
+  let status =
+    match Httpg_base.Status.of_int_result status_code with
+    | Ok status -> status
+    | Error _ -> raise (Malformed_response "malformed status code")
+  in
   (* status text, proto, and request back-pointer are filled by the public
      Transport shim (Go's http2RoundTrip). *)
   {
-    Api.cres_status_code = status_code;
+    Api.cres_status_code = status;
     cres_content_length = content_length;
     cres_uncompressed = false;
     cres_header = header;
@@ -394,7 +399,9 @@ let process_headers cc (mf : F.meta_headers_frame) : unit =
         match build_response cc cs mf ~stream_ended with
         | exception e -> end_stream_error cc cs (Stream_aborted e)
         | res ->
-            let status_code = res.Api.cres_status_code in
+            let status_code =
+              res.Api.cres_status_code |> Httpg_base.Status.to_int
+            in
             if status_code >= 100 && status_code <= 199 then
               (* 1xx informational: ignore and await the real headers. *)
               cs.past_headers <- false

@@ -52,7 +52,7 @@ let etag_file_handler ~dir ~name ~etag =
       let fsys = Fs.dir dir in
       Eio.Switch.run @@ fun sw ->
       match fsys.Fs.open_ ~sw name with
-      | Error _ -> Server.error w "not found" 404
+      | Error _ -> Server.error w "not found" Httpg_base.Status.NotFound
       | Ok f ->
           Fun.protect ~finally:f.Fs.close (fun () ->
               let d = f.Fs.stat () in
@@ -68,7 +68,7 @@ let request_with_headers ~sw c url headers =
   let req = Client.make_request "GET" url in
   List.iter (fun (k, v) -> Header.set req.Request.header k v) headers;
   let resp = Client.do_ ~sw c req in
-  ( resp.Response.status_code,
+  ( (Httpg_base.Status.to_int resp.Response.status_code),
     Body.read_all resp.Response.body,
     resp.Response.header )
 

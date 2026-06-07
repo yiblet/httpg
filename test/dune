@@ -3,4 +3,4 @@
  ; lib .mli sources, so test_error_policy can sweep them at ../lib.
  (deps
   (glob_files_rec %{project_root}/lib/*.mli))
- (libraries httpg httpg_http2 alcotest eio eio_main str))
+ (libraries httpg httpg_base httpg_http2 alcotest eio eio_main str))

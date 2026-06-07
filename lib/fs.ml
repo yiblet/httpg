@@ -174,10 +174,10 @@ let dir (root : Eio.Fs.dir_ty Eio.Path.t) =
 
 let to_http_error = function
   | Not_exist | Invalid_unsafe_path ->
-      ("404 page not found", Status.status_not_found)
-  | Permission -> ("403 Forbidden", Status.status_forbidden)
+      ("404 page not found", Httpg_base.Status.NotFound)
+  | Permission -> ("403 Forbidden", Httpg_base.Status.Forbidden)
   | No_overlap | Invalid_range _ | Other _ ->
-      ("500 Internal Server Error", Status.status_internal_server_error)
+      ("500 Internal Server Error", Httpg_base.Status.InternalServerError)
 
 let local_redirect w (r : Body.t Request.t) new_path =
   let new_path =
@@ -187,7 +187,7 @@ let local_redirect w (r : Body.t Request.t) new_path =
   in
   let h = w.Server.header () in
   Header.set h "Location" new_path;
-  w.Server.write_header Status.status_moved_permanently
+  w.Server.write_header Httpg_base.Status.MovedPermanently
 
 (* ---- dirList ---- *)
 
@@ -214,7 +214,7 @@ let dir_list w (r : Body.t Request.t) (f : file) =
   match f.readdir () with
   | exception _ ->
       Server.error w "Error reading directory"
-        Status.status_internal_server_error
+        Httpg_base.Status.InternalServerError
   | entries ->
       let entries =
         List.sort (fun a b -> compare a.fi_name b.fi_name) entries
@@ -391,7 +391,7 @@ let write_not_modified w =
   Header.del h "Content-Length";
   Header.del h "Content-Encoding";
   if Header.get h "Etag" <> "" then Header.del h "Last-Modified";
-  w.Server.write_header Status.status_not_modified
+  w.Server.write_header Httpg_base.Status.NotModified
 
 (* Go checkPreconditions: evaluates request preconditions and reports whether a
    precondition resulted in 304/412. Returns [(done_, range_header)]. RFC 7232
@@ -403,7 +403,7 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
     if ch = Cond_none then check_if_unmodified_since r ~modtime else ch
   in
   if ch = Cond_false then begin
-    w.Server.write_header Status.status_precondition_failed;
+    w.Server.write_header Httpg_base.Status.PreconditionFailed;
     (true, "")
   end
   else
@@ -414,7 +414,7 @@ let check_preconditions w (r : Body.t Request.t) ~modtime =
           (true, "")
         end
         else begin
-          w.Server.write_header Status.status_precondition_failed;
+          w.Server.write_header Httpg_base.Status.PreconditionFailed;
           (true, "")
         end
     | Cond_none ->
@@ -633,7 +633,7 @@ let serve_full w (r : Body.t Request.t) ~h ~size ~read_window =
   Header.set h "Accept-Ranges" "bytes";
   if Header.get h "Content-Encoding" = "" then
     Header.set h "Content-Length" (Int64.to_string size);
-  w.Server.write_header Status.status_ok;
+  w.Server.write_header Httpg_base.Status.Ok;
   if r.Request.meth = "HEAD" then ()
   else stream_window w ~read_window ~start:0L ~length:size
 
@@ -665,15 +665,15 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
     | Error No_overlap ->
         Header.set h "Content-Range" (Printf.sprintf "bytes */%Ld" size);
         Server.error w "invalid range: failed to overlap"
-          Status.status_requested_range_not_satisfiable
+          Httpg_base.Status.RequestedRangeNotSatisfiable
     | Error (Invalid_range _) ->
         Server.error w "invalid range"
-          Status.status_requested_range_not_satisfiable
+          Httpg_base.Status.RequestedRangeNotSatisfiable
     | Error (Not_exist | Permission | Invalid_unsafe_path | Other _) ->
         (* parse_range only yields No_overlap / Invalid_range; the rest are
            unreachable here but keep the match exhaustive. *)
         Server.error w "invalid range"
-          Status.status_requested_range_not_satisfiable
+          Httpg_base.Status.RequestedRangeNotSatisfiable
     | Ok ranges -> (
         (* If the total range size exceeds the file, treat as no range (Go). *)
         let ranges = if sum_ranges_size ranges > size then [] else ranges in
@@ -684,7 +684,7 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
             (* single range → 206 + Content-Range *)
             Header.set h "Content-Range" (content_range ra size);
             Header.set h "Content-Length" (Int64.to_string ra.length);
-            w.Server.write_header Status.status_partial_content;
+            w.Server.write_header Httpg_base.Status.PartialContent;
             if r.Request.meth = "HEAD" then ()
             else stream_window w ~read_window ~start:ra.start ~length:ra.length
         | ranges ->
@@ -693,7 +693,7 @@ let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
             Header.set h "Content-Type"
               ("multipart/byteranges; boundary=" ^ multipart_boundary);
             Header.set h "Content-Length" (Int64.to_string send_size);
-            w.Server.write_header Status.status_partial_content;
+            w.Server.write_header Httpg_base.Status.PartialContent;
             if r.Request.meth = "HEAD" then ()
             else begin
               List.iteri
@@ -786,7 +786,7 @@ let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
             match redirected with
             | Some `NonDir ->
                 Server.error w "http: attempting to traverse a non-directory"
-                  Status.status_internal_server_error
+                  Httpg_base.Status.InternalServerError
             | Some (`Local target) -> local_redirect w r target
             | None ->
                 (* directory: redirect if no trailing slash, else index/list *)
