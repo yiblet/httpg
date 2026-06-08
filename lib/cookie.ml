@@ -77,29 +77,11 @@ let is_cookie_name_valid = is_token
 let trim_string = Httpg_base.Textproto.trim_string
 
 (* strings.Cut(s, sep): returns (before, after, found). *)
-let cut s sep =
-  match String.index_opt s sep with
-  | Some i ->
-      (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1), true)
-  | None -> (s, "", false)
-
-(* strings.Count(s, ";") *)
-let count_char s c =
-  let n = ref 0 in
-  String.iter (fun x -> if x = c then incr n) s;
-  !n
-
-(* strings.Split(s, ";") *)
-let split_char s c = String.split_on_char c s
+let cut = Httpg_base.Textproto.cut
 
 (* ascii.ToLower: returns (lowered, ok) where ok=false if s is not ASCII
    printable. *)
 let ascii_to_lower = Httpg_internal.Ascii.to_lower
-
-let contains_any s set =
-  let found = ref false in
-  String.iter (fun c -> if String.contains set c then found := true) s;
-  !found
 
 (* ---- cookie value bytes / sanitization ---- *)
 
@@ -132,7 +114,10 @@ let sanitize_or_warn valid v =
 
 let sanitize_cookie_value v ~quoted =
   let v = sanitize_or_warn valid_cookie_value_byte v in
-  if contains_any v " ," || quoted then "\"" ^ v ^ "\"" else v
+  (* strings.ContainsAny(v, " ,"). *)
+  if String.exists (fun c -> String.contains " ," c) v || quoted then
+    "\"" ^ v ^ "\""
+  else v
 
 let sanitize_cookie_path v = sanitize_or_warn valid_cookie_path_byte v
 
@@ -306,7 +291,8 @@ let parse_expires raw =
 (* ---- ParseSetCookie ---- *)
 
 let parse_set_cookie line =
-  let parts = split_char (trim_string line) ';' in
+  (* strings.Split(line, ";"). *)
+  let parts = String.split_on_char ';' (trim_string line) in
   match parts with
   | [ "" ] -> Error `Blank
   | [] -> Error `Blank
@@ -400,7 +386,13 @@ let read_cookies (h : Header.t) ~filter =
   if lines = [] then []
   else
     let cookie_count =
-      List.fold_left (fun acc line -> acc + count_char line ';' + 1) 0 lines
+      (* strings.Count(line, ";") + 1 per line. *)
+      List.fold_left
+        (fun acc line ->
+          acc
+          + String.fold_left (fun n c -> if c = ';' then n + 1 else n) 0 line
+          + 1)
+        0 lines
     in
     if not (cookie_num_within_max cookie_count) then []
     else

@@ -78,6 +78,16 @@ let trim_right s =
   done;
   String.sub s 0 !n
 
+(* strings.Cut(s, sep): split [s] around the first occurrence of [sep],
+   returning [(before, after, found)]. When [sep] is absent, returns
+   [(s, "", false)]. [sep] is a single byte here (every call site cuts on one
+   character). *)
+let cut s sep =
+  match String.index_opt s sep with
+  | Some i ->
+      (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1), true)
+  | None -> (s, "", false)
+
 (* Generic leading trim over a character set: strips every prefix byte that
    appears in [chars] (Go's [strings.TrimLeft]). *)
 let trim_left ~chars s =

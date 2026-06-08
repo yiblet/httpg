@@ -74,11 +74,7 @@ let query_unescape s =
 let query_escape s = Uri.pct_encode ~component:`Query_value s
 
 (* strings.Cut(s, sep): (before, after, found). *)
-let cut s sep =
-  match String.index_opt s sep with
-  | None -> (s, "", false)
-  | Some i ->
-      (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1), true)
+let cut = Httpg_base.Textproto.cut
 
 (* A handleable form-parse failure.
    - [Invalid_semicolon_separator]/[Invalid_escape]: Go's ParseQuery errors.

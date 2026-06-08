@@ -6,6 +6,15 @@ let lower b =
     Char.chr (Char.code b + (Char.code 'a' - Char.code 'A'))
   else b
 
+(* hex_val decodes a single hex nibble: '0'..'9' -> 0..9, 'a'..'f'/'A'..'F' ->
+   10..15, and [None] for any other byte. The per-nibble primitive shared by the
+   faithful hex parsers (chunked length, URL/path unescape). *)
+let hex_val c =
+  if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0')
+  else if c >= 'a' && c <= 'f' then Some (Char.code c - Char.code 'a' + 10)
+  else if c >= 'A' && c <= 'F' then Some (Char.code c - Char.code 'A' + 10)
+  else None
+
 (* EqualFold is strings.EqualFold, ASCII only. *)
 let equal_fold s t =
   String.length s = String.length t

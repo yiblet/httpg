@@ -42,8 +42,8 @@ let error_to_string = function
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
 let trim_string = Httpg_base.Textproto.trim_string
 
-let lower_ascii b =
-  if b >= 'A' && b <= 'Z' then Char.chr (Char.code b + 32) else b
+(* internal/ascii.lower: ASCII A-Z -> a-z, every other byte unchanged. *)
+let lower_ascii = Httpg_internal.Ascii.lower
 
 (* internal/ascii.EqualFold. *)
 let ascii_equal_fold = Httpg_internal.Ascii.equal_fold

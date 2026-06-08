@@ -45,11 +45,8 @@ let is_valid_wildcard_name s =
       s;
     !ok
 
-let hex_val c =
-  if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0')
-  else if c >= 'a' && c <= 'f' then Some (Char.code c - Char.code 'a' + 10)
-  else if c >= 'A' && c <= 'F' then Some (Char.code c - Char.code 'A' + 10)
-  else None
+(* Single hex-nibble decode; the per-nibble primitive lives in [Ascii]. *)
+let hex_val = Ascii.hex_val
 
 (* url.PathUnescape: decode %XX. On invalid escaping, return the original. *)
 let path_unescape path =

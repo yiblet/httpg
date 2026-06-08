@@ -21,3 +21,8 @@ val trim_right : string -> string
 (* [trim_left ~chars s] strips every leading byte of [s] that occurs in [chars]
    (Go's [strings.TrimLeft]). *)
 val trim_left : chars:string -> string -> string
+
+(* [cut s sep] is Go's [strings.Cut]: it splits [s] around the first occurrence
+   of the byte [sep], returning [(before, after, true)]; when [sep] is absent it
+   returns [(s, "", false)]. *)
+val cut : string -> char -> string * string * bool

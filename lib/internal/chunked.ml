@@ -28,13 +28,11 @@ let parse_hex_uint (v : string) : (int64, error) result =
        String.iteri
          (fun i c ->
            let d =
-             if c >= '0' && c <= '9' then Char.code c - Char.code '0'
-             else if c >= 'a' && c <= 'f' then Char.code c - Char.code 'a' + 10
-             else if c >= 'A' && c <= 'F' then Char.code c - Char.code 'A' + 10
-             else begin
-               err := Some (Chunk "invalid byte in chunk length");
-               raise Exit
-             end
+             match Ascii.hex_val c with
+             | Some d -> d
+             | None ->
+                 err := Some (Chunk "invalid byte in chunk length");
+                 raise Exit
            in
            if i = 16 then begin
              err := Some (Chunk "http chunk length too large");
