@@ -104,3 +104,7 @@ let add f n =
     true
   end
   else false
+
+module Private = struct
+  let inflow_min_refresh = inflow_min_refresh
+end

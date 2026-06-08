@@ -1,9 +1,5 @@
 (* Port of go/src/net/http/internal/http2/flow.go *)
 
-val inflow_min_refresh : int
-(** [inflow_min_refresh] is the minimum number of bytes we'll send for a flow
-    control window update. Mirrors Go's [inflowMinRefresh] (4<<10). *)
-
 val max_window : int
 (** Maximum flow-control window size, 2^31-1 (RFC 7540 Section 6.9.1). *)
 
@@ -59,3 +55,12 @@ val take : outflow -> int32 -> unit
 val add : outflow -> int32 -> bool
 (** [add f n] adds [n] (positive or negative) to the window, returning [false]
     if the sum would exceed 2^31-1. Mirrors [outflow.add]. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val inflow_min_refresh : int
+  (** [inflow_min_refresh] is the minimum number of bytes we'll send for a flow
+      control window update. Mirrors Go's [inflowMinRefresh] (4<<10). *)
+end

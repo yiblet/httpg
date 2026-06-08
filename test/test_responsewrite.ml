@@ -51,7 +51,7 @@ let resp ~status_code ?(proto_major = 1) ?(proto_minor = 1)
     request;
   }
 
-let write r = capture (fun oc -> Httpg.Io.write_response oc r)
+let write r = capture (fun oc -> Httpg.Io.Private.write_response oc r)
 let body s = Httpg.Body.of_string s
 
 let http10_identity () =

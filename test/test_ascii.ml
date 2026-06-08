@@ -36,7 +36,7 @@ let test_is_print () =
     ]
   in
   List.iter
-    (fun (name, s, want) -> Alcotest.(check bool) name want (Ascii.is_print s))
+    (fun (name, s, want) -> Alcotest.(check bool) name want (Ascii.Private.is_print s))
     cases
 
 let test_is () =

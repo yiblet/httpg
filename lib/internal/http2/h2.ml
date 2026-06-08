@@ -109,3 +109,9 @@ let default_max_read_frame_size = 1 lsl 20
 let default_max_header_bytes = 1 lsl 20
 
 type setting = { id : setting_id; value : int32 }
+
+module Private = struct
+  let next_proto_tls = next_proto_tls
+  let frame_type_string = frame_type_string
+  let setting_id_string = setting_id_string
+end

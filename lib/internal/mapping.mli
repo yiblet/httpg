@@ -9,10 +9,6 @@ type ('k, 'v) t
 val create : unit -> ('k, 'v) t
 (** [create ()] returns an empty mapping (Go's zero-value mapping). *)
 
-val max_slice : int
-(** Maximum number of pairs for which the slice representation is used (Go's
-    [maxSlice], = 8). *)
-
 val add : ('k, 'v) t -> 'k -> 'v -> unit
 (** [add m k v] adds the key-value pair to the mapping (Go's [add]). Keys are
     assumed unique by callers. *)
@@ -28,3 +24,12 @@ val each_pair : ('k, 'v) t -> ('k -> 'v -> bool) -> unit
 val using_map : ('k, 'v) t -> bool
 (** [using_map m] reports whether [m] is currently in its map representation
     (i.e. Go's [m.m != nil]). Exposed for the threshold-switch test. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val max_slice : int
+  (** Maximum number of pairs for which the slice representation is used (Go's
+      [maxSlice], = 8). *)
+end

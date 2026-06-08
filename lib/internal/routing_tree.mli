@@ -33,10 +33,15 @@ val matching_methods :
 (** [matching_methods root ~host ~path set] adds to [set] every method that
     would match (Go's [routingNode.matchingMethods]). *)
 
-val first_segment : string -> string * string
-(** [first_segment path] splits [path] into its first segment and the rest (Go's
-    [firstSegment]). The path must begin with "/". *)
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
 
-val print : 'h t -> Buffer.t -> unit
-(** [print root buf] writes the Go [routingNode.print] textual rendering of the
-    tree, used by the add-pattern test. *)
+  val first_segment : string -> string * string
+  (** [first_segment path] splits [path] into its first segment and the rest
+      (Go's [firstSegment]). The path must begin with "/". *)
+
+  val print : 'h t -> Buffer.t -> unit
+  (** [print root buf] writes the Go [routingNode.print] textual rendering of
+      the tree, used by the add-pattern test. *)
+end

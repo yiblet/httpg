@@ -29,9 +29,9 @@ let read_one ?max_size () r =
 (* ---- frame type string ---- *)
 
 let test_frame_type_string () =
-  Alcotest.(check string) "DATA" "DATA" (H2.frame_type_string H2.Data);
-  Alcotest.(check string) "PING" "PING" (H2.frame_type_string H2.Ping);
-  Alcotest.(check string) "GOAWAY" "GOAWAY" (H2.frame_type_string H2.Goaway)
+  Alcotest.(check string) "DATA" "DATA" (H2.Private.frame_type_string H2.Data);
+  Alcotest.(check string) "PING" "PING" (H2.Private.frame_type_string H2.Ping);
+  Alcotest.(check string) "GOAWAY" "GOAWAY" (H2.Private.frame_type_string H2.Goaway)
 
 (* ---- RST_STREAM (TestWriteRST) ---- *)
 
@@ -227,7 +227,7 @@ let test_write_continuation () =
 
 let test_write_priority () =
   let p = { F.stream_dep = 2; exclusive = false; weight = 127 } in
-  let f = with_pipe (fun oc -> F.write_priority oc 42 p) (read_one ()) in
+  let f = with_pipe (fun oc -> F.Private.write_priority oc 42 p) (read_one ()) in
   (match f with
   | F.Priority (fh, pf) ->
       Alcotest.(check int) "len" 5 fh.length;
@@ -236,7 +236,7 @@ let test_write_priority () =
       Alcotest.(check int) "weight" 127 pf.priority.weight
   | _ -> Alcotest.fail "priority");
   let p = { F.stream_dep = 3; exclusive = true; weight = 77 } in
-  let f = with_pipe (fun oc -> F.write_priority oc 42 p) (read_one ()) in
+  let f = with_pipe (fun oc -> F.Private.write_priority oc 42 p) (read_one ()) in
   match f with
   | F.Priority (_, pf) ->
       Alcotest.(check int) "dep" 3 pf.priority.stream_dep;
@@ -255,7 +255,7 @@ let test_write_invalid_stream_dep () =
   Alcotest.check_raises "priority dep" F.Invalid_dep_stream_id (fun () ->
       ignore
         (capture (fun oc ->
-             F.write_priority oc 2
+             F.Private.write_priority oc 2
                { F.stream_dep = 1 lsl 31; exclusive = false; weight = 0 })))
 
 (* ---- SETTINGS (TestWriteSettings) ---- *)
@@ -384,15 +384,15 @@ let test_frame_header_codec () =
   let h =
     { F.length = 66051; typ = H2.Settings; flags = 5; stream_id = 101124105 }
   in
-  let enc = F.encode_frame_header h in
+  let enc = F.Private.encode_frame_header h in
   Alcotest.(check string) "enc" "\x01\x02\x03\x04\x05\x06\x07\x08\x09" enc;
-  let h2 = F.decode_frame_header "\x01\x02\x03\x04\x05\x06\x07\x08\x09" in
+  let h2 = F.Private.decode_frame_header "\x01\x02\x03\x04\x05\x06\x07\x08\x09" in
   Alcotest.(check int) "len" 66051 h2.length;
   Alcotest.(check int) "type" 4 (H2.frame_type_to_int h2.typ);
   Alcotest.(check int) "flags" 5 h2.flags;
   Alcotest.(check int) "stream" 101124105 h2.stream_id;
   (* high bit masked *)
-  let h3 = F.decode_frame_header "\xff\xff\xff\xff\xff\xff\xff\xff\xff" in
+  let h3 = F.Private.decode_frame_header "\xff\xff\xff\xff\xff\xff\xff\xff\xff" in
   Alcotest.(check int) "masked stream" 2147483647 h3.stream_id
 
 (* ---- oversize -> Frame_too_large (TestReadFrameHeaderFrameTooLarge) ---- *)
@@ -435,7 +435,7 @@ let test_read_oversize_frame_result () =
   | Error e ->
       Alcotest.failf "expected Error Frame_too_large, got Error %s"
         (match e with
-        | H2_error.Connection c -> "Connection " ^ H2_error.err_code_string c
+        | H2_error.Connection c -> "Connection " ^ H2_error.Private.err_code_string c
         | _ -> "<other>")
   | Ok _ -> Alcotest.fail "expected Error Frame_too_large, got Ok"
 
@@ -463,7 +463,7 @@ let encode_header_raw pairs =
       (fun (n, v) -> { Hpack.name = n; value = v; sensitive = false })
       pairs
   in
-  Hpack.encode_to_string enc fields
+  Hpack.Private.encode_to_string enc fields
 
 let split_at s i = (String.sub s 0 i, String.sub s i (String.length s - i))
 

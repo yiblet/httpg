@@ -132,7 +132,13 @@ val write_request : Eio.Buf_write.t -> Request.t -> (unit, error) result
     emits ["HTTP/1.1"]. Returns [Error Missing_host] when no host is available.
 *)
 
-val write_response : Eio.Buf_write.t -> Response.t -> unit
-(** [write_response w r] is [Response.Write]: write the status line, framing
-    headers, the remaining headers and the body, applying Go's zero-length-body
-    probe and the HTTP/1.1 unknown-length [Connection: close] rule. *)
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val write_response : Eio.Buf_write.t -> Response.t -> unit
+  (** [write_response w r] is [Response.Write]: write the status line, framing
+      headers, the remaining headers and the body, applying Go's
+      zero-length-body probe and the HTTP/1.1 unknown-length [Connection: close]
+      rule. *)
+end

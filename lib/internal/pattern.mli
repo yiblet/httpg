@@ -61,30 +61,12 @@ type relationship =
   | Disjoint  (** there is no request that both match *)
   | Overlaps  (** both match some request, but neither is more specific *)
 
-val relationship_to_string : relationship -> string
-
-val inverse_relationship : relationship -> relationship
-(** Go's [inverseRelationship]. *)
-
 val conflicts_with : t -> t -> bool
 (** Go's [pattern.conflictsWith]: whether there is a request both match but
     where neither is higher precedence. *)
 
-val compare_methods : t -> t -> relationship
-(** Go's [pattern.compareMethods]. *)
-
-val compare_paths : t -> t -> relationship
-(** Go's pattern.comparePaths. *)
-
 val describe_conflict : t -> t -> string
 (** Go's [describeConflict]: explanation of why two patterns conflict. *)
-
-val common_path : t -> t -> string
-(** Go's [commonPath]: a path both p1 and p2 match (assumes one exists). *)
-
-val difference_path : t -> t -> string
-(** Go's [differencePath]: a path p1 matches and p2 doesn't (assumes one
-    exists). *)
 
 val path_unescape : string -> string
 (** Go's [pathUnescape]: percent-decode, falling back to the original on invalid
@@ -93,3 +75,26 @@ val path_unescape : string -> string
 val path_clean : string -> string
 (** Go's [cleanPath]/[path.Clean]: lexically clean a path, eliminating [.] and
     [..] elements. Shared with [ServeMux] path canonicalization. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val relationship_to_string : relationship -> string
+
+  val inverse_relationship : relationship -> relationship
+  (** Go's [inverseRelationship]. *)
+
+  val compare_methods : t -> t -> relationship
+  (** Go's [pattern.compareMethods]. *)
+
+  val compare_paths : t -> t -> relationship
+  (** Go's pattern.comparePaths. *)
+
+  val common_path : t -> t -> string
+  (** Go's [commonPath]: a path both p1 and p2 match (assumes one exists). *)
+
+  val difference_path : t -> t -> string
+  (** Go's [differencePath]: a path p1 matches and p2 doesn't (assumes one
+      exists). *)
+end

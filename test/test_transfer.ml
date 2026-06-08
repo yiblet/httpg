@@ -156,14 +156,14 @@ let test_incomplete_chunk () =
 (* --- transfer.go: TestParseContentLength. *)
 let test_parse_content_length () =
   let ok cl =
-    match Transfer.parse_content_length [ cl ] with
+    match Transfer.Private.parse_content_length [ cl ] with
     | Ok _ -> Alcotest.(check pass) (Printf.sprintf "CL %S ok" cl) () ()
     | Error e ->
         Alcotest.failf "CL %S unexpected error %s" cl
           (Transfer.error_to_string e)
   in
   let err cl =
-    match Transfer.parse_content_length [ cl ] with
+    match Transfer.Private.parse_content_length [ cl ] with
     | Ok n -> Alcotest.failf "CL %S = %Ld; want error" cl n
     | Error (Transfer.Bad_content_length v) ->
         Alcotest.(check string) (Printf.sprintf "CL %S error value" cl) cl v
@@ -179,7 +179,7 @@ let test_parse_content_length () =
   err "9223372036854775808"
 
 let test_parse_content_length_result () =
-  (match Transfer.parse_content_length [ "x" ] with
+  (match Transfer.Private.parse_content_length [ "x" ] with
   | Error (Transfer.Bad_content_length "x") ->
       Alcotest.(check pass) "\"x\" -> Bad_content_length" () ()
   | other ->
@@ -187,7 +187,7 @@ let test_parse_content_length_result () =
         (match other with
         | Ok n -> Printf.sprintf "Ok %Ld" n
         | Error e -> "Error " ^ Transfer.error_to_string e));
-  (match Transfer.parse_content_length [ "42" ] with
+  (match Transfer.Private.parse_content_length [ "42" ] with
   | Ok 42L -> Alcotest.(check pass) "\"42\" -> Ok 42" () ()
   | other ->
       Alcotest.failf "\"42\" -> %s; want Ok 42"
@@ -196,7 +196,7 @@ let test_parse_content_length_result () =
         | Error e -> "Error " ^ Transfer.error_to_string e));
   let h = Header.set_values (Header.create ()) "Content-Length" [ "5"; "6" ] in
   match
-    Transfer.fix_length ~is_response:false ~status:200
+    Transfer.Private.fix_length ~is_response:false ~status:200
       ~request_method:Httpg_base.Method.Post ~header:h ~chunked:false
   with
   | Error (Transfer.Chunk _) ->
@@ -210,7 +210,7 @@ let test_parse_content_length_result () =
 let test_parse_transfer_encoding () =
   let run te =
     let h = Header.set_values (Header.create ()) "Transfer-Encoding" te in
-    Transfer.parse_transfer_encoding ~major:1 ~minor:1 ~header:h
+    Transfer.Private.parse_transfer_encoding ~major:1 ~minor:1 ~header:h
   in
   let err te frag =
     match run te with
@@ -243,7 +243,7 @@ let test_parse_transfer_encoding () =
   in
   Alcotest.(check bool)
     "HTTP/1.0 ignores TE" false
-    (match Transfer.parse_transfer_encoding ~major:1 ~minor:0 ~header:h with
+    (match Transfer.Private.parse_transfer_encoding ~major:1 ~minor:0 ~header:h with
     | Ok (b, _) -> b
     | Error _ -> true)
 
@@ -257,7 +257,7 @@ let test_fix_length () =
   let check name ~is_response ~status ~request_method ~header ~chunked expected
       =
     match
-      Transfer.fix_length ~is_response ~status
+      Transfer.Private.fix_length ~is_response ~status
         ~request_method:(Httpg_base.Method.of_string request_method)
         ~header ~chunked
     with
@@ -278,7 +278,7 @@ let test_fix_length () =
     ~header:(mk []) ~chunked:false 0L;
   let h = mk [ ("Content-Length", "10") ] in
   (match
-     Transfer.fix_length ~is_response:true ~status:200
+     Transfer.Private.fix_length ~is_response:true ~status:200
        ~request_method:Httpg_base.Method.Get ~header:h ~chunked:true
    with
   | Ok (got, h') ->
@@ -300,7 +300,7 @@ let test_fix_length () =
     ~request_method:"POST" ~header:hd ~chunked:false 5L;
   let hc = Header.set_values (Header.create ()) "Content-Length" [ "5"; "6" ] in
   match
-    Transfer.fix_length ~is_response:false ~status:200
+    Transfer.Private.fix_length ~is_response:false ~status:200
       ~request_method:Httpg_base.Method.Post ~header:hc ~chunked:false
   with
   | Ok (n, _) -> Alcotest.failf "conflicting CL = %Ld; want error" n
@@ -336,11 +336,11 @@ let test_fix_trailer () =
   let mk_tr v = Header.set_values (Header.create ()) "Trailer" [ v ] in
   Alcotest.(check bool)
     "trailer ignored when not chunked" true
-    (match Transfer.fix_trailer ~header:(mk_tr "Md5") ~chunked:false with
+    (match Transfer.Private.fix_trailer ~header:(mk_tr "Md5") ~chunked:false with
     | Ok (None, _) -> true
     | _ -> false);
   (match
-     Transfer.fix_trailer ~header:(mk_tr "md5, Some-Other") ~chunked:true
+     Transfer.Private.fix_trailer ~header:(mk_tr "md5, Some-Other") ~chunked:true
    with
   | Ok (Some tr, h') ->
       Alcotest.(check bool)
@@ -351,7 +351,7 @@ let test_fix_trailer () =
         (Header.has tr "Some-Other")
   | Ok (None, _) -> Alcotest.fail "expected a trailer"
   | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e));
-  match Transfer.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true with
+  match Transfer.Private.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true with
   | Ok _ -> Alcotest.fail "expected bad trailer key error"
   | Error (Transfer.Bad_header (w, _)) ->
       Alcotest.(check string) "bad trailer key" "bad trailer key" w

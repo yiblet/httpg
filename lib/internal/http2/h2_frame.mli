@@ -113,17 +113,6 @@ exception Invalid_dep_stream_id
 exception Pad_length_too_large
 (** Mirrors Go's [errPadLength]. A write-side invariant (kept as a raise). *)
 
-(* ---- pure header codec ---- *)
-
-val encode_frame_header : frame_header -> string
-(** [encode_frame_header h] renders the 9-byte frame header. Mirrors the header
-    portion of Go's [startWrite]/[endWrite]. *)
-
-val decode_frame_header : string -> frame_header
-(** [decode_frame_header s] parses a 9-byte header from the first 9 bytes of [s]
-    (masking the reserved stream-id high bit). Mirrors Go's [readFrameHeader].
-*)
-
 (* ---- reading ---- *)
 
 val read_frame : ?max_size:int -> Eio.Buf_read.t -> (frame, H2_error.t) result
@@ -157,9 +146,6 @@ val write_headers :
   string ->
   unit
 (** Mirrors Go's [WriteHeaders] / [HeadersFrameParam]. *)
-
-val write_priority : Eio.Buf_write.t -> int -> priority_param -> unit
-(** Mirrors Go's [WritePriority]. *)
 
 val write_rst_stream : Eio.Buf_write.t -> int -> H2_error.err_code -> unit
 (** Mirrors Go's [WriteRSTStream]. *)
@@ -231,3 +217,20 @@ val read_meta_headers :
     [DefaultMaxHeaderBytes]). A fragment more than twice the remaining budget,
     or a list exceeding the budget, is rejected as a connection [ProtocolError].
     A clean EOF (a CONTINUATION never arriving) propagates as [End_of_file]. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val encode_frame_header : frame_header -> string
+  (** [encode_frame_header h] renders the 9-byte frame header. Mirrors the
+      header portion of Go's [startWrite]/[endWrite]. *)
+
+  val decode_frame_header : string -> frame_header
+  (** [decode_frame_header s] parses a 9-byte header from the first 9 bytes of
+      [s] (masking the reserved stream-id high bit). Mirrors Go's
+      [readFrameHeader]. *)
+
+  val write_priority : Eio.Buf_write.t -> int -> priority_param -> unit
+  (** Mirrors Go's [WritePriority]. *)
+end

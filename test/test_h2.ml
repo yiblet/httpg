@@ -15,15 +15,15 @@ let err_code_string_tests =
     ( "protocol",
       `Quick,
       check_string "PROTOCOL_ERROR" "PROTOCOL_ERROR"
-        (H2_error.err_code_string H2_error.ProtocolError) );
+        (H2_error.Private.err_code_string H2_error.ProtocolError) );
     ( "http11required",
       `Quick,
       check_string "HTTP_1_1_REQUIRED" "HTTP_1_1_REQUIRED"
-        (H2_error.err_code_string (H2_error.err_code_of_int 0xd)) );
+        (H2_error.Private.err_code_string (H2_error.err_code_of_int 0xd)) );
     ( "unknown",
       `Quick,
       check_string "unknown 0xf" "unknown error code 0xf"
-        (H2_error.err_code_string (H2_error.err_code_of_int 0xf)) );
+        (H2_error.Private.err_code_string (H2_error.err_code_of_int 0xf)) );
   ]
 
 (* Wire-value round trips for every known error code. *)
@@ -93,7 +93,7 @@ let preface_tests =
       check_string "preface" "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         H2.client_preface );
     ("preface_len", `Quick, check_int "len" 24 H2.client_preface_len);
-    ("next_proto_tls", `Quick, check_string "alpn" "h2" H2.next_proto_tls);
+    ("next_proto_tls", `Quick, check_string "alpn" "h2" H2.Private.next_proto_tls);
   ]
 
 (* Frame type wire values (frame.go FrameType constants). *)
@@ -156,7 +156,7 @@ let setting_id_tests =
           Alcotest.(check bool)
             "roundtrip" true
             (H2.setting_id_of_int v = Some s);
-          check_string "name" name (H2.setting_id_string s) () ))
+          check_string "name" name (H2.Private.setting_id_string s) () ))
     cases
 
 (* Default constants (http2.go). *)

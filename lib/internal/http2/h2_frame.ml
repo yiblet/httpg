@@ -641,3 +641,9 @@ let read_meta_headers ?(max_size = max_frame_size)
       match h2_error_of_exception e with
       | Some err -> Error err
       | None -> raise e)
+
+module Private = struct
+  let encode_frame_header = encode_frame_header
+  let decode_frame_header = decode_frame_header
+  let write_priority = write_priority
+end

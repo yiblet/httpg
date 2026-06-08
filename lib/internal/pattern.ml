@@ -453,3 +453,12 @@ let describe_conflict p1 p2 =
       (to_string p1) (to_string p2)
       (relationship_to_string mrel)
       (relationship_to_string prel)
+
+module Private = struct
+  let relationship_to_string = relationship_to_string
+  let inverse_relationship = inverse_relationship
+  let compare_methods = compare_methods
+  let compare_paths = compare_paths
+  let common_path = common_path
+  let difference_path = difference_path
+end

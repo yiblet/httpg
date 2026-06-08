@@ -18,19 +18,8 @@ type header_field_table
 (** A list of header fields backing the static and dynamic tables. Mirrors Go's
     [headerFieldTable]. *)
 
-val create_table : unit -> header_field_table
-(** [create_table ()] builds an empty dynamic-style table. Mirrors a zero-value
-    [headerFieldTable] with [init] called. *)
-
 val table_len : header_field_table -> int
 (** Number of entries currently in the table. Mirrors Go's [table.len]. *)
-
-val add_entry : header_field_table -> header_field -> unit
-(** [add_entry t f] appends [f]. Mirrors Go's [addEntry]. *)
-
-val evict_oldest : header_field_table -> int -> unit
-(** [evict_oldest t n] evicts the [n] oldest entries. Mirrors [evictOldest].
-    Raises [Invalid_argument] if [n] exceeds the table length. *)
 
 val search : header_field_table -> header_field -> int * bool
 (** [search t f] finds [f]. Returns [(0, false)] for no match; [(i, true)] when
@@ -43,10 +32,6 @@ val static_table : header_field array
 
 val static_table_len : int
 (** Number of static-table entries (61). Mirrors [staticTable.len()]. *)
-
-val static_table_entry : int -> header_field
-(** [static_table_entry i] returns the static entry at 1-based HPACK index [i]
-    (1..61). Raises [Invalid_argument] otherwise. *)
 
 val static_search : header_field -> int * bool
 (** [static_search f] searches the global static table. Same contract as
@@ -74,9 +59,6 @@ val dynamic_allowed_max_size : dynamic_table -> int
 val set_allowed_max_size : dynamic_table -> int -> unit
 (** [set_allowed_max_size dt v] sets the allowed upper bound. *)
 
-val dynamic_len : dynamic_table -> int
-(** Number of entries in the dynamic table. *)
-
 val set_max_size : dynamic_table -> int -> unit
 (** [set_max_size dt v] updates the max size and evicts as needed. Mirrors
     [setMaxSize]. *)
@@ -92,3 +74,26 @@ val at : dynamic_table -> int -> header_field option
 (** [at dt i] returns the entry at the combined 1-based HPACK index [i]: static
     indices [1..61], dynamic entries after (newest lowest). Returns [None] for
     [i = 0] or out of range. Mirrors Go's [Decoder.at]. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val create_table : unit -> header_field_table
+  (** [create_table ()] builds an empty dynamic-style table. Mirrors a
+      zero-value [headerFieldTable] with [init] called. *)
+
+  val add_entry : header_field_table -> header_field -> unit
+  (** [add_entry t f] appends [f]. Mirrors Go's [addEntry]. *)
+
+  val evict_oldest : header_field_table -> int -> unit
+  (** [evict_oldest t n] evicts the [n] oldest entries. Mirrors [evictOldest].
+      Raises [Invalid_argument] if [n] exceeds the table length. *)
+
+  val static_table_entry : int -> header_field
+  (** [static_table_entry i] returns the static entry at 1-based HPACK index [i]
+      (1..61). Raises [Invalid_argument] otherwise. *)
+
+  val dynamic_len : dynamic_table -> int
+  (** Number of entries in the dynamic table. *)
+end

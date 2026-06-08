@@ -519,3 +519,7 @@ let valid c =
             else if c.partitioned && not c.secure then
               Error Partitioned_without_secure
             else Ok ())
+
+module Private = struct
+  let sanitize_cookie_path = sanitize_cookie_path
+end

@@ -19,13 +19,18 @@ val hex_val : char -> int option
    and friends are NOT folded to their ASCII counterparts). *)
 val equal_fold : string -> string -> bool
 
-(* IsPrint returns whether [s] is ASCII and printable according to
-   https://tools.ietf.org/html/rfc20#section-4.2 (every byte in ' '..'~'). *)
-val is_print : string -> bool
-
 (* Is returns whether [s] is ASCII (every byte <= 0x7f). *)
 val is : string -> bool
 
 (* ToLower returns [(lower, true)] with the ASCII-lowercased version of [s]
    when [s] is ASCII and printable, and [("", false)] otherwise. *)
 val to_lower : string -> string * bool
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  (* IsPrint returns whether [s] is ASCII and printable according to
+     https://tools.ietf.org/html/rfc20#section-4.2 (every byte in ' '..'~'). *)
+  val is_print : string -> bool
+end

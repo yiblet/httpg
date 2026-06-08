@@ -664,3 +664,7 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
   then out "Content-Length: 0\r\n";
   out "\r\n";
   Transfer.write_body w tw
+
+module Private = struct
+  let write_response = write_response
+end

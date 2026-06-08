@@ -36,7 +36,7 @@ let fields_t = Alcotest.list field_t
 
 (* decode_full returns a result now; unwrap for the success-path tests. *)
 let decode_full dec s =
-  match H.decode_full dec s with
+  match H.Private.decode_full dec s with
   | Ok fs -> fs
   | Error e -> Alcotest.failf "decode_full: %s" (H.error_to_string e)
 
@@ -45,9 +45,9 @@ let decode_full dec s =
 let var_int_roundtrip () =
   let check n i =
     let buf = Buffer.create 8 in
-    H.append_var_int buf n i;
+    H.Private.append_var_int buf n i;
     let s = Buffer.contents buf in
-    match H.read_var_int n s 0 with
+    match H.Private.read_var_int n s 0 with
     | Ok (v, p) ->
         Alcotest.(check int) (Printf.sprintf "n=%d i=%d value" n i) i v;
         Alcotest.(check int) "consumed all" (String.length s) p
@@ -75,22 +75,22 @@ let var_int_roundtrip () =
 let var_int_rfc_c11 () =
   (* C.1.1: encode 10 with 5-bit prefix -> 0x0a *)
   let buf = Buffer.create 4 in
-  H.append_var_int buf 5 10;
+  H.Private.append_var_int buf 5 10;
   Alcotest.check hex "C.1.1" (of_hex "0a") (Buffer.contents buf)
 
 let var_int_rfc_c12 () =
   (* C.1.2: encode 1337 with 5-bit prefix -> 31 154 10 *)
   let buf = Buffer.create 4 in
-  H.append_var_int buf 5 1337;
+  H.Private.append_var_int buf 5 1337;
   Alcotest.check hex "C.1.2" (of_hex "1f9a0a") (Buffer.contents buf)
 
 let var_int_need_more () =
   (* a multi-byte varint that is truncated -> raises the internal Need_more
      sentinel (kept as an exception; not part of [error]). *)
   let buf = Buffer.create 4 in
-  H.append_var_int buf 5 1337;
+  H.Private.append_var_int buf 5 1337;
   let s = String.sub (Buffer.contents buf) 0 1 in
-  match H.read_var_int 5 s 0 with
+  match H.Private.read_var_int 5 s 0 with
   | (_ : (int * int, H.error) result) -> Alcotest.fail "expected Need_more"
   | exception H.Need_more -> ()
 
@@ -325,7 +325,7 @@ let encoder_c3_request_sequence () =
      assert: (1) it uses the literal-with-incremental-indexing type (top two
      bits 0b01), and (2) it round-trips back to the original field. *)
   let e = H.new_encoder () in
-  let out = H.encode_to_string e [ hf "custom-key" "custom-header" ] in
+  let out = H.Private.encode_to_string e [ hf "custom-key" "custom-header" ] in
   Alcotest.(check int)
     "incremental-indexing type byte" 0x40
     (Char.code out.[0] land 0xc0);
@@ -350,7 +350,7 @@ let roundtrip_basic () =
     ]
   in
   let e = H.new_encoder () in
-  let encoded = H.encode_to_string e fields in
+  let encoded = H.Private.encode_to_string e fields in
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   let decoded = decode_full dec encoded in
   Alcotest.check fields_t "roundtrip basic" fields decoded
@@ -369,7 +369,7 @@ let roundtrip_dynamic_two_passes () =
       hf "cookie" "session=abc123";
     ]
   in
-  let enc1 = H.encode_to_string e fields1 in
+  let enc1 = H.Private.encode_to_string e fields1 in
   let dec1 = decode_full dec enc1 in
   Alcotest.check fields_t "pass 1" fields1 dec1;
   (* Second pass repeats some headers (should index into the dynamic table) *)
@@ -381,7 +381,7 @@ let roundtrip_dynamic_two_passes () =
       hf "x-second-header" "second-value";
     ]
   in
-  let enc2 = H.encode_to_string e fields2 in
+  let enc2 = H.Private.encode_to_string e fields2 in
   let dec2 = decode_full dec enc2 in
   Alcotest.check fields_t "pass 2" fields2 dec2;
   (* Confirm the repeated headers were emitted as indexed (compression):
@@ -396,7 +396,7 @@ let roundtrip_table_size_update () =
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   H.set_max_dynamic_table_size e 1024;
   let fields = [ hf ":status" "200"; hf "content-type" "text/plain" ] in
-  let encoded = H.encode_to_string e fields in
+  let encoded = H.Private.encode_to_string e fields in
   let decoded = decode_full dec encoded in
   Alcotest.check fields_t "roundtrip after size update" fields decoded
 
@@ -407,14 +407,14 @@ let roundtrip_table_size_update () =
 let decode_invalid_index () =
   (* index 0 is invalid for an indexed field; 0x80 = indexed, idx 0 *)
   let dec = H.new_decoder 4096 (fun _ -> ()) in
-  (match H.decode_full dec (of_hex "80") with
+  (match H.Private.decode_full dec (of_hex "80") with
   | Error (H.Invalid_indexed 0) -> ()
   | Error e ->
       Alcotest.failf "expected Invalid_indexed 0, got %s" (H.error_to_string e)
   | Ok _ -> Alcotest.fail "expected Error Invalid_indexed");
   (* an index way past the table also maps to Invalid_indexed *)
   let dec2 = H.new_decoder 4096 (fun _ -> ()) in
-  match H.decode_full dec2 (of_hex "ff49") with
+  match H.Private.decode_full dec2 (of_hex "ff49") with
   | Error (H.Invalid_indexed 200) -> ()
   | Error e ->
       Alcotest.failf "expected Invalid_indexed 200, got %s"
@@ -424,7 +424,7 @@ let decode_invalid_index () =
 let decode_index_too_large () =
   (* indexed field referencing index way past the table *)
   let dec = H.new_decoder 4096 (fun _ -> ()) in
-  match H.decode_full dec (of_hex "ff49") with
+  match H.Private.decode_full dec (of_hex "ff49") with
   | Error (H.Invalid_indexed 200) -> ()
   | _ -> Alcotest.fail "expected Error (Invalid_indexed 200)"
 
@@ -432,7 +432,7 @@ let decode_truncated () =
   (* literal with incremental indexing but truncated value -> Close errors *)
   let dec = H.new_decoder 4096 (fun _ -> ()) in
   (* 0x40 new name, name len 10 but only 2 bytes follow *)
-  match H.decode_full dec (of_hex "400a6375") with
+  match H.Private.decode_full dec (of_hex "400a6375") with
   | Error (H.Decoding "truncated headers") -> ()
   | _ -> Alcotest.fail "expected Error (Decoding \"truncated headers\")"
 
@@ -445,7 +445,7 @@ let decode_string_too_long () =
   let b =
     of_hex "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572"
   in
-  match H.decode_full dec b with
+  match H.Private.decode_full dec b with
   | Error H.String_too_long -> ()
   | _ -> Alcotest.fail "expected Error String_too_long"
 
@@ -453,7 +453,7 @@ let decode_size_update_too_large () =
   (* dynamic table size update of 5 (0x25 = 0b001_00101) but allowed max
      is the decoder's table size; set allowed to 0 then send update 5. *)
   let dec = H.new_decoder 0 (fun _ -> ()) in
-  match H.decode_full dec (of_hex "25") with
+  match H.Private.decode_full dec (of_hex "25") with
   | Error (H.Decoding "dynamic table size update too large") -> ()
   | _ -> Alcotest.fail "expected Error (Decoding size-update-too-large)"
 
@@ -467,7 +467,7 @@ let decode_size_update_not_first () =
     of_hex "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 746f 6d2d 6865 6164 6572 20"
   in
   (* trailing 0x20 = dynamic table size update of 0 at non-first field *)
-  match H.decode_full dec b with
+  match H.Private.decode_full dec b with
   | Error
       (H.Decoding
          "dynamic table size update MUST occur at the beginning of a header \

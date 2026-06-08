@@ -235,3 +235,11 @@ let at dt i =
       let len = table_len dt.table in
       Some dt.table.ents_arr.(len - (i - static_table_len))
   end
+
+module Private = struct
+  let create_table = create_table
+  let add_entry = add_entry
+  let evict_oldest = evict_oldest
+  let static_table_entry = static_table_entry
+  let dynamic_len = dynamic_len
+end

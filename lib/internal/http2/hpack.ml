@@ -514,3 +514,10 @@ let decode_full d p : (header_field list, error) result =
           match close_result d with
           | Error e -> Error e
           | Ok () -> Ok (List.rev !acc)))
+
+module Private = struct
+  let append_var_int = append_var_int
+  let read_var_int = read_var_int
+  let encode_to_string = encode_to_string
+  let decode_full = decode_full
+end

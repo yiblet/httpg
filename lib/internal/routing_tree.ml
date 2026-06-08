@@ -215,3 +215,8 @@ let rec print_node n w level =
   | None -> ()
 
 let print root w = print_node root w 0
+
+module Private = struct
+  let first_segment = first_segment
+  let print = print
+end

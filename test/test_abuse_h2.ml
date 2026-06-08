@@ -175,10 +175,10 @@ let huffman_string_cap () =
   let buf = Buffer.create 64 in
   (* Literal Header Field without Indexing, new name (RFC 7541 6.2.2). *)
   Buffer.add_char buf '\x00';
-  Hpack.append_var_int buf 7 1;
+  Hpack.Private.append_var_int buf 7 1;
   Buffer.add_char buf 'x';
   let len_buf = Buffer.create 8 in
-  Hpack.append_var_int len_buf 7 (String.length huff);
+  Hpack.Private.append_var_int len_buf 7 (String.length huff);
   let len_bytes = Buffer.contents len_buf in
   let first = Char.code len_bytes.[0] lor 0x80 in
   Buffer.add_char buf (Char.chr first);
@@ -251,7 +251,7 @@ let accepts_distinct_settings () =
           List.assoc_opt ":status" !fields
       | Ok (F.GoAway (_, gf)) ->
           Alcotest.failf "unexpected GOAWAY %s"
-            (H2_error.err_code_string gf.error_code)
+            (H2_error.Private.err_code_string gf.error_code)
       | Ok _ -> read_status ()
       | Error e -> raise (H2_error.to_exception e)
     in

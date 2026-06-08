@@ -271,7 +271,7 @@ let test_parse_errors_typed () =
 
 let rel_testable =
   Alcotest.testable
-    (fun fmt r -> Format.pp_print_string fmt (Pattern.relationship_to_string r))
+    (fun fmt r -> Format.pp_print_string fmt (Pattern.Private.relationship_to_string r))
     ( = )
 
 (* TestCompareMethods (with commutative inverse check). *)
@@ -294,11 +294,11 @@ let test_compare_methods () =
       Alcotest.check rel_testable
         (Printf.sprintf "%s vs %s" p1s p2s)
         want
-        (Pattern.compare_methods p1 p2);
+        (Pattern.Private.compare_methods p1 p2);
       Alcotest.check rel_testable
         (Printf.sprintf "%s vs %s (inv)" p2s p1s)
-        (Pattern.inverse_relationship want)
-        (Pattern.compare_methods p2 p1))
+        (Pattern.Private.inverse_relationship want)
+        (Pattern.Private.compare_methods p2 p1))
     cases
 
 (* TestComparePaths (subset of representative + edge rows, with inverse + self checks). *)
@@ -341,19 +341,19 @@ let test_compare_paths () =
       Alcotest.check rel_testable
         (Printf.sprintf "%s self" p1s)
         Pattern.Equivalent
-        (Pattern.compare_paths p1 p1);
+        (Pattern.Private.compare_paths p1 p1);
       Alcotest.check rel_testable
         (Printf.sprintf "%s self" p2s)
         Pattern.Equivalent
-        (Pattern.compare_paths p2 p2);
+        (Pattern.Private.compare_paths p2 p2);
       Alcotest.check rel_testable
         (Printf.sprintf "%s vs %s" p1s p2s)
         want
-        (Pattern.compare_paths p1 p2);
+        (Pattern.Private.compare_paths p1 p2);
       Alcotest.check rel_testable
         (Printf.sprintf "%s vs %s (inv)" p2s p1s)
-        (Pattern.inverse_relationship want)
-        (Pattern.compare_paths p2 p1))
+        (Pattern.Private.inverse_relationship want)
+        (Pattern.Private.compare_paths p2 p1))
     cases
 
 (* TestConflictsWith (with commutativity). *)
@@ -455,11 +455,11 @@ let test_common_path () =
       Alcotest.check rel_testable
         (Printf.sprintf "%s overlaps %s" p1s p2s)
         Pattern.Overlaps
-        (Pattern.compare_paths p1 p2);
+        (Pattern.Private.compare_paths p1 p2);
       Alcotest.(check string)
         (Printf.sprintf "common %s %s" p1s p2s)
         want
-        (Pattern.common_path p1 p2))
+        (Pattern.Private.common_path p1 p2))
     cases
 
 (* TestDifferencePath. *)
@@ -496,14 +496,14 @@ let test_difference_path () =
   List.iter
     (fun (p1s, p2s, want) ->
       let p1 = must_parse p1s and p2 = must_parse p2s in
-      let rel = Pattern.compare_paths p1 p2 in
+      let rel = Pattern.Private.compare_paths p1 p2 in
       if rel <> Pattern.Overlaps && rel <> Pattern.More_general then
         Alcotest.failf "%s vs %s are %s, need overlaps or moreGeneral" p1s p2s
-          (Pattern.relationship_to_string rel);
+          (Pattern.Private.relationship_to_string rel);
       Alcotest.(check string)
         (Printf.sprintf "diff %s %s" p1s p2s)
         want
-        (Pattern.difference_path p1 p2))
+        (Pattern.Private.difference_path p1 p2))
     cases
 
 let tests =

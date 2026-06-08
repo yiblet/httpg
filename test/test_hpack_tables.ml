@@ -120,19 +120,19 @@ let decode_invalid () =
 
 let static_lookup_by_index () =
   Alcotest.(check int) "static len" 61 T.static_table_len;
-  let e1 = T.static_table_entry 1 in
+  let e1 = T.Private.static_table_entry 1 in
   Alcotest.(check string) "idx1 name" ":authority" e1.name;
   Alcotest.(check string) "idx1 value" "" e1.value;
-  let e2 = T.static_table_entry 2 in
+  let e2 = T.Private.static_table_entry 2 in
   Alcotest.(check string) "idx2 name" ":method" e2.name;
   Alcotest.(check string) "idx2 value" "GET" e2.value;
-  let e8 = T.static_table_entry 8 in
+  let e8 = T.Private.static_table_entry 8 in
   Alcotest.(check string) "idx8 name" ":status" e8.name;
   Alcotest.(check string) "idx8 value" "200" e8.value;
-  let e16 = T.static_table_entry 16 in
+  let e16 = T.Private.static_table_entry 16 in
   Alcotest.(check string) "idx16 name" "accept-encoding" e16.name;
   Alcotest.(check string) "idx16 value" "gzip, deflate" e16.value;
-  let e61 = T.static_table_entry 61 in
+  let e61 = T.Private.static_table_entry 61 in
   Alcotest.(check string) "idx61 name" "www-authenticate" e61.name
 
 let check_search msg t f exp_i exp_match =
@@ -168,7 +168,7 @@ let static_search_cases () =
 
 (* Mirrors Go TestHeaderFieldTable. *)
 let dynamic_table_search () =
-  let t = T.create_table () in
+  let t = T.Private.create_table () in
   let entries =
     [
       hf "key1" "value1-1";
@@ -180,7 +180,7 @@ let dynamic_table_search () =
       hf "key3" "value3-2";
     ]
   in
-  List.iter (T.add_entry t) entries;
+  List.iter (T.Private.add_entry t) entries;
   Alcotest.(check int) "len" 7 (T.table_len t);
   (* newest entry has HPACK index 1; oldest index 7 *)
   check_search "key3 value3-2 (newest)" t (hf "key3" "value3-2") 1 true;
@@ -194,7 +194,7 @@ let dynamic_table_search () =
   (* no match *)
   check_search "absent" t (hf "key9" "v") 0 false;
   (* evict 4 oldest; ids stable, indices recompute *)
-  T.evict_oldest t 4;
+  T.Private.evict_oldest t 4;
   Alcotest.(check int) "len after evict" 3 (T.table_len t);
   (* remaining: key4/value4-1, key2/value2-2, key3/value3-2 (oldest..newest) *)
   check_search "key3 value3-2 after evict" t (hf "key3" "value3-2") 1 true;
@@ -220,17 +220,17 @@ let dynamic_table_add_evict () =
   Alcotest.(check int) "init size" 0 (T.dynamic_size dt);
   T.dynamic_add dt m_get;
   Alcotest.(check int) "size after 1 add" 42 (T.dynamic_size dt);
-  Alcotest.(check int) "len after 1" 1 (T.dynamic_len dt);
+  Alcotest.(check int) "len after 1" 1 (T.Private.dynamic_len dt);
   T.dynamic_add dt (hf ":path" "/");
   (* size 5+1+32 = 38; total 80 *)
   Alcotest.(check int) "size after 2 add" 80 (T.dynamic_size dt);
-  Alcotest.(check int) "len after 2" 2 (T.dynamic_len dt);
+  Alcotest.(check int) "len after 2" 2 (T.Private.dynamic_len dt);
   (* adding a 3rd -> total > 100 -> evict oldest *)
   T.dynamic_add dt (hf ":scheme" "https");
   (* 7+5+32 = 44 ; total 80+44=124 *)
   (* evict oldest only until <=100: remove GET(42) -> 82; stop. *)
   Alcotest.(check int) "size after evict" 82 (T.dynamic_size dt);
-  Alcotest.(check int) "len after evict" 2 (T.dynamic_len dt);
+  Alcotest.(check int) "len after evict" 2 (T.Private.dynamic_len dt);
   (* newest (:scheme/https) at static_len+1, then :path/ at static_len+2 *)
   (match T.at dt (T.static_table_len + 1) with
   | Some f ->
@@ -250,16 +250,16 @@ let dynamic_set_max_size () =
   T.dynamic_add dt (hf "c" "d");
   (* 34 ; total 68 *)
   Alcotest.(check int) "size" 68 (T.dynamic_size dt);
-  Alcotest.(check int) "len" 2 (T.dynamic_len dt);
+  Alcotest.(check int) "len" 2 (T.Private.dynamic_len dt);
   (* shrink to 34 -> evict oldest (a/b) leaving c/d (34) *)
   T.set_max_size dt 34;
   Alcotest.(check int) "max after shrink" 34 (T.dynamic_max_size dt);
   Alcotest.(check int) "size after shrink" 34 (T.dynamic_size dt);
-  Alcotest.(check int) "len after shrink" 1 (T.dynamic_len dt);
+  Alcotest.(check int) "len after shrink" 1 (T.Private.dynamic_len dt);
   (* shrink to 0 -> evict everything *)
   T.set_max_size dt 0;
   Alcotest.(check int) "size after 0" 0 (T.dynamic_size dt);
-  Alcotest.(check int) "len after 0" 0 (T.dynamic_len dt)
+  Alcotest.(check int) "len after 0" 0 (T.Private.dynamic_len dt)
 
 let dynamic_at_combined_index () =
   let dt = T.create_dynamic_table 4096 in

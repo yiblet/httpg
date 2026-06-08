@@ -38,3 +38,7 @@ let is s =
 (* ToLower returns the lowercase version of s if s is ASCII and printable. *)
 let to_lower s =
   if not (is_print s) then ("", false) else (String.map lower s, true)
+
+module Private = struct
+  let is_print = is_print
+end

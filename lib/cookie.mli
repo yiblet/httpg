@@ -74,9 +74,6 @@ val sanitize_cookie_value : string -> quoted:bool -> string
 (** [sanitize_cookie_value v ~quoted] produces a suitable cookie-value from [v]
     (Go's [sanitizeCookieValue]). *)
 
-val sanitize_cookie_path : string -> string
-(** [sanitize_cookie_path v] (Go's [sanitizeCookiePath]). *)
-
 val sanitize_cookie_name : string -> string
 (** [sanitize_cookie_name n] replaces CR/LF with '-' (Go's
     [sanitizeCookieName]). *)
@@ -91,3 +88,11 @@ val parse_cookie_value :
   string -> allow_double_quote:bool -> (string * bool) option
 (** [parse_cookie_value raw ~allow_double_quote] returns [Some (value, quoted)]
     on success, [None] on an invalid value (Go's [parseCookieValue]). *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val sanitize_cookie_path : string -> string
+  (** [sanitize_cookie_path v] (Go's [sanitizeCookiePath]). *)
+end

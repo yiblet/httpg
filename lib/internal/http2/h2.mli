@@ -9,10 +9,6 @@ val client_preface : string
 val client_preface_len : int
 (** Length in bytes of {!client_preface}. *)
 
-val next_proto_tls : string
-(** [next_proto_tls] is the ALPN protocol negotiated during HTTP/2's TLS setup.
-    Mirrors Go's [NextProtoTLS]. *)
-
 (** A frame type, as defined in RFC 7540 section 6. Mirrors Go's [FrameType]. *)
 type frame_type =
   | Data (* 0x0 *)
@@ -32,9 +28,6 @@ val frame_type_to_int : frame_type -> int
 val frame_type_of_int : int -> frame_type option
 (** Maps an 8-bit wire value to a [frame_type]; returns [None] for unknown
     types. *)
-
-val frame_type_string : frame_type -> string
-(** Mirrors Go's [frameName]; unknown types become ["UNKNOWN_FRAME_TYPE_N"]. *)
 
 (* Frame flags. These are bit values that share a single byte; their meaning is
    per frame type, but the numeric values follow Go's [Flags] constants. *)
@@ -70,10 +63,6 @@ val setting_id_of_int : int -> setting_id option
 (** Maps a 16-bit wire value to a [setting_id]; returns [None] for unknown
     settings. *)
 
-val setting_id_string : setting_id -> string
-(** Mirrors Go's [settingName]; unknown settings become ["UNKNOWN_SETTING_N"].
-*)
-
 val initial_window_size : int
 (** SETTINGS_INITIAL_WINDOW_SIZE default (6.9.2). Mirrors Go's
     [initialWindowSize]. *)
@@ -97,3 +86,20 @@ val default_max_header_bytes : int
 type setting = { id : setting_id; value : int32 }
 (** A setting parameter: which setting it is, and its value. Mirrors Go's
     [Setting] struct. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val next_proto_tls : string
+  (** [next_proto_tls] is the ALPN protocol negotiated during HTTP/2's TLS
+      setup. Mirrors Go's [NextProtoTLS]. *)
+
+  val frame_type_string : frame_type -> string
+  (** Mirrors Go's [frameName]; unknown types become ["UNKNOWN_FRAME_TYPE_N"].
+  *)
+
+  val setting_id_string : setting_id -> string
+  (** Mirrors Go's [settingName]; unknown settings become
+      ["UNKNOWN_SETTING_N"]. *)
+end

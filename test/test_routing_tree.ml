@@ -42,7 +42,7 @@ let test_first_segment () =
       let got = ref [] in
       let rest = ref in_ in
       while String.length !rest > 0 do
-        let seg, r = Routing_tree.first_segment !rest in
+        let seg, r = Routing_tree.Private.first_segment !rest in
         got := !got @ [ seg ];
         rest := r
       done;
@@ -77,7 +77,7 @@ let test_add_pattern () =
     \                    \"/g/h/i\"\n"
   in
   let b = Buffer.create 256 in
-  Routing_tree.print (get_test_tree ()) b;
+  Routing_tree.Private.print (get_test_tree ()) b;
   Alcotest.(check string) "tree structure" want (Buffer.contents b)
 
 (* TestRoutingNodeMatch. *)

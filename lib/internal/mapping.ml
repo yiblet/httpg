@@ -61,3 +61,7 @@ let each_pair h f =
         | e :: rest -> if f e.key e.value then loop rest
       in
       loop h.s
+
+module Private = struct
+  let max_slice = max_slice
+end

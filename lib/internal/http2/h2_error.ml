@@ -131,3 +131,7 @@ let of_exception : exn -> t option = function
   | Stream_error se -> Some (Stream se)
   | Compression_error e -> Some (Compression e)
   | e -> !frame_of_exception e
+
+module Private = struct
+  let err_code_string = err_code_string
+end

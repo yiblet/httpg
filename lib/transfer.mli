@@ -68,22 +68,6 @@ val no_response_body_expected : Httpg_base.Method.t -> bool
 val body_allowed_for_status : int -> bool
 (** [bodyAllowedForStatus] (RFC 7230 3.3): 1xx, 204 and 304 forbid a body. *)
 
-val parse_content_length : string list -> (int64, error) result
-(** [parseContentLength]: [Ok (-1L)] if unset, else the parsed value;
-    [Error (Bad_content_length _)] on an invalid value. *)
-
-val fix_length :
-  is_response:bool ->
-  status:int ->
-  request_method:Httpg_base.Method.t ->
-  header:Header.t ->
-  chunked:bool ->
-  (int64 * Header.t, error) result
-(** [fixLength]: the expected body length per RFC 7230 3.3. Version-sensitive
-    via [chunked]. Returns the length and the header with framing keys consumed
-    (dedup / delete Content-Length), as Go does. [Error] on conflicting /
-    invalid Content-Length (header-parse boundary). *)
-
 val should_close :
   major:int ->
   minor:int ->
@@ -94,20 +78,6 @@ val should_close :
     updated) header. Version-sensitive: HTTP/1.0 closes unless [keep-alive];
     HTTP/1.1 keeps alive unless [close]. [remove_close_header] drops a
     [Connection: close] from the returned header. *)
-
-val fix_trailer :
-  header:Header.t -> chunked:bool -> (Header.t option * Header.t, error) result
-(** [fixTrailer]: parse the [Trailer] header into a trailer header (keys with
-    empty value lists), returning it and the header with [Trailer] deleted.
-    [Ok (None, _)] when not chunked or no usable trailer. [Error (Bad_header _)]
-    on a forbidden trailer key. *)
-
-val parse_transfer_encoding :
-  major:int -> minor:int -> header:Header.t -> (bool * Header.t, error) result
-(** [parse_transfer_encoding]: returns whether the message is chunked and the
-    header with Transfer-Encoding consumed. HTTP/1.0 ignores Transfer-Encoding
-    (Issue 12785). [Error (Unsupported_transfer_encoding _)] / [Error (Chunk _)]
-    for unsupported / too-many encodings. *)
 
 (* --- read_transfer. --- *)
 
@@ -193,3 +163,40 @@ val write_body : Eio.Buf_write.t -> transfer_writer -> unit
 (** [transferWriter.writeBody]: write the body (chunked, fixed content-length,
     or unknown-length) and any trailers. Raises {!Chunk_error} on a
     ContentLength/body-length mismatch. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val parse_content_length : string list -> (int64, error) Stdlib.result
+  (** [parseContentLength]: [Ok (-1L)] if unset, else the parsed value;
+      [Error (Bad_content_length _)] on an invalid value. *)
+
+  val fix_length :
+    is_response:bool ->
+    status:int ->
+    request_method:Httpg_base.Method.t ->
+    header:Header.t ->
+    chunked:bool ->
+    (int64 * Header.t, error) Stdlib.result
+  (** [fixLength]: the expected body length per RFC 7230 3.3. Version-sensitive
+      via [chunked]. Returns the length and the header with framing keys
+      consumed (dedup / delete Content-Length), as Go does. [Error] on
+      conflicting / invalid Content-Length (header-parse boundary). *)
+
+  val fix_trailer :
+    header:Header.t ->
+    chunked:bool ->
+    (Header.t option * Header.t, error) Stdlib.result
+  (** [fixTrailer]: parse the [Trailer] header into a trailer header (keys with
+      empty value lists), returning it and the header with [Trailer] deleted.
+      [Ok (None, _)] when not chunked or no usable trailer.
+      [Error (Bad_header _)] on a forbidden trailer key. *)
+
+  val parse_transfer_encoding :
+    major:int -> minor:int -> header:Header.t -> (bool * Header.t, error) Stdlib.result
+  (** [parse_transfer_encoding]: returns whether the message is chunked and the
+      header with Transfer-Encoding consumed. HTTP/1.0 ignores Transfer-Encoding
+      (Issue 12785). [Error (Unsupported_transfer_encoding _)] / [Error (Chunk
+      _)] for unsupported / too-many encodings. *)
+end

@@ -25,11 +25,11 @@ let test_inflow_add_small () =
 (* TestInflowAdd *)
 let test_inflow_add () =
   let f = Flow.create_inflow () in
-  Flow.inflow_init f (Int32.of_int (10 * Flow.inflow_min_refresh));
+  Flow.inflow_init f (Int32.of_int (10 * Flow.Private.inflow_min_refresh));
   Alcotest.check i32 "add(minRefresh-1)" 0l
-    (Flow.inflow_add f (Flow.inflow_min_refresh - 1));
+    (Flow.inflow_add f (Flow.Private.inflow_min_refresh - 1));
   Alcotest.check i32 "add(1) reaches minRefresh"
-    (Int32.of_int Flow.inflow_min_refresh)
+    (Int32.of_int Flow.Private.inflow_min_refresh)
     (Flow.inflow_add f 1)
 
 (* TestTakeInflows *)

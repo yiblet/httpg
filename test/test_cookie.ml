@@ -522,7 +522,8 @@ let sanitize_path_cases =
         `Quick,
         fun () ->
           Alcotest.(check string)
-            "sanitize_cookie_path" want (sanitize_cookie_path inp) ))
+            "sanitize_cookie_path" want
+            (Private.sanitize_cookie_path inp) ))
     sanitize_path_tests
 
 (* ---------- TestCookieValid ---------- *)

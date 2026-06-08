@@ -27,10 +27,6 @@ val err_code_of_int : int -> err_code
 (** Maps a 32-bit wire value to an [err_code]; unknown values become
     [Unknown v]. *)
 
-val err_code_string : err_code -> string
-(** Mirrors Go's [(ErrCode).String]: the [errCodeName] map, falling back to
-    ["unknown error code 0xN"] for unknown codes. *)
-
 exception Connection_error of err_code
 (** [ConnectionError] is an error that results in the termination of the entire
     connection. Mirrors Go's [ConnectionError]. *)
@@ -84,3 +80,12 @@ val of_exception : exn -> t option
 (** [of_exception e] recognizes the exceptions the internal raising paths use
     and maps them to a unified {!t}; [None] for an exception that is not an
     HTTP/2 boundary error. *)
+
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val err_code_string : err_code -> string
+  (** Mirrors Go's [(ErrCode).String]: the [errCodeName] map, falling back to
+      ["unknown error code 0xN"] for unknown codes. *)
+end

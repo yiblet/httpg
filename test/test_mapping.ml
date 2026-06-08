@@ -5,11 +5,11 @@ module Mapping = Httpg_internal.Mapping
 (* TestMapping: stays a slice up to max_slice, switches to map beyond. *)
 let test_mapping () =
   let m = Mapping.create () in
-  for i = 0 to Mapping.max_slice - 1 do
+  for i = 0 to Mapping.Private.max_slice - 1 do
     Mapping.add m i (string_of_int i)
   done;
   Alcotest.(check bool) "still slice (m.m == nil)" false (Mapping.using_map m);
-  for i = 0 to Mapping.max_slice - 1 do
+  for i = 0 to Mapping.Private.max_slice - 1 do
     let g = Mapping.find m i in
     Alcotest.(check (option string))
       (Printf.sprintf "find %d" i)
@@ -26,7 +26,7 @@ let test_mapping () =
 let test_each_pair () =
   let m = Mapping.create () in
   let want = Hashtbl.create 16 in
-  for i = 0 to (Mapping.max_slice * 2) - 1 do
+  for i = 0 to (Mapping.Private.max_slice * 2) - 1 do
     let v = string_of_int i in
     Mapping.add m i v;
     Hashtbl.replace want i v

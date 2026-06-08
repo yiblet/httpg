@@ -620,3 +620,10 @@ let write_body (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
               t.tw_content_length !n));
     after_body ()
   end
+
+module Private = struct
+  let parse_content_length = parse_content_length
+  let fix_length = fix_length
+  let fix_trailer = fix_trailer
+  let parse_transfer_encoding = parse_transfer_encoding
+end

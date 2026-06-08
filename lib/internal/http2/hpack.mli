@@ -8,13 +8,6 @@ type header_field = Hpack_tables.header_field = {
   sensitive : bool;
 }
 
-(* ---- low-level primitives (RFC 7541 sections 5.1 / 5.2) ---- *)
-
-val append_var_int : Buffer.t -> int -> int -> unit
-(** [append_var_int buf n i] appends [i] using an [n]-bit prefix integer
-    representation to [buf]. Mirrors Go's [appendVarInt]. The high bits of the
-    first byte are left zero (the caller ORs in any flag). *)
-
 (* ---- decoder errors ---- *)
 
 (** A handleable HPACK decode error. The arms mirror Go's [DecodingError]
@@ -31,13 +24,6 @@ type error =
 
 val error_to_string : error -> string
 (** Renders {!error} as a human-readable string. *)
-
-val read_var_int : int -> string -> int -> (int * int, error) result
-(** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos] of
-    [s]. Returns [Ok (value, next_pos)] or [Error Var_int_overflow]. Mirrors
-    Go's [readVarInt]. [n] must be 1..8 (raises [Invalid_argument] otherwise — a
-    programmer error). Raises the internal {!Need_more} sentinel when [s] is
-    truncated (see below). *)
 
 exception Need_more
 (** Internal control-flow sentinel: the buffer is truncated and more data is
@@ -69,10 +55,6 @@ val set_writer : encoder -> (string -> unit) -> unit
 (** [set_writer e f] installs a callback invoked with the bytes produced by each
     {!write_field} (mirrors Go's [io.Writer] target). When set, the encoder
     buffer is not accumulated across fields. *)
-
-val encode_to_string : encoder -> header_field list -> string
-(** [encode_to_string e fs] is a convenience: encodes the list [fs] into a
-    single string using an internal accumulator. *)
 
 val set_max_dynamic_table_size : encoder -> int -> unit
 (** [set_max_dynamic_table_size e v] changes the encoder's dynamic table max
@@ -139,8 +121,29 @@ val close : decoder -> unit
 (** [close d] is {!close_result} but {b raises} on truncated headers. Mirrors
     Go's [Decoder.Close]. *)
 
-val decode_full : decoder -> string -> (header_field list, error) result
-(** [decode_full d p] decodes the whole block [p] into a header-field list.
-    Returns [Error] on a handleable decode error (invalid index, truncated
-    headers, oversized string, invalid Huffman, varint overflow). Mirrors Go's
-    [DecodeFull]. *)
+module Private : sig
+  (** Helpers exposed only for the ported white-box tests; not part of the
+      public API. *)
+
+  val append_var_int : Buffer.t -> int -> int -> unit
+  (** [append_var_int buf n i] appends [i] using an [n]-bit prefix integer
+      representation to [buf]. Mirrors Go's [appendVarInt]. The high bits of the
+      first byte are left zero (the caller ORs in any flag). *)
+
+  val read_var_int : int -> string -> int -> (int * int, error) result
+  (** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos]
+      of [s]. Returns [Ok (value, next_pos)] or [Error Var_int_overflow].
+      Mirrors Go's [readVarInt]. [n] must be 1..8 (raises [Invalid_argument]
+      otherwise — a programmer error). Raises the internal {!Need_more} sentinel
+      when [s] is truncated. *)
+
+  val encode_to_string : encoder -> header_field list -> string
+  (** [encode_to_string e fs] is a convenience: encodes the list [fs] into a
+      single string using an internal accumulator. *)
+
+  val decode_full : decoder -> string -> (header_field list, error) result
+  (** [decode_full d p] decodes the whole block [p] into a header-field list.
+      Returns [Error] on a handleable decode error (invalid index, truncated
+      headers, oversized string, invalid Huffman, varint overflow). Mirrors Go's
+      [DecodeFull]. *)
+end
