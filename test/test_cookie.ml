@@ -52,9 +52,9 @@ let cookie_t = Alcotest.testable (Fmt.of_to_string cookie_to_string) cookie_eq
 let default_cookie_max_num = 3000
 
 let header_of pairs =
-  let h = Header.create () in
-  List.iter (fun (k, vs) -> List.iter (fun v -> Header.add h k v) vs) pairs;
-  h
+  List.fold_left
+    (fun h (k, vs) -> List.fold_left (fun h v -> Header.add h k v) h vs)
+    (Header.create ()) pairs
 
 (* Reference epochs (Unix seconds, UTC), matching Go's time.Date values. *)
 let exp_2009 = 1257894000. (* Tue, 10 Nov 2009 23:00:00 GMT *)

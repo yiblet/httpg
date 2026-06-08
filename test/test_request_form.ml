@@ -17,10 +17,11 @@ let run x = x
 (* Build a Body.t Request.t with the given method, raw URL (query taken from
    it), Content-Type header and urlencoded/multipart body string. *)
 let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
-  let header = Header.create () in
-  (match content_type with
-  | Some ct -> Header.set header "Content-Type" ct
-  | None -> ());
+  let header =
+    match content_type with
+    | Some ct -> Header.set (Header.create ()) "Content-Type" ct
+    | None -> Header.create ()
+  in
   {
     Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;
@@ -134,10 +135,11 @@ let str_contains haystack needle =
 let parse_form_unknown_content_type () =
   let check name ?content_type want_err =
     let r =
-      let header = Header.create () in
-      (match content_type with
-      | Some ct -> Header.set header "Content-Type" ct
-      | None -> ());
+      let header =
+        match content_type with
+        | Some ct -> Header.set (Header.create ()) "Content-Type" ct
+        | None -> Header.create ()
+      in
       {
         Request.meth = Httpg_base.Method.Post;
         url = Uri.of_string "http://x/";

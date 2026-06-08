@@ -1,23 +1,25 @@
 (* Port of go/src/net/http/header.go (and the textproto canonicalization /
    MIMEHeader methods it delegates to). *)
 
-type t = (string, string list) Hashtbl.t
+type t
 (** A [t] represents the key-value pairs in an HTTP header, i.e. Go's
-    [Header map[string][]string]. It is a hash map keyed by canonical key (one
-    value slice per key), exposed transparently like Go's public map type. Keys
-    are expected to be in canonical form as produced by {!canonical_header_key}.
-    Iteration order is unspecified (as in Go); {!write} sorts keys. *)
+    [Header map[string][]string]. Unlike Go's mutable map, [t] is a
+    {b persistent} map keyed by canonical key (one value list per key): the
+    mutating helpers ({!add}/{!set}/{!del}) return a new header and sharing is
+    structural, so copy-on-write is free. Keys are expected to be in canonical
+    form as produced by {!canonical_header_key}. Iteration is in sorted key
+    order; {!write} relies on that. *)
 
 val create : unit -> t
 (** An empty header. *)
 
 val of_list : (string * string list) list -> t
-(** [of_list pairs] builds a header from raw [(key, values)] entries, storing
-    keys verbatim (no canonicalization), mirroring a Go map literal. Used mainly
-    to reproduce test tables. *)
+(** [of_list pairs] builds a header from [(key, values)] entries (keys
+    canonicalized; later duplicates overwrite earlier ones). Used mainly to
+    reproduce test tables. *)
 
 val to_list : t -> (string * string list) list
-(** All [(key, values)] entries in unspecified order. *)
+(** All [(key, values)] entries in sorted (canonical) key order. *)
 
 val canonical_header_key : string -> string
 (** Port of [textproto.CanonicalMIMEHeaderKey]: capitalize the first letter and
@@ -25,13 +27,18 @@ val canonical_header_key : string -> string
     contains a space or an invalid header field byte, it is returned unchanged.
 *)
 
-val add : t -> string -> string -> unit
-(** [add h key value] appends to any existing values for the canonicalized key
-    (Go's [Header.Add]). *)
+val add : t -> string -> string -> t
+(** [add h key value] returns [h] with [value] appended to any existing values
+    for the canonicalized key (Go's [Header.Add]). *)
 
-val set : t -> string -> string -> unit
-(** [set h key value] replaces existing values with the single [value] (Go's
-    [Header.Set]). *)
+val set : t -> string -> string -> t
+(** [set h key value] returns [h] with existing values replaced by the single
+    [value] (Go's [Header.Set]). *)
+
+val set_values : t -> string -> string list -> t
+(** [set_values h key vs] returns [h] with the whole value list for the
+    canonicalized key replaced by [vs] (which may be [[]] — e.g. to record a
+    trailer key). *)
 
 val get : t -> string -> string
 (** [get h key] returns the first value for the canonicalized key, or "" if
@@ -41,14 +48,24 @@ val values : t -> string -> string list
 (** [values h key] returns all values for the key, or [[]] if absent (Go's
     [Header.Values]). *)
 
-val del : t -> string -> unit
-(** [del h key] removes the canonicalized key (Go's [Header.Del]). *)
+val del : t -> string -> t
+(** [del h key] returns [h] without the canonicalized key (Go's [Header.Del]).
+*)
 
 val has : t -> string -> bool
 (** Whether the canonicalized key is defined. *)
 
-val clone : t -> t
-(** A deep copy of the header (Go's [Header.Clone]). *)
+val is_empty : t -> bool
+(** Whether the header has no entries. *)
+
+val cardinal : t -> int
+(** Number of distinct (canonical) keys. *)
+
+val iter : (string -> string list -> unit) -> t -> unit
+(** Iterate over [(key, values)] entries in sorted key order. *)
+
+val fold : (string -> string list -> 'a -> 'a) -> t -> 'a -> 'a
+(** Fold over [(key, values)] entries in sorted key order. *)
 
 val valid_header_field_name : string -> bool
 (** Whether [s] is a valid HTTP/1.x header field name: a non-empty RFC 7230

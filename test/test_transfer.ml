@@ -194,8 +194,7 @@ let test_parse_content_length_result () =
         (match other with
         | Ok n -> Printf.sprintf "Ok %Ld" n
         | Error e -> "Error " ^ Transfer.error_to_string e));
-  let h = Header.create () in
-  Hashtbl.replace h "Content-Length" [ "5"; "6" ];
+  let h = Header.set_values (Header.create ()) "Content-Length" [ "5"; "6" ] in
   match
     Transfer.fix_length ~is_response:false ~status:200
       ~request_method:Httpg_base.Method.Post ~header:h ~chunked:false
@@ -205,13 +204,12 @@ let test_parse_content_length_result () =
   | Error e ->
       Alcotest.failf "conflicting CL -> Error %s; want Chunk"
         (Transfer.error_to_string e)
-  | Ok n -> Alcotest.failf "conflicting CL = Ok %Ld; want Error" n
+  | Ok (n, _) -> Alcotest.failf "conflicting CL = Ok %Ld; want Error" n
 
 (* --- transfer.go: TestParseTransferEncoding (the error/ok rows). *)
 let test_parse_transfer_encoding () =
   let run te =
-    let h = Header.create () in
-    Hashtbl.replace h "Transfer-Encoding" te;
+    let h = Header.set_values (Header.create ()) "Transfer-Encoding" te in
     Transfer.parse_transfer_encoding ~major:1 ~minor:1 ~header:h
   in
   let err te frag =
@@ -227,7 +225,8 @@ let test_parse_transfer_encoding () =
              ignore (Str.search_forward re msg 0);
              true
            with Not_found -> false)
-    | Ok b -> Alcotest.failf "TE %s = %b; want error" (String.concat "," te) b
+    | Ok (b, _) ->
+        Alcotest.failf "TE %s = %b; want error" (String.concat "," te) b
   in
   err [ "fugazi" ] "unsupported transfer encoding";
   err
@@ -238,21 +237,22 @@ let test_parse_transfer_encoding () =
   err [ "chunked"; "identity" ] "too many transfer encodings";
   Alcotest.(check bool)
     "chunked alone -> true" true
-    (match run [ "chunked" ] with Ok b -> b | Error _ -> false);
-  let h = Header.create () in
-  Hashtbl.replace h "Transfer-Encoding" [ "chunked" ];
+    (match run [ "chunked" ] with Ok (b, _) -> b | Error _ -> false);
+  let h =
+    Header.set_values (Header.create ()) "Transfer-Encoding" [ "chunked" ]
+  in
   Alcotest.(check bool)
     "HTTP/1.0 ignores TE" false
     (match Transfer.parse_transfer_encoding ~major:1 ~minor:0 ~header:h with
-    | Ok b -> b
+    | Ok (b, _) -> b
     | Error _ -> true)
 
 (* --- fix_length: status/method/version-driven length rules. *)
 let test_fix_length () =
   let mk pairs =
-    let h = Header.create () in
-    List.iter (fun (k, v) -> Hashtbl.replace h k [ v ]) pairs;
-    h
+    List.fold_left
+      (fun h (k, v) -> Header.set_values h k [ v ])
+      (Header.create ()) pairs
   in
   let check name ~is_response ~status ~request_method ~header ~chunked expected
       =
@@ -261,7 +261,7 @@ let test_fix_length () =
         ~request_method:(Httpg_base.Method.of_string request_method)
         ~header ~chunked
     with
-    | Ok got -> Alcotest.(check int64) name expected got
+    | Ok (got, _) -> Alcotest.(check int64) name expected got
     | Error e ->
         Alcotest.failf "%s: unexpected error %s" name
           (Transfer.error_to_string e)
@@ -277,11 +277,16 @@ let test_fix_length () =
   check "100 -> 0" ~is_response:true ~status:100 ~request_method:"GET"
     ~header:(mk []) ~chunked:false 0L;
   let h = mk [ ("Content-Length", "10") ] in
-  check "chunked -> -1" ~is_response:true ~status:200 ~request_method:"GET"
-    ~header:h ~chunked:true (-1L);
-  Alcotest.(check (list string))
-    "chunked drops Content-Length" []
-    (Header.values h "Content-Length");
+  (match
+     Transfer.fix_length ~is_response:true ~status:200
+       ~request_method:Httpg_base.Method.Get ~header:h ~chunked:true
+   with
+  | Ok (got, h') ->
+      Alcotest.(check int64) "chunked -> -1" (-1L) got;
+      Alcotest.(check (list string))
+        "chunked drops Content-Length" []
+        (Header.values h' "Content-Length")
+  | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e));
   check "explicit CL -> value" ~is_response:true ~status:200
     ~request_method:"GET"
     ~header:(mk [ ("Content-Length", "42") ])
@@ -290,17 +295,15 @@ let test_fix_length () =
     ~request_method:"GET" ~header:(mk []) ~chunked:false 0L;
   check "response no CL -> -1" ~is_response:true ~status:200
     ~request_method:"GET" ~header:(mk []) ~chunked:false (-1L);
-  let hd = Header.create () in
-  Hashtbl.replace hd "Content-Length" [ "5"; "5" ];
+  let hd = Header.set_values (Header.create ()) "Content-Length" [ "5"; "5" ] in
   check "dup identical CL -> value" ~is_response:false ~status:200
     ~request_method:"POST" ~header:hd ~chunked:false 5L;
-  let hc = Header.create () in
-  Hashtbl.replace hc "Content-Length" [ "5"; "6" ];
+  let hc = Header.set_values (Header.create ()) "Content-Length" [ "5"; "6" ] in
   match
     Transfer.fix_length ~is_response:false ~status:200
       ~request_method:Httpg_base.Method.Post ~header:hc ~chunked:false
   with
-  | Ok n -> Alcotest.failf "conflicting CL = %Ld; want error" n
+  | Ok (n, _) -> Alcotest.failf "conflicting CL = %Ld; want error" n
   | Error (Transfer.Chunk _) ->
       Alcotest.(check pass) "conflicting CL errors" () ()
   | Error e ->
@@ -310,17 +313,16 @@ let test_fix_length () =
 (* --- should_close: version-sensitive connection management. *)
 let test_should_close () =
   let mk conn =
-    let h = Header.create () in
-    (match conn with
-    | Some v -> Hashtbl.replace h "Connection" [ v ]
-    | None -> ());
-    h
+    match conn with
+    | Some v -> Header.set_values (Header.create ()) "Connection" [ v ]
+    | None -> Header.create ()
   in
   let chk name ~major ~minor conn expected =
     Alcotest.(check bool)
       name expected
-      (Transfer.should_close ~major ~minor ~header:(mk conn)
-         ~remove_close_header:false)
+      (fst
+         (Transfer.should_close ~major ~minor ~header:(mk conn)
+            ~remove_close_header:false))
   in
   chk "major<1 closes" ~major:0 ~minor:9 None true;
   chk "1.0 default closes" ~major:1 ~minor:0 None true;
@@ -331,24 +333,23 @@ let test_should_close () =
 
 (* --- fix_trailer. *)
 let test_fix_trailer () =
-  let mk_tr v =
-    let h = Header.create () in
-    Hashtbl.replace h "Trailer" [ v ];
-    h
-  in
+  let mk_tr v = Header.set_values (Header.create ()) "Trailer" [ v ] in
   Alcotest.(check bool)
     "trailer ignored when not chunked" true
-    (Transfer.fix_trailer ~header:(mk_tr "Md5") ~chunked:false = Ok None);
-  let h = mk_tr "md5, Some-Other" in
-  (match Transfer.fix_trailer ~header:h ~chunked:true with
-  | Ok (Some tr) ->
+    (match Transfer.fix_trailer ~header:(mk_tr "Md5") ~chunked:false with
+    | Ok (None, _) -> true
+    | _ -> false);
+  (match
+     Transfer.fix_trailer ~header:(mk_tr "md5, Some-Other") ~chunked:true
+   with
+  | Ok (Some tr, h') ->
       Alcotest.(check bool)
-        "Trailer header deleted" false (Header.has h "Trailer");
-      Alcotest.(check bool) "trailer has Md5" true (Hashtbl.mem tr "Md5");
+        "Trailer header deleted" false (Header.has h' "Trailer");
+      Alcotest.(check bool) "trailer has Md5" true (Header.has tr "Md5");
       Alcotest.(check bool)
         "trailer has Some-Other" true
-        (Hashtbl.mem tr "Some-Other")
-  | Ok None -> Alcotest.fail "expected a trailer"
+        (Header.has tr "Some-Other")
+  | Ok (None, _) -> Alcotest.fail "expected a trailer"
   | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e));
   match Transfer.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true with
   | Ok _ -> Alcotest.fail "expected bad trailer key error"
@@ -439,8 +440,9 @@ let test_write_body_fixed_stream_mismatch () =
 
 (* --- read_transfer: end-to-end chunked response body decode. *)
 let test_read_transfer_chunked () =
-  let h = Header.create () in
-  Hashtbl.replace h "Transfer-Encoding" [ "chunked" ];
+  let h =
+    Header.set_values (Header.create ()) "Transfer-Encoding" [ "chunked" ]
+  in
   let msg =
     {
       Transfer.is_response = true;
@@ -465,8 +467,7 @@ let test_read_transfer_chunked () =
 
 (* --- read_transfer: fixed content-length body. *)
 let test_read_transfer_content_length () =
-  let h = Header.create () in
-  Hashtbl.replace h "Content-Length" [ "5" ];
+  let h = Header.set_values (Header.create ()) "Content-Length" [ "5" ] in
   let msg =
     {
       Transfer.is_response = false;
@@ -503,8 +504,9 @@ let test_read_transfer_bad_chunk () =
     }
   in
   (* (a) Boundary error: unsupported transfer encoding -> Error. *)
-  let h_bad_te = Header.create () in
-  Hashtbl.replace h_bad_te "Transfer-Encoding" [ "fugazi" ];
+  let h_bad_te =
+    Header.set_values (Header.create ()) "Transfer-Encoding" [ "fugazi" ]
+  in
   (match Transfer.read_transfer (mk_msg h_bad_te) (buf_read_of_string "") with
   | Error (Transfer.Unsupported_transfer_encoding "fugazi") ->
       Alcotest.(check pass) "unsupported TE -> Error" () ()
@@ -515,8 +517,9 @@ let test_read_transfer_bad_chunk () =
   | Ok _ -> Alcotest.fail "unsupported TE -> Ok; want Error");
   (* (b) Mid-stream bad chunk size: read_transfer returns Ok, the body thunk
      raises Chunk_error when it parses the bad hex size. *)
-  let h_chunked = Header.create () in
-  Hashtbl.replace h_chunked "Transfer-Encoding" [ "chunked" ];
+  let h_chunked =
+    Header.set_values (Header.create ()) "Transfer-Encoding" [ "chunked" ]
+  in
   let r = buf_read_of_string "zz\r\nnope\r\n0\r\n\r\n" in
   match Transfer.read_transfer (mk_msg h_chunked) r with
   | Error e ->

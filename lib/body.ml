@@ -8,6 +8,16 @@ let empty = Empty
 let of_string s = String s
 let of_stream f = Stream f
 
+let of_lazy_string (s : string Lazy.t) : t =
+  let yielded = ref false in
+  Stream
+    (fun () ->
+      if !yielded then None
+      else begin
+        yielded := true;
+        Some (Lazy.force s)
+      end)
+
 type stream = unit -> string option
 
 let as_stream (b : t) =
@@ -64,21 +74,6 @@ let concat (gens : t list) : t =
   in
   Stream next
 
-let read_all (b : t) : string =
-  match b with
-  | Empty -> ""
-  | String s -> s
-  | Stream next ->
-      let buf = Buffer.create 256 in
-      let rec loop () =
-        match next () with
-        | None -> Buffer.contents buf
-        | Some s ->
-            Buffer.add_string buf s;
-            loop ()
-      in
-      loop ()
-
 (* Read and discard until EOF, or until more than [limit] bytes have been read.
    [`Drained] (within [limit]) positions a kept-alive conn at the next message
    boundary; [`Too_big] when [limit] was exceeded. Analogue of Go's bounded
@@ -114,6 +109,19 @@ let iter (f : string -> unit) (b : t) : unit =
             loop ()
       in
       loop ()
+
+let fold f (b : t) acc =
+  let acc = ref acc in
+  iter (fun s -> acc := f s !acc) b;
+  !acc
+
+let read_all (b : t) : string =
+  let buf = Buffer.create 256 in
+  let folder s buf =
+    Buffer.add_string buf s;
+    buf
+  in
+  fold folder b buf |> Buffer.contents
 
 (* Write the raw body bytes to [w] (no framing). *)
 let write (w : Eio.Buf_write.t) (b : t) : unit = iter (Eio.Buf_write.string w) b

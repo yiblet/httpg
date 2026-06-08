@@ -214,8 +214,7 @@ let local_redirect (r : Body.t Request.t) new_path : Body.t Response.t =
     | Some q when q <> "" -> new_path ^ "?" ^ q
     | _ -> new_path
   in
-  let h = Header.create () in
-  Header.set h "Location" new_path;
+  let h = Header.set (Header.create ()) "Location" new_path in
   respond ~header:h Httpg_base.Status.MovedPermanently
 
 (* ---- dirList ---- *)
@@ -261,8 +260,9 @@ let dir_list (_r : Body.t Request.t) (f : file) : Body.t Response.t =
             ("<a href=\"" ^ href ^ "\">" ^ html_escape name ^ "</a>\n"))
         entries;
       Buffer.add_string buf "</pre>\n";
-      let h = Header.create () in
-      Header.set h "Content-Type" "text/html; charset=utf-8";
+      let h =
+        Header.set (Header.create ()) "Content-Type" "text/html; charset=utf-8"
+      in
       respond ~header:h
         ~body:(Body.String (Buffer.contents buf))
         Httpg_base.Status.Ok
@@ -425,11 +425,13 @@ let check_if_range ~etag (r : Body.t Request.t) ~modtime =
 (* Go writeNotModified: a 304 response, clearing representation metadata from
    the response header built so far. *)
 let not_modified_response header : Body.t Response.t =
-  let h = Header.clone header in
-  Header.del h "Content-Type";
-  Header.del h "Content-Length";
-  Header.del h "Content-Encoding";
-  if Header.get h "Etag" <> "" then Header.del h "Last-Modified";
+  let h = header in
+  let h = Header.del h "Content-Type" in
+  let h = Header.del h "Content-Length" in
+  let h = Header.del h "Content-Encoding" in
+  let h =
+    if Header.get h "Etag" <> "" then Header.del h "Last-Modified" else h
+  in
   respond ~header:h Httpg_base.Status.NotModified
 
 (* Go checkPreconditions: evaluate request preconditions. Returns either a
@@ -441,9 +443,7 @@ let not_modified_response header : Body.t Response.t =
 let check_preconditions ~header ~etag (r : Body.t Request.t) ~modtime :
     [ `Done of Body.t Response.t | `Range of string ] =
   let precondition_failed () =
-    `Done
-      (respond ~header:(Header.clone header)
-         Httpg_base.Status.PreconditionFailed)
+    `Done (respond ~header Httpg_base.Status.PreconditionFailed)
   in
   let gated_range () =
     let range_header = Header.get r.Request.header "Range" in
@@ -629,6 +629,7 @@ let ext_of name =
 let set_last_modified h modtime =
   if not (is_zero_time modtime) then
     Header.set h "Last-Modified" (Http_time.format_gmt modtime)
+  else h
 
 (* Sniff probe length, mirroring internal.SniffLen (512). *)
 let sniff_len = 512
@@ -660,7 +661,7 @@ let window_body ~read_window ~start ~length : Body.t =
 (* Full-body 200 path (no range, or range ignored). *)
 let serve_full (r : Body.t Request.t) ~h ~size ~read_window : Body.t Response.t
     =
-  Header.set h "Accept-Ranges" "bytes";
+  let h = Header.set h "Accept-Ranges" "bytes" in
   (* Go sends Content-Length only when there is no Content-Encoding. *)
   let content_length =
     if Header.get h "Content-Encoding" = "" then size else -1L
@@ -674,25 +675,25 @@ let serve_full (r : Body.t Request.t) ~h ~size ~read_window : Body.t Response.t
 let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
     ~modtime ~size ~read_window : Body.t Response.t =
   (* [header] carries caller-set fields (e.g. Etag, an explicit Content-Type).
-     We build the response header on a clone so the caller's value is untouched. *)
-  let h = Header.clone header in
-  set_last_modified h modtime;
-  let etag = Header.get h "Etag" in
-  match check_preconditions ~header:h ~etag r ~modtime with
+     [h] is the response header we build up (a persistent value held in a ref so
+     the conditional sets below read naturally). *)
+  let h = ref (set_last_modified header modtime) in
+  let etag = Header.get !h "Etag" in
+  match check_preconditions ~header:!h ~etag r ~modtime with
   | `Done resp -> resp
   | `Range range_req ->
       (* Content-Type: ext table → Sniff fallback, unless the caller set it. *)
-      (if not (Header.has h "Content-Type") then
+      (if not (Header.has !h "Content-Type") then
          match mime_by_ext (ext_of name) with
-         | Some ctype -> Header.set h "Content-Type" ctype
+         | Some ctype -> h := Header.set !h "Content-Type" ctype
          | None ->
              let probe =
                if size < Int64.of_int sniff_len then Int64.to_int size
                else sniff_len
              in
              let buf = read_window ~off:0L ~len:probe in
-             Header.set h "Content-Type" (Sniff.detect_content_type buf));
-      let ctype = Header.get h "Content-Type" in
+             h := Header.set !h "Content-Type" (Sniff.detect_content_type buf));
+      let ctype = Header.get !h "Content-Type" in
       let is_head = r.Request.meth = Httpg_base.Method.Head in
       (* parse the (If-Range-gated) Range header, then dispatch
          full-200 / single-206 / multipart-206 / 416. *)
@@ -702,7 +703,7 @@ let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
       begin match parse_range range_req size with
       | Error No_overlap when size = 0L ->
           (* Empty file + unsatisfiable range: ignore the range, serve 200. *)
-          serve_full r ~h ~size ~read_window
+          serve_full r ~h:!h ~size ~read_window
       | Error No_overlap ->
           range_error "invalid range: failed to overlap"
           |> Response.with_set_header "Content-Range"
@@ -711,25 +712,26 @@ let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
       | Ok ranges -> (
           (* If the total range size exceeds the file, treat as no range (Go). *)
           let ranges = if sum_ranges_size ranges > size then [] else ranges in
-          Header.set h "Accept-Ranges" "bytes";
+          h := Header.set !h "Accept-Ranges" "bytes";
           match ranges with
-          | [] -> serve_full r ~h ~size ~read_window
+          | [] -> serve_full r ~h:!h ~size ~read_window
           | [ ra ] ->
               (* single range → 206 + Content-Range *)
-              Header.set h "Content-Range" (content_range ra size);
+              h := Header.set !h "Content-Range" (content_range ra size);
               let body =
                 if is_head then Body.Empty
                 else window_body ~read_window ~start:ra.start ~length:ra.length
               in
-              respond ~header:h ~body ~content_length:ra.length
+              respond ~header:!h ~body ~content_length:ra.length
                 Httpg_base.Status.PartialContent
           | ranges ->
               (* multiple ranges → 206 multipart/byteranges *)
               let send_size =
                 ranges_mime_size ranges ~content_type:ctype ~size
               in
-              Header.set h "Content-Type"
-                ("multipart/byteranges; boundary=" ^ multipart_boundary);
+              h :=
+                Header.set !h "Content-Type"
+                  ("multipart/byteranges; boundary=" ^ multipart_boundary);
               let body =
                 if is_head then Body.Empty
                 else
@@ -764,7 +766,7 @@ let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
                           (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary);
                       ])
               in
-              respond ~header:h ~body ~content_length:send_size
+              respond ~header:!h ~body ~content_length:send_size
                 Httpg_base.Status.PartialContent)
       end
 

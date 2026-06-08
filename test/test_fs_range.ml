@@ -27,7 +27,8 @@ let write_file dir name contents =
    not redirects, so [Client.do_] returns them directly. *)
 let request_with_headers ~sw c url headers =
   let req = Client.make_request Httpg_base.Method.Get url in
-  List.iter (fun (k, v) -> Header.set req.Request.header k v) headers;
+  req.Request.header <-
+    List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
   let resp = Client.do_ ~sw c req in
   ( Httpg_base.Status.to_int resp.Response.status,
     Body.read_all resp.Response.body,

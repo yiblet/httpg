@@ -220,7 +220,8 @@ let reusable t (req : Body.t Request.t) (resp : Body.t Response.t) =
 let set_default_headers (req : Body.t Request.t) ~host =
   if req.Request.host = "" then req.Request.host <- host;
   if Header.get req.Request.header "User-Agent" = "" then
-    Header.set req.Request.header "User-Agent" default_user_agent
+    req.Request.header <-
+      Header.set req.Request.header "User-Agent" default_user_agent
 
 let or_raise = function
   | Ok v -> v
@@ -368,13 +369,27 @@ let body_of_api_body (b : Api.Body.t) : Body.t =
   | Api.Body.String s -> Body.String s
   | Api.Body.Stream f -> Body.Stream f
 
+(* The public Header is a persistent Map; the decoupled Api.header is a mutable
+   Hashtbl. Convert at the shim boundary. *)
+let api_header_of_header (h : Header.t) : Api.header =
+  let t = Api.Header.create () in
+  Header.iter (fun k vs -> List.iter (fun v -> Api.Header.add t k v) vs) h;
+  t
+
+let header_of_api_header (t : Api.header) : Header.t =
+  List.fold_left
+    (fun acc (k, vs) -> Header.set_values acc k vs)
+    (Header.create ()) (Api.Header.to_list t)
+
 let client_request_of_request (req : Body.t Request.t) : Api.client_request =
   {
     creq_meth = req.Request.meth;
     creq_url = req.Request.url;
-    creq_header = req.Request.header;
+    creq_header = api_header_of_header req.Request.header;
     creq_trailer =
-      (match req.Request.trailer with Some t -> t | None -> Header.create ());
+      (match req.Request.trailer with
+      | Some t -> api_header_of_header t
+      | None -> Api.Header.create ());
     creq_body = api_body_of_body req.Request.body;
     creq_host = req.Request.host;
     creq_content_length = req.Request.content_length;
@@ -385,14 +400,15 @@ let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
   {
     Response.status = cr.cres_status_code;
     proto = Httpg_base.Protocol.Http20;
-    header = cr.cres_header;
+    header = header_of_api_header cr.cres_header;
     body = body_of_api_body cr.cres_body;
     content_length = cr.cres_content_length;
     transfer_encoding = [];
     close = false;
     uncompressed = cr.cres_uncompressed;
     trailer =
-      (if Hashtbl.length cr.cres_trailer = 0 then None else Some cr.cres_trailer);
+      (if Hashtbl.length cr.cres_trailer = 0 then None
+       else Some (header_of_api_header cr.cres_trailer));
     request = None;
   }
 

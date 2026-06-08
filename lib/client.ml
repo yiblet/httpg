@@ -72,13 +72,14 @@ let body_header k =
   | _ -> false
 
 let copy_headers ~from ~into ~strip_sensitive ~strip_body =
-  Hashtbl.iter
-    (fun k vv ->
+  Header.fold
+    (fun k vv into ->
       if
         (not (sensitive_header k && strip_sensitive))
         && not (body_header k && strip_body)
-      then Hashtbl.replace into k vv)
-    from
+      then Header.set_values into k vv
+      else into)
+    from into
 
 let url_host (u : Uri.t) = match Uri.host u with Some h -> h | None -> ""
 
@@ -113,7 +114,7 @@ let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t =
     | Some f -> f
     | None -> fun r -> Transport.round_trip c.transport r
   in
-  let initial_header = Header.clone req.Request.header in
+  let initial_header = req.Request.header in
   let explicit_referer = Header.get req.Request.header "Referer" in
   (* Sticky strip latch (client.go:691-694): once stripped on a cross-host hop
      it never resets. *)
@@ -142,15 +143,18 @@ let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t =
                  (should_copy_header_on_redirect
                     ~initial:initial_req.Request.url ~dest:loc_url)
           then strip_sensitive := true;
-          let new_header = Header.create () in
-          copy_headers ~from:initial_header ~into:new_header
-            ~strip_sensitive:!strip_sensitive ~strip_body:(not include_body);
-          (match
-             referer_for_url ~last:req.Request.url ~next:loc_url
-               ~explicit:explicit_referer
-           with
-          | Some ref_ -> Header.set new_header "Referer" ref_
-          | None -> ());
+          let new_header =
+            copy_headers ~from:initial_header ~into:(Header.create ())
+              ~strip_sensitive:!strip_sensitive ~strip_body:(not include_body)
+          in
+          let new_header =
+            match
+              referer_for_url ~last:req.Request.url ~next:loc_url
+                ~explicit:explicit_referer
+            with
+            | Some ref_ -> Header.set new_header "Referer" ref_
+            | None -> new_header
+          in
           let new_req =
             {
               Request.meth = redirect_method;
@@ -224,5 +228,6 @@ let post ~sw c url ~content_type body =
     | Body.Stream _ -> -1L
   in
   let req = make_request ~body ~content_length:len Httpg_base.Method.post url in
-  Header.set req.Request.header "Content-Type" content_type;
+  req.Request.header <-
+    Header.set req.Request.header "Content-Type" content_type;
   do_ ~sw c req

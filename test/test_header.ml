@@ -80,13 +80,17 @@ let write_tests =
         ("k8", [ "8a"; "8b" ]);
         ("k9", [ "9a"; "9b" ]);
       ]
-      [ "k5" ]
-      ("k1: 1a\r\nk1: 1b\r\nk2: 2a\r\nk2: 2b\r\nk3: 3a\r\nk3: 3b\r\n"
-     ^ "k4: 4a\r\nk4: 4b\r\nk6: 6a\r\nk6: 6b\r\n"
-     ^ "k7: 7a\r\nk7: 7b\r\nk8: 8a\r\nk8: 8b\r\nk9: 9a\r\nk9: 9b\r\n");
+      (* keys are stored canonicalized ("k1" -> "K1"); exclude is by canonical
+         key, as real callers (server.ml excluded_headers) pass it. *)
+      [ "K5" ]
+      ("K1: 1a\r\nK1: 1b\r\nK2: 2a\r\nK2: 2b\r\nK3: 3a\r\nK3: 3b\r\n"
+     ^ "K4: 4a\r\nK4: 4b\r\nK6: 6a\r\nK6: 6b\r\n"
+     ^ "K7: 7a\r\nK7: 7b\r\nK8: 8a\r\nK8: 8b\r\nK9: 9a\r\nK9: 9b\r\n");
     (* Invalid characters in headers: keys with newlines/colons are not valid
        header field names and are dropped; newline-in-value is replaced with
-       spaces. We add the keys with their raw (non-canonical) text. *)
+       spaces. Keys are stored canonicalized ("NewlineInValue" ->
+       "Newlineinvalue"); keys with invalid bytes canonicalize to themselves and
+       are then dropped. *)
     write_test "invalid characters in headers"
       [
         ("Content-Type", [ "text/html; charset=UTF-8" ]);
@@ -97,7 +101,7 @@ let write_tests =
       ]
       []
       ("Content-Type: text/html; charset=UTF-8\r\n"
-     ^ "NewlineInValue: 1  Bar: 2\r\n");
+     ^ "Newlineinvalue: 1  Bar: 2\r\n");
   ]
 
 let canon_tests =
@@ -124,33 +128,35 @@ let canon_tests =
 let get_set_add_del () =
   let h = Header.create () in
   Alcotest.(check string) "missing -> empty" "" (Header.get h "Foo");
-  Header.set h "foo" "bar";
+  let h = Header.set h "foo" "bar" in
   Alcotest.(check string) "get canonicalizes" "bar" (Header.get h "FOO");
-  Header.set h "Foo" "baz";
+  let h = Header.set h "Foo" "baz" in
   Alcotest.(check string) "set replaces" "baz" (Header.get h "foo");
-  Header.add h "foo" "qux";
+  let h = Header.add h "foo" "qux" in
   Alcotest.(check (list string))
     "add appends" [ "baz"; "qux" ] (Header.values h "Foo");
-  Header.del h "FOO";
+  let h = Header.del h "FOO" in
   Alcotest.(check (list string)) "del removes" [] (Header.values h "foo");
   Alcotest.(check bool) "has after del" false (Header.has h "foo")
 
 let values_and_first () =
   let h = Header.create () in
-  Header.add h "X-Multi" "a";
-  Header.add h "X-Multi" "b";
-  Header.add h "X-Multi" "c";
+  let h = Header.add h "X-Multi" "a" in
+  let h = Header.add h "X-Multi" "b" in
+  let h = Header.add h "X-Multi" "c" in
   Alcotest.(check (list string))
     "values returns all" [ "a"; "b"; "c" ]
     (Header.values h "x-multi");
   Alcotest.(check string) "get returns first" "a" (Header.get h "x-multi")
 
+(* With a persistent header, deriving from a value never affects the original
+   (Go's Header.Clone independence, free from structural sharing). *)
 let clone_independent () =
   let h = Header.create () in
-  Header.set h "A" "1";
-  let h2 = Header.clone h in
-  Header.set h2 "A" "2";
-  Header.add h2 "B" "3";
+  let h = Header.set h "A" "1" in
+  let h2 = h in
+  let h2 = Header.set h2 "A" "2" in
+  let h2 = Header.add h2 "B" "3" in
   Alcotest.(check string) "original unchanged value" "1" (Header.get h "A");
   Alcotest.(check bool) "original has no B" false (Header.has h "B");
   Alcotest.(check string) "clone has new value" "2" (Header.get h2 "A");

@@ -16,6 +16,12 @@ val empty : t
 val of_string : string -> t
 val of_stream : (unit -> string option) -> t
 
+val of_lazy_string : string Lazy.t -> t
+(** [of_lazy_string s] is a body whose single chunk is [Lazy.force s], forced on
+    the first read (so the body is never materialized if it isn't read — e.g. a
+    HEAD response or an abandoned write). Unlike {!of_stream} the whole body is
+    one chunk; use {!of_stream} for chunked/large output. *)
+
 val append : t -> t -> t
 (** [append b1 b2] is a body that yields all of [b1] then all of [b2], streaming
     (it never materializes a [Stream] operand). *)
@@ -39,6 +45,10 @@ val iter : (string -> unit) -> t -> unit
 (** [iter f b] applies [f] to each successive chunk in order until EOF,
     streaming without materializing ([Empty] yields no calls; [String s] one
     call [f s]; a [Stream] one call per chunk). *)
+
+val fold : (string -> 'a -> 'a) -> t -> 'a -> 'a
+(** [fold f b init] folds [f] over each successive chunk in order until EOF,
+    streaming without materializing (same chunk sequence as {!iter}). *)
 
 val write : Eio.Buf_write.t -> t -> unit
 (** [write w b] writes the raw body bytes to [w] with no transfer framing. *)

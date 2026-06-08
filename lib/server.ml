@@ -371,21 +371,28 @@ let serve_one ~sw w (r : Body.t Request.t) (h : handler) : bool =
   in
   let streaming = Option.is_some tail_stream in
   (* Content-Type sniff from the first <=512 bytes when unset. *)
-  (if body_allowed && not (Header.has header "Content-Type") then
-     if
-       not
-         (Httpg_internal.Ascii.equal_fold
-            (Header.get header "X-Content-Type-Options")
-            "nosniff")
-     then
-       if String.length leading > 0 then
-         let src =
-           if String.length leading > 512 then String.sub leading 0 512
-           else leading
-         in
-         Header.set header "Content-Type" (Sniff.detect_content_type src));
-  if not (Header.has header "Date") then
-    Header.set header "Date" (http_time_now ());
+  let header =
+    if
+      body_allowed
+      && (not (Header.has header "Content-Type"))
+      && (not
+            (Httpg_internal.Ascii.equal_fold
+               (Header.get header "X-Content-Type-Options")
+               "nosniff"))
+      && String.length leading > 0
+    then
+      let src =
+        if String.length leading > 512 then String.sub leading 0 512
+        else leading
+      in
+      Header.set header "Content-Type" (Sniff.detect_content_type src)
+    else header
+  in
+  let header =
+    if not (Header.has header "Date") then
+      Header.set header "Date" (http_time_now ())
+    else header
+  in
   if
     Transfer.has_token
       (String.lowercase_ascii (Header.get header "Connection"))
@@ -891,20 +898,28 @@ let body_of_api_body (b : Httpg_http2.Api.Body.t) : Body.t =
   | Httpg_http2.Api.Body.String s -> Body.String s
   | Httpg_http2.Api.Body.Stream f -> Body.Stream f
 
+(* The decoupled Api.header (mutable Hashtbl) -> the public Header (Map). *)
+let header_of_api_header (t : Httpg_http2.Api.header) : Header.t =
+  List.fold_left
+    (fun acc (k, vs) -> Header.set_values acc k vs)
+    (Header.create ())
+    (Httpg_http2.Api.Header.to_list t)
+
 let request_of_server_request (r : Httpg_http2.Api.server_request) :
     Body.t Request.t =
   {
     meth = r.sreq_meth;
     url = r.sreq_url;
     proto = r.sreq_proto;
-    header = r.sreq_header;
+    header = header_of_api_header r.sreq_header;
     body = body_of_api_body r.sreq_body;
     content_length = r.sreq_content_length;
     transfer_encoding = [];
     close = false;
     host = r.sreq_host;
     trailer =
-      (if Hashtbl.length r.sreq_trailer = 0 then None else Some r.sreq_trailer);
+      (if Hashtbl.length r.sreq_trailer = 0 then None
+       else Some (header_of_api_header r.sreq_trailer));
     request_uri = r.sreq_request_uri;
     remote_addr = r.sreq_remote_addr;
     form = None;

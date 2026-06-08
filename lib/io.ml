@@ -161,7 +161,6 @@ let valid_host_header h = String.for_all valid_host_byte h
    continuation lines. Raises Protocol_error on a malformed line. *)
 let read_mime_header_raising ?(limit : int ref option) (r : Eio.Buf_read.t) :
     Header.t =
-  let h = Header.create () in
   let rec gather acc =
     let line = read_line ?limit r in
     if line = "" then List.rev acc
@@ -174,8 +173,8 @@ let read_mime_header_raising ?(limit : int ref option) (r : Eio.Buf_read.t) :
                (Printf.sprintf "malformed MIME header initial line: %S" line))
     else gather (line :: acc)
   in
-  List.iter
-    (fun kv ->
+  List.fold_left
+    (fun h kv ->
       match String.index_opt kv ':' with
       | None ->
           raise
@@ -204,16 +203,16 @@ let read_mime_header_raising ?(limit : int ref option) (r : Eio.Buf_read.t) :
             String.sub v !j (n - !j)
           in
           Header.add h key value)
-    (gather []);
-  h
+    (Header.create ()) (gather [])
 
-(* fixPragmaCacheControl (response.go). *)
-let fix_pragma_cache_control (h : Header.t) =
+(* fixPragmaCacheControl (response.go). Returns the (possibly updated) header. *)
+let fix_pragma_cache_control (h : Header.t) : Header.t =
   match Header.values h "Pragma" with
   | hp :: _ when hp = "no-cache" ->
       if not (Header.has h "Cache-Control") then
         Header.set h "Cache-Control" "no-cache"
-  | _ -> ()
+      else h
+  | _ -> h
 
 (* ------------------------------------------------------------------ *)
 (* Body / trailer materialization helpers.                             *)
@@ -224,10 +223,8 @@ let fix_pragma_cache_control (h : Header.t) =
 let merge_trailer (declared : Header.t option) (hdr : Header.t) :
     Header.t option =
   match declared with
-  | None -> if Hashtbl.length hdr = 0 then None else Some hdr
-  | Some t ->
-      Hashtbl.iter (fun k v -> Hashtbl.replace t k v) hdr;
-      Some t
+  | None -> if Header.is_empty hdr then None else Some hdr
+  | Some t -> Some (Header.fold (fun k v t -> Header.set_values t k v) hdr t)
 
 (* Go bounds the chunked trailer to its bufio buffer size (~4kB,
    transfer.go:932) via a peek-for-double-CRLF hack. We reproduce the effect:
@@ -342,8 +339,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
         in
         let host_values = Header.values header "Host" in
         let is_h2_upgrade =
-          meth = "PRI"
-          && Hashtbl.length header = 0
+          meth = "PRI" && Header.is_empty header
           && Uri.path url = "*"
           && proto = "HTTP/2.0"
         in
@@ -354,7 +350,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
         (match host_values with
         | [ h ] when not (valid_host_header h) -> raise malformed_host_sentinel
         | _ -> ());
-        Hashtbl.iter
+        Header.iter
           (fun k vs ->
             if not (Header.valid_header_field_name k) then
               raise (Protocol_error "invalid header name");
@@ -369,8 +365,8 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           | Some h when h <> "" -> h
           | _ -> Header.get header "Host"
         in
-        fix_pragma_cache_control header;
-        let close =
+        let header = fix_pragma_cache_control header in
+        let close, _ =
           Transfer.should_close ~major:proto_major ~minor:proto_minor ~header
             ~remove_close_header:false
         in
@@ -387,8 +383,8 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           }
         in
         let res = read_transfer_or_raise msg r in
-        Header.del header "Host";
-        (* ReadRequest deletes Host *)
+        (* ReadRequest deletes Host from the post-framing header. *)
+        let header = Header.del res.Transfer.header "Host" in
         let req =
           {
             Request.meth;
@@ -482,7 +478,7 @@ let read_response_raising ?(request : Body.t Request.t option)
             with e when e == request_too_large_sentinel ->
               raise response_header_too_large_sentinel
           in
-          fix_pragma_cache_control header;
+          let header = fix_pragma_cache_control header in
           let request_method =
             match request with
             | Some req -> req.Request.meth
@@ -503,7 +499,7 @@ let read_response_raising ?(request : Body.t Request.t option)
             {
               Response.status = status_code;
               proto = proto_t;
-              header;
+              header = res.Transfer.header;
               body = Body.Empty;
               content_length = res.Transfer.content_length;
               transfer_encoding =

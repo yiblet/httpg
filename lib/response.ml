@@ -45,14 +45,10 @@ let create () : Body.t t =
 let with_status code (r : 'b t) : 'b t = { r with status = code }
 
 let with_header key value (r : 'b t) : 'b t =
-  let h = Header.clone r.header in
-  Header.add h key value;
-  { r with header = h }
+  { r with header = Header.add r.header key value }
 
 let with_set_header key value (r : 'b t) : 'b t =
-  let h = Header.clone r.header in
-  Header.set h key value;
-  { r with header = h }
+  { r with header = Header.set r.header key value }
 
 let content_length_of_body = function
   | Body.String s -> Int64.of_int (String.length s)

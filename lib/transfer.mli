@@ -78,30 +78,36 @@ val fix_length :
   request_method:Httpg_base.Method.t ->
   header:Header.t ->
   chunked:bool ->
-  (int64, error) result
+  (int64 * Header.t, error) result
 (** [fixLength]: the expected body length per RFC 7230 3.3. Version-sensitive
-    via [chunked]. Mutates [header] (dedup / delete Content-Length) as Go does.
-    [Error] on conflicting / invalid Content-Length (header-parse boundary). *)
+    via [chunked]. Returns the length and the header with framing keys consumed
+    (dedup / delete Content-Length), as Go does. [Error] on conflicting /
+    invalid Content-Length (header-parse boundary). *)
 
 val should_close :
-  major:int -> minor:int -> header:Header.t -> remove_close_header:bool -> bool
-(** [shouldClose]: whether to hang up after the message. Version-sensitive:
-    HTTP/1.0 closes unless [keep-alive]; HTTP/1.1 keeps alive unless [close].
-    [remove_close_header] mutates [header] to drop a [Connection: close]. *)
+  major:int ->
+  minor:int ->
+  header:Header.t ->
+  remove_close_header:bool ->
+  bool * Header.t
+(** [shouldClose]: whether to hang up after the message, with the (possibly
+    updated) header. Version-sensitive: HTTP/1.0 closes unless [keep-alive];
+    HTTP/1.1 keeps alive unless [close]. [remove_close_header] drops a
+    [Connection: close] from the returned header. *)
 
 val fix_trailer :
-  header:Header.t -> chunked:bool -> (Header.t option, error) result
+  header:Header.t -> chunked:bool -> (Header.t option * Header.t, error) result
 (** [fixTrailer]: parse the [Trailer] header into a trailer header (keys with
-    empty value lists). Returns [Ok None] when not chunked or no usable trailer.
-    Mutates [header] (deletes [Trailer]). [Error (Bad_header _)] on a forbidden
-    trailer key. *)
+    empty value lists), returning it and the header with [Trailer] deleted.
+    [Ok (None, _)] when not chunked or no usable trailer. [Error (Bad_header _)]
+    on a forbidden trailer key. *)
 
 val parse_transfer_encoding :
-  major:int -> minor:int -> header:Header.t -> (bool, error) result
-(** [parse_transfer_encoding]: returns whether the message is chunked. HTTP/1.0
-    ignores Transfer-Encoding (Issue 12785). Mutates [header] (deletes
-    Transfer-Encoding). [Error (Unsupported_transfer_encoding _)] /
-    [Error (Chunk _)] for unsupported / too-many encodings. *)
+  major:int -> minor:int -> header:Header.t -> (bool * Header.t, error) result
+(** [parse_transfer_encoding]: returns whether the message is chunked and the
+    header with Transfer-Encoding consumed. HTTP/1.0 ignores Transfer-Encoding
+    (Issue 12785). [Error (Unsupported_transfer_encoding _)] / [Error (Chunk _)]
+    for unsupported / too-many encodings. *)
 
 (* --- read_transfer. --- *)
 
@@ -122,6 +128,8 @@ type result = {
   is_chunked : bool;
   result_close : bool;
   trailer : Header.t option;
+  header : Header.t;
+      (** the message header after framing keys have been consumed *)
 }
 (** The decoded framing, the [transferReader] outputs unified back. *)
 

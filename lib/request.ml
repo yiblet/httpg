@@ -110,8 +110,8 @@ let add_cookie (r : 'a t) (c : Cookie.t) =
       (Cookie.sanitize_cookie_value c.Cookie.value ~quoted:c.Cookie.quoted)
   in
   match Header.get r.header "Cookie" with
-  | "" -> Header.set r.header "Cookie" s
-  | existing -> Header.set r.header "Cookie" (existing ^ "; " ^ s)
+  | "" -> r.header <- Header.set r.header "Cookie" s
+  | existing -> r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
 
 (* parseBasicAuth(auth). *)
 let parse_basic_auth (auth : string) : (string * string) option =
@@ -150,5 +150,6 @@ let basic_auth_encode username password =
 
 (* Request.SetBasicAuth. *)
 let set_basic_auth (r : 'a t) username password =
-  Header.set r.header "Authorization"
-    ("Basic " ^ basic_auth_encode username password)
+  r.header <-
+    Header.set r.header "Authorization"
+      ("Basic " ^ basic_auth_encode username password)

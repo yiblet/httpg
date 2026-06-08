@@ -442,13 +442,11 @@ let response_header_under_limit_ok () =
    Driven against a stub round-tripper (no real DNS). *)
 
 let stub_response req ?location () : Body.t Response.t =
-  let header = Header.create () in
-  let status =
+  let header, status =
     match location with
     | Some loc ->
-        Header.set header "Location" loc;
-        Httpg_base.Status.Found
-    | None -> Httpg_base.Status.Ok
+        (Header.set (Header.create ()) "Location" loc, Httpg_base.Status.Found)
+    | None -> (Header.create (), Httpg_base.Status.Ok)
   in
   {
     Response.status;
@@ -476,7 +474,10 @@ let drive_redirects ~start:start_url ~routes ~init_headers =
       in
       let c = Client.create ~net () in
       let req = Client.make_request Httpg_base.Method.Get start_url in
-      List.iter (fun (k, v) -> Header.set req.Request.header k v) init_headers;
+      req.Request.header <-
+        List.fold_left
+          (fun h (k, v) -> Header.set h k v)
+          req.Request.header init_headers;
       let resp = Client.do_one ~round_trip c req in
       ignore (Body.drain resp.Response.body);
       !seen)
@@ -501,7 +502,8 @@ let redirect_strip_sticky_on_bounce_back () =
         in
         let c = Client.create ~net () in
         let req = Client.make_request Httpg_base.Method.Get "http://a.com/" in
-        Header.set req.Request.header "Authorization" "Bearer secret";
+        req.Request.header <-
+          Header.set req.Request.header "Authorization" "Bearer secret";
         let resp = Client.do_one ~round_trip c req in
         ignore (Body.drain resp.Response.body);
         !seen2)

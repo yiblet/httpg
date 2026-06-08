@@ -56,8 +56,11 @@ let etag_file_handler ~dir ~name ~etag =
       | Error _ -> Server.error "not found" Httpg_base.Status.NotFound
       | Ok f ->
           let d = f.Fs.stat () in
-          let header = Header.create () in
-          (match etag with Some e -> Header.set header "Etag" e | None -> ());
+          let header =
+            match etag with
+            | Some e -> Header.set (Header.create ()) "Etag" e
+            | None -> Header.create ()
+          in
           Fs.serve_content ~header r ~name:d.Fs.fi_name
             ~modtime:d.Fs.fi_mod_time ~size:d.Fs.fi_size
             ~read_window:f.Fs.read_window)
@@ -66,7 +69,8 @@ let etag_file_handler ~dir ~name ~etag =
    not redirects, so do_ returns them directly), read its body. *)
 let request_with_headers ~sw c url headers =
   let req = Client.make_request Httpg_base.Method.Get url in
-  List.iter (fun (k, v) -> Header.set req.Request.header k v) headers;
+  req.Request.header <-
+    List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
   let resp = Client.do_ ~sw c req in
   ( Httpg_base.Status.to_int resp.Response.status,
     Body.read_all resp.Response.body,

@@ -210,15 +210,15 @@ let parse_content_length (cl_headers : string list) : (int64, error) result =
    Returns [result]: header-parse boundary errors (conflicting / invalid
    Content-Length) surface as [Error]. *)
 let fix_length ~is_response ~status ~request_method ~(header : Header.t)
-    ~chunked:is_chunked : (int64, error) result =
+    ~chunked:is_chunked : (int64 * Header.t, error) result =
   let open Result in
   let is_request = not is_response in
-  let content_lens = ref (Header.values header "Content-Length") in
+  let content_lens = Header.values header "Content-Length" in
 
   (* Hardening against request smuggling: collapse duplicate Content-Length. *)
-  let dup_check : (unit, error) result =
-    if List.length !content_lens > 1 then
-      begin match !content_lens with
+  let dup_check : (Header.t * string list, error) result =
+    if List.length content_lens > 1 then
+      begin match content_lens with
       | first0 :: rest ->
           let first = trim_string first0 in
           let conflict = List.exists (fun ct -> first <> trim_string ct) rest in
@@ -228,64 +228,60 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t)
                  (Printf.sprintf
                     "http: message cannot contain multiple Content-Length \
                      headers; got %s"
-                    (String.concat " " !content_lens)))
-          else begin
-            Header.del header "Content-Length";
-            Header.add header "Content-Length" first;
-            content_lens := Header.values header "Content-Length";
-            Ok ()
-          end
-      | [] -> Ok ()
+                    (String.concat " " content_lens)))
+          else
+            let header = Header.set header "Content-Length" first in
+            Ok (header, Header.values header "Content-Length")
+      | [] -> Ok (header, content_lens)
       end
-    else Ok ()
+    else Ok (header, content_lens)
   in
-  bind dup_check (fun () ->
+  bind dup_check (fun (header, content_lens) ->
       (* Reject invalid Content-Length; compute n if present. *)
       let parsed_n : (int64, error) result =
-        if !content_lens <> [] then parse_content_length !content_lens
-        else Ok 0L
+        if content_lens <> [] then parse_content_length content_lens else Ok 0L
       in
       bind parsed_n (fun n ->
-          if is_response && no_response_body_expected request_method then Ok 0L
-          else if status / 100 = 1 then Ok 0L
-          else if status = 204 || status = 304 then Ok 0L
-          else if is_chunked then begin
-            Header.del header "Content-Length";
-            Ok (-1L)
-          end
-          else if !content_lens <> [] then Ok n
-          else begin
-            Header.del header "Content-Length";
-            Ok (if is_request then 0L else -1L)
-          end))
+          if is_response && no_response_body_expected request_method then
+            Ok (0L, header)
+          else if status / 100 = 1 then Ok (0L, header)
+          else if status = 204 || status = 304 then Ok (0L, header)
+          else if is_chunked then Ok (-1L, Header.del header "Content-Length")
+          else if content_lens <> [] then Ok (n, header)
+          else
+            Ok
+              ( (if is_request then 0L else -1L),
+                Header.del header "Content-Length" )))
 
 (* shouldClose: whether to hang up after this message. Version-sensitive.
    [remove_close_header] mutates [header] to drop a Connection: close. *)
-let should_close ~major ~minor ~(header : Header.t) ~remove_close_header : bool
-    =
-  if major < 1 then true
+let should_close ~major ~minor ~(header : Header.t) ~remove_close_header :
+    bool * Header.t =
+  if major < 1 then (true, header)
   else
     let conv = Header.values header "Connection" in
     let has_close = header_values_contains_token conv "close" in
     if major = 1 && minor = 0 then
-      has_close || not (header_values_contains_token conv "keep-alive")
-    else begin
-      if has_close && remove_close_header then Header.del header "Connection";
-      has_close
-    end
+      (has_close || not (header_values_contains_token conv "keep-alive"), header)
+    else
+      let header =
+        if has_close && remove_close_header then Header.del header "Connection"
+        else header
+      in
+      (has_close, header)
 
 (* fixTrailer: parse the Trailer header into a trailer Header. Only meaningful
    for chunked encoding. Returns [Ok None] when there is no usable trailer;
    [Error (Bad_header _)] on a forbidden trailer key (header-parse boundary). *)
 let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
-    (Header.t option, error) result =
+    (Header.t option * Header.t, error) result =
   match Header.values header "Trailer" with
-  | [] -> Ok None
+  | [] -> Ok (None, header)
   | vv ->
-      if not is_chunked then Ok None
+      if not is_chunked then Ok (None, header)
       else begin
-        Header.del header "Trailer";
-        let trailer = Header.create () in
+        let header = Header.del header "Trailer" in
+        let trailer = ref (Header.create ()) in
         let err = ref None in
         List.iter
           (fun v ->
@@ -297,11 +293,14 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
                       err := Some (Bad_header ("bad trailer key", key))
                 | _ -> ());
                 (* trailer[key] = nil : record the key with no values. *)
-                Hashtbl.replace trailer key []))
+                trailer := Header.set_values !trailer key []))
           vv;
         match !err with
         | Some e -> Error e
-        | None -> Ok (if Hashtbl.length trailer = 0 then None else Some trailer)
+        | None ->
+            Ok
+              ( (if Header.is_empty !trailer then None else Some !trailer),
+                header )
       end
 
 (* parseTransferEncoding equivalent: set whether chunked, version-sensitive.
@@ -309,13 +308,13 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
    unsupported encodings (the unsupportedTEError analogue). HTTP/1.0 ignores
    Transfer-Encoding entirely (Issue 12785). *)
 let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
-    (bool, error) result =
+    (bool * Header.t, error) result =
   match Header.values header "Transfer-Encoding" with
-  | [] -> Ok false
+  | [] -> Ok (false, header)
   | raw ->
-      Header.del header "Transfer-Encoding";
+      let header = Header.del header "Transfer-Encoding" in
       let proto_at_least m n = major > m || (major = m && minor >= n) in
-      if not (proto_at_least 1 1) then Ok false
+      if not (proto_at_least 1 1) then Ok (false, header)
       else if List.length raw <> 1 then
         Error
           (Chunk
@@ -325,7 +324,7 @@ let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
         let only = List.hd raw in
         if not (ascii_equal_fold only "chunked") then
           Error (Unsupported_transfer_encoding only)
-        else Ok true
+        else Ok (true, header)
 
 (* ------------------------------------------------------------------ *)
 (* read_transfer: the transferReader logic.                            *)
@@ -350,6 +349,9 @@ type result = {
   is_chunked : bool;
   result_close : bool;
   trailer : Header.t option;
+  header : Header.t;
+      (** the message header after framing keys (Content-Length /
+          Transfer-Encoding / Connection / Trailer) have been consumed *)
 }
 
 (* read_transfer: header/initial-parse framing errors short-circuit as [Error];
@@ -372,14 +374,14 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
   (* Close: for responses it's shouldClose-derived (caller passes it via
      should_close); for requests it's rr.Close. We re-derive for responses to
      match Go's readTransfer, which calls shouldClose for *Response. *)
-  let close =
+  let close, header =
     if is_response then
       should_close ~major ~minor ~header ~remove_close_header:true
-    else msg.close
+    else (msg.close, header)
   in
 
-  let* is_chunked = parse_transfer_encoding ~major ~minor ~header in
-  let* real_length =
+  let* is_chunked, header = parse_transfer_encoding ~major ~minor ~header in
+  let* real_length, header =
     fix_length ~is_response ~status ~request_method ~header ~chunked:is_chunked
   in
   let* content_length =
@@ -387,7 +389,7 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
       parse_content_length (Header.values header "Content-Length")
     else Ok real_length
   in
-  let* trailer = fix_trailer ~header ~chunked:is_chunked in
+  let* trailer, header = fix_trailer ~header ~chunked:is_chunked in
 
   (* Unbounded-body -> close, for responses. *)
   let close =
@@ -446,7 +448,7 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
           if s = "" then None else Some s)
     else Body.Empty (* persistent connection, no length -> no body *)
   in
-  Ok { body; content_length; is_chunked; result_close = close; trailer }
+  Ok { body; content_length; is_chunked; result_close = close; trailer; header }
 
 (* ------------------------------------------------------------------ *)
 (* write_body: the transferWriter body-writing logic.                  *)
@@ -582,7 +584,7 @@ let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   | None -> ()
   | Some tr ->
       let keys =
-        Hashtbl.fold
+        Header.fold
           (fun k _ acc ->
             let k = Header.canonical_header_key k in
             (match k with

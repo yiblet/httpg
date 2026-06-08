@@ -9,9 +9,9 @@ let capture (f : Eio.Buf_write.t -> unit) : string =
   Eio.Buf_write.serialize_to_string w
 
 let header pairs =
-  let h = Httpg.Header.create () in
-  List.iter (fun (k, v) -> Httpg.Header.add h k v) pairs;
-  h
+  List.fold_left
+    (fun h (k, v) -> Httpg.Header.add h k v)
+    (Httpg.Header.create ()) pairs
 
 let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
