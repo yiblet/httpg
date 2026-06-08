@@ -70,23 +70,6 @@ val do_ : ?force_h2:bool -> sw:Eio.Switch.t -> t -> Request.t -> Response.t
     caller consumes the body to EOF ({!Body.read_all}/{!Body.drain}). The
     redirect loop drains each intermediate hop's body before following. *)
 
-val is_domain_or_subdomain : sub:string -> parent:string -> bool
-(** Go's [isDomainOrSubdomain] (client.go:1026-1048): whether host [sub] is a
-    subdomain of, or an exact match for, [parent]. Both in canonical (hostname,
-    no port) form. Exposed for the redirect sensitive-header policy. *)
-
-val should_copy_header_on_redirect : initial:Uri.t -> dest:Uri.t -> bool
-(** Go's [shouldCopyHeaderOnRedirect] (client.go:1008-1024): whether sensitive
-    headers may be copied onto a redirect from [initial] to [dest] — true iff
-    [dest]'s host is [initial]'s host or a subdomain of it. *)
-
-val referer_for_url :
-  last:Uri.t -> next:Uri.t -> explicit:string -> string option
-(** Go's [refererForURL] (client.go:147-170): the Referer for the next hop given
-    the previous hop's URL [last] and the destination [next]. [None] on
-    https->http; otherwise the [explicit] Referer if set, else [last] with
-    userinfo stripped. *)
-
 val do_one :
   ?round_trip:(Request.t -> Response.t) ->
   ?force_h2:bool ->

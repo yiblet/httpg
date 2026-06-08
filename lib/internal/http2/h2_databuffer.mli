@@ -4,9 +4,6 @@ exception Read_empty
 (** Raised by {!read}/{!read_string} when no data is available. Mirrors Go's
     [errReadEmpty] ("read from empty dataBuffer"). *)
 
-val read_empty_msg : string
-(** The message text of Go's [errReadEmpty]. *)
-
 type t
 (** [dataBuffer] is a ReadWriter backed by a list of data chunks. Used to read
     DATA frames on a single stream. The buffer is divided into size-classed

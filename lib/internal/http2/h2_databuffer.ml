@@ -3,8 +3,6 @@
 (* errReadEmpty is returned by Read when no data is available. *)
 exception Read_empty
 
-let read_empty_msg = "read from empty dataBuffer"
-
 (* Buffer chunks come in a few size classes to minimize overhead for servers
    that typically receive very small request bodies. Go allocates these from
    sync.Pools; OCaml is GC-managed so we just allocate fresh chunks of the

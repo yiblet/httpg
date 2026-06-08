@@ -4,9 +4,6 @@
 exception Closed_pipe_write
 exception Uninitialized_pipe_write
 
-let closed_pipe_write_msg = "write on closed buffer"
-let uninitialized_pipe_write_msg = "write on uninitialized buffer"
-
 (* A fiber-safe Reader/Writer pair (Go's sync.Cond-guarded pipe). A blocked
    [read] awaits [cond]; [write]/[close]/[break] broadcast it. The pipe lives in
    a single domain (one per connection), so the state checks before suspending
@@ -110,11 +107,6 @@ let close_with_error p err = close_with_error_into ~is_break:false p err None
 (* BreakWithError causes the next Read to return err immediately, without
    waiting for unread data. *)
 let break_with_error p err = close_with_error_into ~is_break:true p err None
-
-(* closeWithErrorAndCode: like CloseWithError but also sets code to run before
-   returning the error. *)
-let close_with_error_and_code p err fn =
-  close_with_error_into ~is_break:false p err (Some fn)
 
 (* Err returns the error (if any) first set by BreakWithError or
    CloseWithError. *)

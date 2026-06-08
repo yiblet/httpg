@@ -70,9 +70,6 @@ val conflicts_with : t -> t -> bool
 (** Go's [pattern.conflictsWith]: whether there is a request both match but
     where neither is higher precedence. *)
 
-val compare_paths_and_methods : t -> t -> relationship
-(** Go's [pattern.comparePathsAndMethods]. *)
-
 val compare_methods : t -> t -> relationship
 (** Go's [pattern.compareMethods]. *)
 

@@ -8,9 +8,6 @@ exception Uninitialized_pipe_write
 (** Raised by {!write} when the buffer was never initialized via {!set_buffer}.
     Mirrors Go's [errUninitializedPipeWrite]. *)
 
-val closed_pipe_write_msg : string
-val uninitialized_pipe_write_msg : string
-
 type t
 (** A fiber-safe Reader/Writer pair backed by an internal {!H2_databuffer.t},
     with error/close propagation. Mirrors Go's [pipe]; a blocked {!read} awaits
@@ -50,11 +47,6 @@ val break_with_error : t -> exn -> unit
 (** [break_with_error p err] causes the next {!read} to raise [err] immediately,
     discarding unread data (recorded in {!len}). Mirrors [pipe.BreakWithError].
 *)
-
-val close_with_error_and_code : t -> exn -> (unit -> unit) -> unit
-(** [close_with_error_and_code p err fn] is like {!close_with_error} but runs
-    [fn] in the reader before raising the error. Mirrors
-    [pipe.closeWithErrorAndCode]. *)
 
 val err : t -> exn option
 (** [err p] is the error first set by {!break_with_error} or
