@@ -102,18 +102,7 @@ let valid_header_field_name s =
 let newline_to_space s = String.map (function '\n' | '\r' -> ' ' | c -> c) s
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
-let trim_string s =
-  let is_ws c = c = ' ' || c = '\t' in
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && is_ws s.[!i] do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && is_ws s.[!j] do
-    decr j
-  done;
-  String.sub s !i (!j - !i + 1)
+let trim_string = Httpg_base.Textproto.trim_string
 
 (* Header.writeSubset: write keys (sorted) not present in [exclude], one
    [Key: value\r\n] line per value, dropping keys with invalid field names. The

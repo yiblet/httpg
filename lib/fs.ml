@@ -273,18 +273,7 @@ let dir_list (_r : Request.t) (f : file) : Response.t =
 let is_zero_time t = t = 0.0
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
-let trim_string s =
-  let n = String.length s in
-  let is_ws c = c = ' ' || c = '\t' in
-  let i = ref 0 in
-  while !i < n && is_ws s.[!i] do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && is_ws s.[!j] do
-    decr j
-  done;
-  if !j < !i then "" else String.sub s !i (!j - !i + 1)
+let trim_string = Httpg_base.Textproto.trim_string
 
 let has_prefix s p =
   String.length s >= String.length p && String.sub s 0 (String.length p) = p

@@ -129,17 +129,7 @@ let read_line ?(limit : int ref option) (r : Eio.Buf_read.t) : string =
   loop false
 
 (* trim: leading/trailing spaces and tabs (textproto.trim). *)
-let trim_ws s =
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && (s.[!i] = ' ' || s.[!i] = '\t') do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && (s.[!j] = ' ' || s.[!j] = '\t') do
-    decr j
-  done;
-  String.sub s !i (!j - !i + 1)
+let trim_ws = Httpg_base.Textproto.trim_string
 
 (* validHeaderValueByte (textproto): \t and any byte >= 0x20 except DEL. *)
 let valid_header_value_byte c =
@@ -418,13 +408,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
 (* ------------------------------------------------------------------ *)
 
 (* strings.TrimLeft(s, " "). *)
-let trim_left_spaces s =
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && s.[!i] = ' ' do
-    incr i
-  done;
-  String.sub s !i (n - !i)
+let trim_left_spaces s = Httpg_base.Textproto.trim_left ~chars:" " s
 
 let read_response_raising ?(request : Request.t option)
     ?(max_header_bytes : int option) (r : Eio.Buf_read.t) : Response.t =

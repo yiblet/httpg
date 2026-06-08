@@ -141,14 +141,6 @@ let index_any s chars =
 
 let index_byte s c = try String.index s c with Not_found -> -1
 
-let trim_left s chars =
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && String.contains chars s.[!i] do
-    incr i
-  done;
-  String.sub s !i (n - !i)
-
 (* CutSuffix("name...", "...") *)
 let cut_suffix s suffix =
   let ls = String.length s and lsf = String.length suffix in
@@ -194,7 +186,8 @@ let parse s : (t, error) result =
         let i = index_any s " \t" in
         if i >= 0 then
           ( String.sub s 0 i,
-            trim_left (String.sub s (i + 1) (String.length s - i - 1)) " \t",
+            Httpg_base.Textproto.trim_left ~chars:" \t"
+              (String.sub s (i + 1) (String.length s - i - 1)),
             true )
         else (s, "", false)
       in

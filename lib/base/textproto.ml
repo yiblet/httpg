@@ -49,3 +49,41 @@ let canonical_mime_header_key s =
       else scan (i + 1) (c = '-')
   in
   scan 0 true
+
+(* OWS (optional whitespace) is space and tab only — Go's
+   [textproto.TrimString] / [httpguts.trimOWS], deliberately *not*
+   [strings.TrimSpace] (which also strips '\n'/'\r'/'\012'). Trimming newlines
+   here would let header injection cross lines, so keep it space+tab. *)
+let is_ows c = c = ' ' || c = '\t'
+
+(* textproto.TrimString: trim leading and trailing ' ' and '\t'. *)
+let trim_string s =
+  let n = String.length s in
+  let i = ref 0 in
+  while !i < n && is_ows s.[!i] do
+    incr i
+  done;
+  let j = ref (n - 1) in
+  while !j >= !i && is_ows s.[!j] do
+    decr j
+  done;
+  String.sub s !i (!j - !i + 1)
+
+(* Trailing-only OWS trim (' ' and '\t'); Go's chunked [removeChunkExtension]
+   strips trailing OWS before the chunk-extension cut. *)
+let trim_right s =
+  let n = ref (String.length s) in
+  while !n > 0 && is_ows s.[!n - 1] do
+    decr n
+  done;
+  String.sub s 0 !n
+
+(* Generic leading trim over a character set: strips every prefix byte that
+   appears in [chars] (Go's [strings.TrimLeft]). *)
+let trim_left ~chars s =
+  let n = String.length s in
+  let i = ref 0 in
+  while !i < n && String.contains chars s.[!i] do
+    incr i
+  done;
+  String.sub s !i (n - !i)

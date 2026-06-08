@@ -78,17 +78,7 @@ let is_cookie_name_valid = is_token
 (* ---- string helpers mirroring textproto / strings ---- *)
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
-let trim_string s =
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && (s.[!i] = ' ' || s.[!i] = '\t') do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && (s.[!j] = ' ' || s.[!j] = '\t') do
-    decr j
-  done;
-  String.sub s !i (!j - !i + 1)
+let trim_string = Httpg_base.Textproto.trim_string
 
 (* strings.Cut(s, sep): returns (before, after, found). *)
 let cut s sep =

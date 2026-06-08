@@ -40,17 +40,7 @@ let error_to_string = function
 (* ------------------------------------------------------------------ *)
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
-let trim_string s =
-  let n = String.length s in
-  let i = ref 0 in
-  while !i < n && (s.[!i] = ' ' || s.[!i] = '\t') do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && (s.[!j] = ' ' || s.[!j] = '\t') do
-    decr j
-  done;
-  String.sub s !i (!j - !i + 1)
+let trim_string = Httpg_base.Textproto.trim_string
 
 let lower_ascii b =
   if b >= 'A' && b <= 'Z' then Char.chr (Char.code b + 32) else b
@@ -58,20 +48,9 @@ let lower_ascii b =
 (* internal/ascii.EqualFold. *)
 let ascii_equal_fold = Httpg_internal.Ascii.equal_fold
 
-(* httpguts.isOWS for token-boundary trimming. *)
-let is_ows b = b = ' ' || b = '\t'
-
-let trim_ows x =
-  let n = String.length x in
-  let i = ref 0 in
-  while !i < n && is_ows x.[!i] do
-    incr i
-  done;
-  let j = ref (n - 1) in
-  while !j >= !i && is_ows x.[!j] do
-    decr j
-  done;
-  String.sub x !i (!j - !i + 1)
+(* httpguts.trimOWS: trim leading/trailing OWS (space and tab) for
+   token-boundary trimming. *)
+let trim_ows = Httpg_base.Textproto.trim_string
 
 (* httpguts.tokenEqual: ASCII case-insensitive equality, no non-ASCII. *)
 let token_equal t1 t2 =

@@ -1,6 +1,7 @@
 (* Port of go/src/net/http/internal/ascii/print_test.go. *)
 
 module Ascii = Httpg_internal.Ascii
+module Textproto = Httpg_base.Textproto
 
 let test_equal_fold () =
   let cases =
@@ -52,10 +53,36 @@ let test_to_lower () =
   let _, ok = Ascii.to_lower "ctl\x1f" in
   Alcotest.(check bool) "non-print not ok" false ok
 
+(* textproto.TrimString is OWS-trim (space+tab), not strings.TrimSpace: a
+   trailing '\n'/'\r' must survive, or header injection could cross lines. *)
+let test_trim_string () =
+  Alcotest.(check string)
+    "OWS only, keeps trailing newline" "a \n"
+    (Textproto.trim_string "\t a \n");
+  Alcotest.(check string) "both sides space+tab" "x"
+    (Textproto.trim_string " \t x \t ");
+  Alcotest.(check string) "all OWS" "" (Textproto.trim_string " \t\t ");
+  Alcotest.(check string) "keeps leading cr" "\rx"
+    (Textproto.trim_string "\rx ")
+
+let test_trim_right () =
+  Alcotest.(check string) "trailing only" " a" (Textproto.trim_right " a \t ");
+  Alcotest.(check string) "keeps trailing newline" "a\n"
+    (Textproto.trim_right "a\n ")
+
+let test_trim_left () =
+  Alcotest.(check string) "left space+tab" "a \t"
+    (Textproto.trim_left ~chars:" \t" " \t a \t");
+  Alcotest.(check string) "left space only" "\ta "
+    (Textproto.trim_left ~chars:" " "  \ta ")
+
 let tests =
   [
     ("EqualFold", `Quick, test_equal_fold);
     ("IsPrint", `Quick, test_is_print);
     ("Is", `Quick, test_is);
     ("ToLower", `Quick, test_to_lower);
+    ("TrimString", `Quick, test_trim_string);
+    ("TrimRight", `Quick, test_trim_right);
+    ("TrimLeft", `Quick, test_trim_left);
   ]

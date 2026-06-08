@@ -51,15 +51,6 @@ let parse_hex_uint (v : string) : (int64, error) result =
 let parse_hex_uint_or_raise (v : string) : int64 =
   match parse_hex_uint v with Ok n -> n | Error e -> raise (exn_of_error e)
 
-let is_ows_b b = b = ' ' || b = '\t'
-
-let trim_trailing_whitespace (b : string) : string =
-  let n = ref (String.length b) in
-  while !n > 0 && is_ows_b b.[!n - 1] do
-    decr n
-  done;
-  String.sub b 0 !n
-
 let remove_chunk_extension (p : string) : string =
   match String.index_opt p ';' with Some i -> String.sub p 0 i | None -> p
 
@@ -102,7 +93,9 @@ let new_chunked_reader (r : Eio.Buf_read.t) : unit -> string option =
     else begin
       let line = read_chunk_line r in
       excess := Int64.add !excess (Int64.of_int (String.length line + 2));
-      let line = remove_chunk_extension (trim_trailing_whitespace line) in
+      let line =
+        remove_chunk_extension (Httpg_base.Textproto.trim_right line)
+      in
       let n = parse_hex_uint_or_raise line in
       (* excess -= 16 + 2*n; clamp at 0; cap at 16KiB. *)
       excess := Int64.sub !excess (Int64.add 16L (Int64.mul 2L n));
