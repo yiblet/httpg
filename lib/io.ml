@@ -400,9 +400,6 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
             trailer = res.Transfer.trailer;
             request_uri;
             remote_addr = "";
-            form = None;
-            post_form = None;
-            multipart_form = None;
           }
         in
         req.Request.body <-

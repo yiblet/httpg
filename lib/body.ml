@@ -8,6 +8,17 @@ let empty = Empty
 let of_string s = String s
 let of_stream f = Stream f
 
+(* Stream an Eio source as a body, pulling up to [chunk] bytes per read until the
+   source signals EOF. The source must stay open for the body's lifetime (e.g.
+   opened under the consuming switch); [of_flow] does not own/close it. *)
+let of_flow ?(chunk = 65536) (src : _ Eio.Flow.source) : t =
+  let buf = Cstruct.create chunk in
+  Stream
+    (fun () ->
+      match Eio.Flow.single_read src buf with
+      | n -> Some (Cstruct.to_string (Cstruct.sub buf 0 n))
+      | exception End_of_file -> None)
+
 let of_lazy_string (s : string Lazy.t) : t =
   let yielded = ref false in
   Stream
@@ -20,7 +31,9 @@ let of_lazy_string (s : string Lazy.t) : t =
 
 type stream = unit -> string option
 
-let as_stream (b : t) =
+(* Adapt a body to a pull stream [unit -> string option]: [Empty] yields [None]
+   immediately, [String s] yields [s] once then [None], [Stream] is itself. *)
+let to_stream (b : t) : stream =
   match b with
   | Empty -> fun () -> None
   | String s ->
@@ -50,7 +63,8 @@ let append (b1 : t) (b2 : t) : t =
   match (b1, b2) with
   | Empty, _ -> b2
   | _, Empty -> b1
-  | _, _ -> Stream (append_stream (as_stream b1) (as_stream b2))
+  | String s1, String s2 -> String (s1 ^ s2)
+  | _, _ -> Stream (append_stream (to_stream b1) (to_stream b2))
 
 let concat (gens : t list) : t =
   let remaining = ref gens in

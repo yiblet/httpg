@@ -85,13 +85,13 @@ val create :
     bytes; a request exceeding it is answered [431] and the connection closed.
     Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB).
 
-    [force_h2] (default [false]) makes a {b plaintext} listener serve h2c — HTTP/2
-    cleartext via prior knowledge (RFC 9113 §3.3): every accepted connection is
-    handed straight to the HTTP/2 server, which reads and validates the client
-    preface itself, with no ALPN and no [Upgrade:] negotiation. This is a
-    deliberate deviation — Go's [net/http] has no h2c (it lives in
-    [golang.org/x/net/http2/h2c], outside the vendored spec). Has no effect on the
-    TLS entry points, where ALPN selects the protocol. *)
+    [force_h2] (default [false]) makes a {b plaintext} listener serve h2c —
+    HTTP/2 cleartext via prior knowledge (RFC 9113 §3.3): every accepted
+    connection is handed straight to the HTTP/2 server, which reads and
+    validates the client preface itself, with no ALPN and no [Upgrade:]
+    negotiation. This is a deliberate deviation — Go's [net/http] has no h2c (it
+    lives in [golang.org/x/net/http2/h2c], outside the vendored spec). Has no
+    effect on the TLS entry points, where ALPN selects the protocol. *)
 
 val close : t -> unit
 (** Minimal [Server.Close]: cancel all per-domain accept switches, which stops

@@ -20,9 +20,6 @@ let req_no_host () : Request.t =
     trailer = None;
     request_uri = "";
     remote_addr = "";
-    form = None;
-    post_form = None;
-    multipart_form = None;
   }
 
 (* read_request: malformed request line and a bad header line both surface as

@@ -1,67 +1,81 @@
-(* Port of the form-parsing half of go/src/net/http/request.go: ParseForm,
-   ParseMultipartForm, FormValue, PostFormValue, FormFile. URL-encoded parsing
-   is a faithful port (via {!Values}); multipart/form-data parsing is delegated
-   to the sans-io [multipart_form] core (the plan's intentional fidelity
-   stand-in for Go's mime/multipart). *)
+(* Form values: the port of go/src/net/url [Values] (= map[string][]string) with
+   ParseQuery/Encode, plus the application/x-www-form-urlencoded body parser
+   {!of_body}. One module because a query string and a urlencoded body are the
+   same wire format — both decode into the same {!t}; only the source differs.
 
-(** A handleable form-parsing error.
-    - {!constructor-Form} carries Go's error string for a media-type / form /
-      multipart parse failure (e.g. "mime: invalid media parameter", "http: POST
-      too large").
-    - {!Not_multipart} is Go's [ErrNotMultipart]: [parse_multipart_form] on a
-      non-multipart/form-data request. *)
-type error = Form of string | Not_multipart
+   Like {!Header}, the multimap is a {b persistent} [Map] keyed by the raw
+   (case-sensitive) key: the mutators {!add}/{!set}/{!del} return a new {!t}, so a
+   value can be shared and forked freely. Deviation from Go's Request-mutating
+   [ParseForm]: parsing is a pure function and there is no source-blind
+   [Form]/[PostForm] merge — compose {!parse_query} on [Uri.verbatim_query
+   req.url] (the query half) with {!of_body} (the body half) via {!merge}
+   explicitly if wanted. multipart/form-data is in {!Multipart}. *)
+
+type t
+(** Go's [url.Values]: a persistent map from key to an ordered list of values
+    (keys are case-sensitive, not canonicalized). *)
+
+val create : unit -> t
+(** A fresh, empty {!t}. *)
+
+val get : t -> string -> string
+(** [Values.Get]: the first value for the key, or "". *)
+
+val set : t -> string -> string -> t
+(** [Values.Set]: return [t] with any existing values for the key replaced. *)
+
+val add : t -> string -> string -> t
+(** [Values.Add]: return [t] with [value] appended to the key's list. *)
+
+val del : t -> string -> t
+(** [Values.Del]: return [t] without the key. *)
+
+val has : t -> string -> bool
+(** [Values.Has]: whether the key is present. *)
+
+val find : t -> string -> string list
+(** All values for the key (Go's [v[key]]); [] when absent. *)
+
+val length : t -> int
+(** Number of distinct keys ([len(v)]). *)
+
+val merge : t -> t -> t
+(** [merge a b] (functional [copyValues]): [a] with each of [b]'s values
+    appended per key, [a]'s first. Combines the query and body halves into the
+    Go-style merged [Form]. *)
+
+val query_unescape : string -> string
+(** Percent-decode a query component, accepting '+' as a space (browser/Go
+    compatible). *)
+
+val query_escape : string -> string
+(** Percent-encode a query component. Deviation from Go: space is encoded as
+    "%20" (not '+'); a literal '+' is encoded as "%2B", so the result
+    round-trips through {!query_unescape}. *)
+
+type error =
+  | Invalid_semicolon_separator
+  | Invalid_escape of string
+  | Too_large
+      (** A handleable form-parse failure.
+          - {!Invalid_semicolon_separator}/{!Invalid_escape}: Go's [ParseQuery]
+            error cases (the latter carries the offending fragment; declared for
+            fidelity, though the [uri]-backed [query_unescape] does not
+            currently surface bad-escape errors).
+          - {!Too_large}: an urlencoded body over [max_form_size] ({!of_body}
+            only). *)
 
 val error_to_string : error -> string
-(** Render an {!error} as its Go message text. *)
+(** Render an {!error} as Go's faithful message. *)
 
-exception Media_type_error of string
-(** Raised by {!parse_media_type} on an invalid media parameter (Go's
-    [mime.ParseMediaType] error). This pure helper keeps Go's error-as-exception
-    shape; the result-returning entrypoints
-    {!parse_form}/{!parse_multipart_form} catch it and surface
-    {!constructor-Form}. *)
+val parse_query : string -> t * (unit, error) result
+(** [ParseQuery query]: the parsed map plus the first decode error, if any. *)
 
-val default_max_memory : int64
-(** [defaultMaxMemory] = 32 MB. *)
+val encode : t -> string
+(** [Values.Encode]: "k=v&..." sorted by key. *)
 
-val parse_media_type : string -> string * (string * string) list
-(** [mime.ParseMediaType v]: the lowercased bare media type and its parameters.
-    Raises {!Media_type_error} for invalid parameters. *)
-
-val parse_form : Request.t -> (unit, error) result
-(** [Request.ParseForm]: populate [r.form] (query + urlencoded body) and
-    [r.post_form] (body only). Idempotent. Returns the first error encountered
-    instead of raising (mirroring Go's error return). For POST/PUT/PATCH with
-    Content-Type application/x-www-form-urlencoded the body is read and parsed;
-    body params take precedence in [r.form]. *)
-
-val parse_multipart_form : Request.t -> max_memory:int64 -> (unit, error) result
-(** [Request.ParseMultipartForm ~max_memory]: parse a multipart/form-data body
-    into [r.multipart_form], also merging text values into
-    [r.form]/[r.post_form] (Issue 9305). Calls {!parse_form} first. Returns
-    [Error Not_multipart] for a non-multipart request or [Error (Form _)] on a
-    parse failure. Idempotent. File parts are kept in memory up to [max_memory]
-    bytes (shared budget); the overflow is spilled to temp files
-    (formdata.go:177). On a parse failure the partially-spilled temp files are
-    unlinked; on success they live until {!remove_all} / the request switch
-    fires. *)
-
-val remove_all : Request.t -> unit
-(** Go's [Request.MultipartForm.RemoveAll]: unlink any temp files spilled while
-    parsing [r]'s multipart form. Idempotent; no-op if nothing spilled. The
-    server serve loop wires this to a per-request switch so temp files never
-    outlive their request. *)
-
-val form_value : Request.t -> string -> string
-(** [Request.FormValue key]: the first value for [key], lazily parsing
-    (ParseMultipartForm then ParseForm) and ignoring errors. "" if absent. *)
-
-val post_form_value : Request.t -> string -> string
-(** [Request.PostFormValue key]: the first body value for [key] (query ignored),
-    lazily parsing and ignoring errors. "" if absent. *)
-
-val form_file : Request.t -> string -> (string * string) option
-(** [Request.FormFile key]: the first file for [key] as [(filename, content)] (a
-    simplification of Go's [(multipart.File, *multipart.FileHeader)]), lazily
-    parsing. [None] if absent. *)
+val of_body : Body.t -> (t, error) result
+(** [of_body body] reads [body] fully and parses it as
+    application/x-www-form-urlencoded (Go's [parsePostForm], minus the
+    content-type gate — that is the caller's concern). [Error Too_large] if the
+    body exceeds 10 MB; otherwise the first decode error from {!parse_query}. *)

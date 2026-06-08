@@ -16,6 +16,17 @@ val empty : t
 val of_string : string -> t
 val of_stream : (unit -> string option) -> t
 
+val to_stream : t -> unit -> string option
+(** Adapt a body to a pull stream [unit -> string option]: [Empty] yields [None]
+    immediately, [String s] yields [s] once then [None], [Stream next] is
+    [next]. The dual of {!of_stream}. *)
+
+val of_flow : ?chunk:int -> _ Eio.Flow.source -> t
+(** [of_flow src] is a streaming body that reads [src] in chunks (up to [chunk]
+    bytes, default 64 KiB) until EOF. [src] must remain open for the body's
+    lifetime — typically opened under the switch that will consume the body;
+    [of_flow] neither owns nor closes it. *)
+
 val of_lazy_string : string Lazy.t -> t
 (** [of_lazy_string s] is a body whose single chunk is [Lazy.force s], forced on
     the first read (so the body is never materialized if it isn't read — e.g. a

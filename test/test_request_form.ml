@@ -1,234 +1,136 @@
-(* Ported from go/src/net/http/request_test.go form tests
-   (TestParseFormQuery, TestParseFormQueryMethods, TestParseFormSemicolonSeparator,
-   TestParseFormUnknownContentType, TestParseMultipartFormPopulatesPostForm,
-   TestParseMultipartFormFilename, TestFormValueCallsParseMultipartForm).
-
-   URL-encoded parsing is the faithful port; multipart/form-data parsing goes
-   through the sans-io multipart_form parser (the plan's intentional deviation),
-   so a few Go rows that depend on Go's mime/multipart error surface or
-   temp-file spill behavior are omitted (see the porting notes in the plan). *)
+(* Tests for the composable body parsers {!Form} (urlencoded) and {!Multipart}
+   (multipart/form-data), which replace Go's Request-mutating ParseForm /
+   ParseMultipartForm (a deliberate Httpg deviation — see lib/form.mli,
+   lib/multipart.mli). The Go form rows that depended on the Request cache or on
+   Go's mime/multipart error surface are recast around the new functions:
+   - urlencoded body params come from {!Form.of_body} (the merged query+body
+     [Form] is now the caller's own composition; demonstrated in
+     [form_query_body_merge]);
+   - multipart parts are a [(part, error) result Seq.t] from {!Multipart.of_body},
+     each part settled to memory or a tempfile (cleaned on the [~sw] switch). *)
 
 open Httpg
 
-(* Form functions are direct-style now; [run] is the identity (kept so the
-   ported call sites read unchanged). *)
-let run x = x
+(* ---- Form: application/x-www-form-urlencoded body parsing ---- *)
 
-(* Build a Request.t with the given method, raw URL (query taken from
-   it), Content-Type header and urlencoded/multipart body string. *)
-let make_req ?(meth = "POST") ?content_type ~url ~body () : Request.t =
-  let header =
-    match content_type with
-    | Some ct -> Header.set (Header.create ()) "Content-Type" ct
-    | None -> Header.create ()
+let form_of_body () =
+  match
+    Form.of_body (Body.of_string "z=post&both=y&prio=2&orphan&empty=&=nokey")
+  with
+  | Error e -> Alcotest.failf "of_body: %s" (Form.error_to_string e)
+  | Ok v ->
+      Alcotest.(check string) "z" "post" (Form.get v "z");
+      Alcotest.(check string) "prio" "2" (Form.get v "prio");
+      (* a key with no '=' has value "" *)
+      Alcotest.(check (list string)) "orphan" [ "" ] (Form.find v "orphan");
+      Alcotest.(check (list string)) "empty" [ "" ] (Form.find v "empty");
+      (* "=nokey" is the empty key with value "nokey" *)
+      Alcotest.(check (list string)) "nokey" [ "nokey" ] (Form.find v "")
+
+(* The merged Go [Form] (body params first, then query) is now an explicit
+   caller-side composition (Form.merge) rather than magic on the Request. *)
+let form_query_body_merge () =
+  let url = Uri.of_string "http://x/s?q=foo&q=bar&both=x" in
+  let query, _ =
+    Form.parse_query (Option.value ~default:"" (Uri.verbatim_query url))
   in
-  {
-    Request.meth = Httpg_base.Method.of_string meth;
-    url = Uri.of_string url;
-    proto = Httpg_base.Protocol.Http11;
-    header;
-    body = Body.of_string body;
-    content_length = Int64.of_int (String.length body);
-    transfer_encoding = [];
-    close = false;
-    host = "";
-    trailer = None;
-    request_uri = "";
-    remote_addr = "";
-    form = None;
-    post_form = None;
-    multipart_form = None;
-  }
-
-let values_get r_field key =
-  match r_field with Some v -> Values.get v key | None -> ""
-
-let values_find r_field key =
-  match r_field with Some v -> Values.find v key | None -> []
-
-(* ---- TestParseFormQuery: query + urlencoded body merge and precedence. *)
-let parse_urlencoded () =
-  let r =
-    make_req ~meth:"POST"
-      ~url:
-        "http://www.google.com/search?q=foo&q=bar&both=x&prio=1&orphan=nope&empty=not"
-      ~content_type:"application/x-www-form-urlencoded; param=value"
-      ~body:"z=post&both=y&prio=2&=nokey&orphan&empty=&" ()
+  let body =
+    match Form.of_body (Body.of_string "z=post&both=y") with
+    | Ok v -> v
+    | Error _ -> Alcotest.fail "body parse"
   in
-  let q = run (Form.form_value r "q") in
-  Alcotest.(check string) "FormValue q" "foo" q;
-  let z = run (Form.form_value r "z") in
-  Alcotest.(check string) "FormValue z" "post" z;
-  (* PostForm has no "q" (it was only in the query). *)
+  (* body values first, then the query values appended per key. *)
+  let form = Form.merge body query in
   Alcotest.(check (list string))
-    "PostForm q empty" []
-    (values_find r.Request.post_form "q");
-  let bz = run (Form.post_form_value r "z") in
-  Alcotest.(check string) "PostFormValue z" "post" bz;
-  (* Form["q"] = ["foo"; "bar"] (query values, in order). *)
+    "q (query only)" [ "foo"; "bar" ] (Form.find form "q");
   Alcotest.(check (list string))
-    "Form q" [ "foo"; "bar" ]
-    (values_find r.Request.form "q");
-  (* Form["both"] = ["y"; "x"] (body value first, then query). *)
-  Alcotest.(check (list string))
-    "Form both" [ "y"; "x" ]
-    (values_find r.Request.form "both");
-  Alcotest.(check string) "FormValue prio" "2" (run (Form.form_value r "prio"));
-  Alcotest.(check (list string))
-    "Form orphan" [ ""; "nope" ]
-    (values_find r.Request.form "orphan");
-  Alcotest.(check (list string))
-    "Form empty" [ ""; "not" ]
-    (values_find r.Request.form "empty");
-  Alcotest.(check (list string))
-    "Form nokey" [ "nokey" ]
-    (values_find r.Request.form "")
+    "both (body first)" [ "y"; "x" ] (Form.find form "both");
+  Alcotest.(check string) "z (body only)" "post" (Form.get form "z")
 
-(* ---- TestParseFormQueryMethods: only POST/PUT/PATCH read the body. *)
-let parse_form_query_methods () =
-  List.iter
-    (fun meth ->
-      let r =
-        make_req ~meth ~url:"http://www.google.com/search"
-          ~content_type:"application/x-www-form-urlencoded; param=value"
-          ~body:"foo=bar" ()
-      in
-      let want = if meth = "FOO" then "" else "bar" in
-      let got = run (Form.form_value r "foo") in
-      Alcotest.(check string)
-        (Printf.sprintf "method %s FormValue foo" meth)
-        want got)
-    [ "POST"; "PATCH"; "PUT"; "FOO" ]
+(* A bare ';' separator in a urlencoded body is rejected (Form.parse_query). *)
+let form_semicolon_error () =
+  match Form.of_body (Body.of_string "q=foo;q=bar&a=1") with
+  | Error Form.Invalid_semicolon_separator -> ()
+  | Error _ -> Alcotest.fail "want Invalid_semicolon_separator"
+  | Ok _ -> Alcotest.fail "want error, got Ok"
 
-(* ---- TestParseFormSemicolonSeparator: a non-encoded ';' in the query is an
-   error, but valid params still populate Form. *)
-let parse_form_semicolon () =
-  List.iter
-    (fun meth ->
-      let r =
-        make_req ~meth ~url:"http://www.google.com/search?q=foo;q=bar&a=1"
-          ~body:"q" ()
-      in
-      let res = run (Form.parse_form r) in
-      (match res with
-      | Ok () -> Alcotest.failf "method %s: expected error, got success" meth
-      | Error _ -> ());
-      Alcotest.(check (list string))
-        (Printf.sprintf "method %s Form a" meth)
-        [ "1" ]
-        (values_find r.Request.form "a"))
-    [ "POST"; "PATCH"; "PUT"; "GET" ]
+(* A body over maxFormSize (10 MB) is rejected without parsing. *)
+let form_too_large () =
+  let big = "a=" ^ String.make ((10 * 1024 * 1024) + 1) 'x' in
+  match Form.of_body (Body.of_string big) with
+  | Error Form.Too_large -> ()
+  | _ -> Alcotest.fail "want Too_large"
 
-(* small substring helper (no Astring dep). *)
-let str_contains haystack needle =
-  let hl = String.length haystack and nl = String.length needle in
-  if nl = 0 then true
-  else
-    let rec go i =
-      if i + nl > hl then false
-      else if String.sub haystack i nl = needle then true
-      else go (i + 1)
-    in
-    go 0
+(* ---- Multipart: boundary extraction ---- *)
 
-(* ---- TestParseFormUnknownContentType (subset). *)
-let parse_form_unknown_content_type () =
-  let check name ?content_type want_err =
-    let r =
-      let header =
-        match content_type with
-        | Some ct -> Header.set (Header.create ()) "Content-Type" ct
-        | None -> Header.create ()
-      in
-      {
-        Request.meth = Httpg_base.Method.Post;
-        url = Uri.of_string "http://x/";
-        proto = Httpg_base.Protocol.Http11;
-        header;
-        body = Body.of_string "body";
-        content_length = 4L;
-        transfer_encoding = [];
-        close = false;
-        host = "";
-        trailer = None;
-        request_uri = "";
-        remote_addr = "";
-        form = None;
-        post_form = None;
-        multipart_form = None;
-      }
-    in
-    let res = run (Form.parse_form r) in
-    match (res, want_err) with
-    | Ok (), None -> ()
-    | Error e, Some sub ->
-        Alcotest.(check bool)
-          (name ^ " err substr") true
-          (str_contains (Form.error_to_string e) sub)
-    | Ok (), Some w -> Alcotest.failf "%s: want error %S, got success" name w
-    | Error e, None ->
-        Alcotest.failf "%s: want success, got error %S" name
-          (Form.error_to_string e)
+let boundary () =
+  let ok ct want =
+    match Multipart.boundary ~content_type:ct with
+    | Ok b -> Alcotest.(check string) ("boundary " ^ ct) want b
+    | Error e -> Alcotest.failf "%s: %s" ct (Multipart.error_to_string e)
   in
-  check "text" ~content_type:"text/plain" None;
-  check "empty" None;
-  check "boundary" ~content_type:"text/plain; boundary="
-    (Some "invalid media parameter");
-  check "unknown" ~content_type:"application/unknown" None
+  let not_multipart ct =
+    match Multipart.boundary ~content_type:ct with
+    | Error Multipart.Not_multipart -> ()
+    | _ -> Alcotest.failf "%s: want Not_multipart" ct
+  in
+  ok "multipart/form-data; boundary=foo123" "foo123";
+  ok {|multipart/form-data; boundary="foo 123"|} "foo 123";
+  ok "MULTIPART/FORM-DATA; BOUNDARY=xYz" "xYz" (* case-insensitive type/key *);
+  not_multipart "application/x-www-form-urlencoded";
+  not_multipart "";
+  not_multipart "multipart/form-data" (* no boundary *);
+  not_multipart "text/plain; boundary=foo" (* not multipart *);
+  (* a genuinely malformed Content-Type is a parse error *)
+  match Multipart.boundary ~content_type:"garbage" with
+  | Error (Multipart.Parse m) ->
+      Alcotest.(check bool) "parse error message" true (String.length m > 0)
+  | _ -> Alcotest.fail "want Parse error for malformed content-type"
 
-let multipart_boundary = "foo123"
+(* ---- Multipart: parsing parts ---- *)
 
-let multipart_body () =
+(* Collect a multipart body's parts (raising on a parse error) under [sw]. *)
+(* [of_body] is pure (in-memory parts, no switch); collect the parts, raising on
+   a parse error. *)
+let collect ~boundary body =
+  Multipart.of_body ~boundary (Body.of_string body)
+  |> Seq.map (function
+    | Ok p -> p
+    | Error e -> Alcotest.failf "multipart: %s" (Multipart.error_to_string e))
+  |> List.of_seq
+
+let multipart_body boundary =
   String.concat "\r\n"
     [
-      "--" ^ multipart_boundary;
+      "--" ^ boundary;
       {|Content-Disposition: form-data; name="field1"|};
       "";
       "value1";
-      "--" ^ multipart_boundary;
+      "--" ^ boundary;
       {|Content-Disposition: form-data; name="file"; filename="hello.txt"|};
       "Content-Type: text/plain";
       "";
       "file-contents-here";
-      "--" ^ multipart_boundary ^ "--";
+      "--" ^ boundary ^ "--";
       "";
     ]
 
-(* ---- multipart: a text field + a file part. *)
 let multipart () =
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:
-        (Printf.sprintf {|multipart/form-data; boundary="%s"|}
-           multipart_boundary)
-      ~body:(multipart_body ()) ()
-  in
-  (match run (Form.parse_multipart_form r ~max_memory:10000L) with
-  | Ok () -> ()
-  | Error e ->
-      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
-  (* text field merged into Form and PostForm. *)
-  Alcotest.(check string)
-    "field1 in Form" "value1"
-    (values_get r.Request.form "field1");
-  Alcotest.(check string)
-    "field1 in PostForm" "value1"
-    (values_get r.Request.post_form "field1");
-  (* multipart_form.value also holds it. *)
-  (match r.Request.multipart_form with
-  | None -> Alcotest.fail "multipart_form is None"
-  | Some mf ->
+  match collect ~boundary:"foo123" (multipart_body "foo123") with
+  | [ field1; file ] ->
+      Alcotest.(check (option string)) "field1 name" (Some "field1") field1.name;
+      Alcotest.(check (option string)) "field1 not a file" None field1.filename;
+      Alcotest.(check string) "field1 value" "value1" field1.body;
+      Alcotest.(check (option string)) "file name" (Some "file") file.name;
+      Alcotest.(check (option string))
+        "file filename" (Some "hello.txt") file.filename;
       Alcotest.(check string)
-        "field1 in mf.value" "value1"
-        (Values.get mf.Request.value "field1"));
-  (* file part. *)
-  match run (Form.form_file r "file") with
-  | None -> Alcotest.fail "FormFile file is None"
-  | Some (fn, content) ->
-      Alcotest.(check string) "filename" "hello.txt" fn;
-      Alcotest.(check string) "file content" "file-contents-here" content
+        "file Content-Type" "text/plain"
+        (Header.get file.header "Content-Type");
+      Alcotest.(check string) "file body" "file-contents-here" file.body
+  | parts -> Alcotest.failf "expected 2 parts, got %d" (List.length parts)
 
-(* ---- TestParseMultipartFormFilename (Issue 45789): strip directory path. *)
+(* Issue 45789: a filename with a directory path is reduced to its basename. *)
 let multipart_filename () =
   let body =
     String.concat "\r\n"
@@ -242,214 +144,66 @@ let multipart_filename () =
         "";
       ]
   in
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:"multipart/form-data; boundary=xxx" ~body ()
-  in
-  match run (Form.form_file r "file") with
-  | None -> Alcotest.fail "FormFile file is None"
-  | Some (fn, _) -> Alcotest.(check string) "stripped filename" "foobar.txt" fn
+  match collect ~boundary:"xxx" body with
+  | [ file ] ->
+      Alcotest.(check (option string))
+        "stripped filename" (Some "foobar.txt") file.filename
+  | parts -> Alcotest.failf "expected 1 part, got %d" (List.length parts)
 
-(* ---- TestFormValueCallsParseMultipartForm-style: FormValue lazily parses a
-   multipart body and returns the first value. *)
-let form_value_lazy () =
+(* A large part is held in memory and parses correctly (no spill — for now). *)
+let multipart_large_in_memory () =
+  let big = String.make 100_000 'x' in
   let body =
     String.concat "\r\n"
       [
         "--bnd";
-        {|Content-Disposition: form-data; name="key"|};
+        {|Content-Disposition: form-data; name="big"; filename="big.bin"|};
+        "Content-Type: application/octet-stream";
         "";
-        "val";
+        big;
         "--bnd--";
         "";
       ]
   in
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:"multipart/form-data; boundary=bnd" ~body ()
-  in
-  (* form is None until FormValue forces parsing. *)
-  Alcotest.(check bool) "form unparsed before" true (r.Request.form = None);
-  let v = run (Form.form_value r "key") in
-  Alcotest.(check string) "FormValue key" "val" v;
-  Alcotest.(check bool) "form parsed after" false (r.Request.form = None)
+  match collect ~boundary:"bnd" body with
+  | [ file ] ->
+      Alcotest.(check (option string)) "filename" (Some "big.bin") file.filename;
+      Alcotest.(check int) "content length" 100_000 (String.length file.body);
+      Alcotest.(check string) "content" big file.body
+  | parts -> Alcotest.failf "expected 1 part, got %d" (List.length parts)
 
-(* ---- F016: a file part larger than max_memory spills to a temp file (not all
-   in RAM), parses correctly, and the temp file is removed by remove_all. *)
-let big_file_contents = String.make 5000 'x'
-
-let spill_body () =
-  String.concat "\r\n"
-    [
-      "--bnd";
-      {|Content-Disposition: form-data; name="big"; filename="big.bin"|};
-      "Content-Type: application/octet-stream";
-      "";
-      big_file_contents;
-      "--bnd--";
-      "";
-    ]
-
-let multipart_spill () =
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:"multipart/form-data; boundary=bnd" ~body:(spill_body ()) ()
-  in
-  (* Budget far below the 5000-byte part -> must spill to disk. *)
-  (match Form.parse_multipart_form r ~max_memory:100L with
-  | Ok () -> ()
-  | Error e ->
-      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
-  let mf =
-    match r.Request.multipart_form with
-    | Some mf -> mf
-    | None -> Alcotest.fail "multipart_form is None"
-  in
-  let fh =
-    match Hashtbl.find_opt mf.Request.file "big" with
-    | Some (fh :: _) -> fh
-    | _ -> Alcotest.fail "no file part 'big'"
-  in
-  (* Spilled: backed by a temp file on disk, NOT held in [content]. *)
-  let path =
-    match fh.Request.tmpfile with
-    | Some p -> p
-    | None -> Alcotest.fail "expected spill to temp file, got in-memory"
-  in
-  Alcotest.(check string) "spilled content empty in RAM" "" fh.Request.content;
-  Alcotest.(check bool) "temp file exists" true (Sys.file_exists path);
-  (* Content is correct (read back via FormFile / FileHeader.Open). *)
-  (match Form.form_file r "big" with
-  | Some (fn, content) ->
-      Alcotest.(check string) "filename" "big.bin" fn;
-      Alcotest.(check string) "spilled content" big_file_contents content
-  | None -> Alcotest.fail "FormFile big is None");
-  (* Cleanup: remove_all unlinks the temp file (Go's RemoveAll). *)
-  Form.remove_all r;
-  Alcotest.(check bool)
-    "temp file gone after remove_all" false (Sys.file_exists path);
-  Alcotest.(check bool)
-    "remove_all idempotent" true
-    (try
-       Form.remove_all r;
-       true
-     with _ -> false)
-
-(* Small file part (< max_memory) stays in memory: no temp file, common case
-   unchanged. *)
-let multipart_no_spill () =
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:
-        (Printf.sprintf {|multipart/form-data; boundary="%s"|}
-           multipart_boundary)
-      ~body:(multipart_body ()) ()
-  in
-  (match Form.parse_multipart_form r ~max_memory:10000L with
-  | Ok () -> ()
-  | Error e ->
-      Alcotest.failf "parse_multipart_form: %s" (Form.error_to_string e));
-  match r.Request.multipart_form with
-  | None -> Alcotest.fail "multipart_form is None"
-  | Some mf -> (
-      match Hashtbl.find_opt mf.Request.file "file" with
-      | Some (fh :: _) ->
-          Alcotest.(check bool) "no temp file" true (fh.Request.tmpfile = None);
-          Alcotest.(check string)
-            "in-memory content" "file-contents-here" fh.Request.content
-      | _ -> Alcotest.fail "no file part")
-
-(* Leak proof on the ABANDON path: this mirrors the serve loop's per-request
-   switch exactly — a handler parses+spills, then raises (or simply returns)
-   without ever calling remove_all. The [Switch.on_release] hook must still
-   unlink the temp file when the switch closes, so it never outlives the
-   request. Demonstrates the cleanup hook the serve loop wires (server.ml). *)
-let multipart_abandon_switch_cleanup () =
-  let spilled_path = ref None in
-  let run_handler_under_request_switch raise_in_handler =
-    Eio_main.run @@ fun _env ->
-    let r =
-      make_req ~meth:"POST" ~url:"http://x/"
-        ~content_type:"multipart/form-data; boundary=bnd" ~body:(spill_body ())
-        ()
-    in
-    try
-      Eio.Switch.run (fun req_sw ->
-          (* exactly what serve_loop registers *)
-          Eio.Switch.on_release req_sw (fun () ->
-              Request.remove_multipart_temp_files r);
-          (* handler body: parse (spills), record path, then abandon. *)
-          ignore (Form.parse_multipart_form r ~max_memory:100L);
-          (match r.Request.multipart_form with
-          | Some mf -> (
-              match Hashtbl.find_opt mf.Request.file "big" with
-              | Some (fh :: _) -> spilled_path := fh.Request.tmpfile
-              | _ -> ())
-          | None -> ());
-          if raise_in_handler then failwith "handler boom")
-    with Failure _ -> ()
-  in
-  (* (1) handler returns normally without remove_all: switch release cleans up. *)
-  run_handler_under_request_switch false;
-  (match !spilled_path with
-  | Some p ->
-      Alcotest.(check bool)
-        "spilled temp gone after switch (normal return)" false
-        (Sys.file_exists p)
-  | None -> Alcotest.fail "expected a spilled temp file");
-  (* (2) handler raises: switch release still cleans up. *)
-  spilled_path := None;
-  run_handler_under_request_switch true;
-  match !spilled_path with
-  | Some p ->
-      Alcotest.(check bool)
-        "spilled temp gone after switch (handler raised)" false
-        (Sys.file_exists p)
-  | None -> Alcotest.fail "expected a spilled temp file"
-
-(* ---- Values unit: Encode sorts by key (url.Values.Encode). *)
+(* ---- Form values unit: Encode sorts by key (url.Values.Encode). ---- *)
 let values_encode () =
-  let v = Values.create () in
-  Values.add v "foo" "quux";
-  Values.add v "bar" "baz";
-  Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Values.encode v);
-  Values.set v "foo" "x y";
+  let v = Form.create () in
+  let v = Form.add v "foo" "quux" in
+  let v = Form.add v "bar" "baz" in
+  Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Form.encode v);
+  let v = Form.set v "foo" "x y" in
+  (* deviation from Go: space encodes as "%20", not '+'. *)
   Alcotest.(check string)
-    "encode space->plus" "bar=baz&foo=x+y" (Values.encode v)
+    "encode space->%20" "bar=baz&foo=x%20y" (Form.encode v)
 
-(* Result migration T6: ParseMultipartForm on a non-multipart request returns
-   [Error Not_multipart] (was a raised [Not_multipart]). *)
-let parse_non_multipart () =
-  let r =
-    make_req ~meth:"POST" ~url:"http://x/"
-      ~content_type:"application/x-www-form-urlencoded" ~body:"a=b" ()
-  in
-  (match run (Form.parse_multipart_form r ~max_memory:10000L) with
-  | Error Form.Not_multipart -> ()
-  | Error (Form.Form m) ->
-      Alcotest.failf "expected Not_multipart, got Form %S" m
-  | Ok () -> Alcotest.fail "expected Error Not_multipart, got Ok");
-  (* No Content-Type at all is also Not_multipart. *)
-  let r2 = make_req ~meth:"POST" ~url:"http://x/" ~body:"a=b" () in
-  match run (Form.parse_multipart_form r2 ~max_memory:10000L) with
-  | Error Form.Not_multipart -> ()
-  | _ -> Alcotest.fail "no Content-Type -> Error Not_multipart"
+(* Round-trip: a space and a literal '+' survive encode -> parse_query. The space
+   encodes as "%20" and the '+' as "%2B"; decode accepts both '+' and "%2B". *)
+let encode_roundtrip () =
+  let v = Form.set (Form.create ()) "k" "a b+c" in
+  let encoded = Form.encode v in
+  Alcotest.(check string) "encoded" "k=a%20b%2Bc" encoded;
+  let parsed, res = Form.parse_query encoded in
+  Alcotest.(check bool) "no parse error" true (res = Ok ());
+  Alcotest.(check string) "value round-trips" "a b+c" (Form.get parsed "k")
 
 let tests =
   [
-    Alcotest.test_case "parse_urlencoded" `Quick parse_urlencoded;
-    Alcotest.test_case "parse_form_query_methods" `Quick
-      parse_form_query_methods;
-    Alcotest.test_case "parse_form_semicolon" `Quick parse_form_semicolon;
-    Alcotest.test_case "parse_form_unknown_content_type" `Quick
-      parse_form_unknown_content_type;
-    Alcotest.test_case "parse_non_multipart" `Quick parse_non_multipart;
+    Alcotest.test_case "form_of_body" `Quick form_of_body;
+    Alcotest.test_case "form_query_body_merge" `Quick form_query_body_merge;
+    Alcotest.test_case "form_semicolon_error" `Quick form_semicolon_error;
+    Alcotest.test_case "form_too_large" `Quick form_too_large;
+    Alcotest.test_case "boundary" `Quick boundary;
     Alcotest.test_case "multipart" `Quick multipart;
-    Alcotest.test_case "multipart_no_spill" `Quick multipart_no_spill;
-    Alcotest.test_case "multipart_spill" `Quick multipart_spill;
-    Alcotest.test_case "multipart_abandon_switch_cleanup" `Quick
-      multipart_abandon_switch_cleanup;
     Alcotest.test_case "multipart_filename" `Quick multipart_filename;
-    Alcotest.test_case "form_value" `Quick form_value_lazy;
+    Alcotest.test_case "multipart_large_in_memory" `Quick
+      multipart_large_in_memory;
     Alcotest.test_case "values_encode" `Quick values_encode;
+    Alcotest.test_case "encode_roundtrip" `Quick encode_roundtrip;
   ]

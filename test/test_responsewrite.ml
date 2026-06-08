@@ -21,9 +21,6 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
     trailer = None;
     request_uri = "";
     remote_addr = "";
-    form = None;
-    post_form = None;
-    multipart_form = None;
   }
 
 let header pairs =

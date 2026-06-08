@@ -1,38 +1,9 @@
-(* Port of go/src/net/http/request.go: the Request type and its pure helpers. *)
+(* Port of go/src/net/http/request.go: the Request type and its pure helpers.
 
-(* A multipart file part, the analogue of Go's multipart.FileHeader. A part up
-   to the [max_memory] budget is held in [content]; an oversized part is spilled
-   to [tmpfile] (formdata.go:174) and [content] is "". *)
-type file_header = {
-  filename : string;
-  fh_header : (string * string) list;  (** the part's MIME header fields *)
-  content : string;
-  tmpfile : string option;  (** Go FileHeader.tmpfile: spilled-part path. *)
-}
-
-(* The analogue of Go's *multipart.Form: named text values plus file parts. *)
-type multipart_form = {
-  value : Values.t;
-  file : (string, file_header list) Hashtbl.t;
-}
-
-(* Form.RemoveAll (formdata.go:240): unlink any spilled temp files; idempotent
-   (clears [tmpfile]). Bug-only failures (missing file is fine) are swallowed. *)
-let remove_multipart_files (file : (string, file_header list) Hashtbl.t) : unit
-    =
-  Hashtbl.iter
-    (fun k fhs ->
-      let cleaned =
-        List.map
-          (fun fh ->
-            (match fh.tmpfile with
-            | Some path -> ( try Sys.remove path with Sys_error _ -> ())
-            | None -> ());
-            { fh with tmpfile = None })
-          fhs
-      in
-      Hashtbl.replace file k cleaned)
-    file
+   Form/multipart parsing is NOT cached on the Request (a deliberate deviation
+   from Go's in-place mutation): it is done by the composable body parsers
+   {!Form.of_body} and {!Multipart.of_body}, which take a [Body.t] and return a
+   parsed value. *)
 
 type t = {
   mutable meth : Httpg_base.Method.t;
@@ -47,21 +18,7 @@ type t = {
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
-  (* Form parsing state (Ticket 11), populated lazily by {!Form}. Optionals
-     default to [None] so existing constructors are unaffected. Go mutates the
-     Request in place; these mutable fields mirror that. *)
-  mutable form : Values.t option;
-  mutable post_form : Values.t option;
-  mutable multipart_form : multipart_form option;
 }
-
-(* Remove any temp files spilled by multipart parsing on [r]; idempotent. Wired
-   to a per-request switch by the serve loop and exposed publicly (Go's
-   Request.MultipartForm.RemoveAll). Safe to call when nothing spilled. *)
-let remove_multipart_temp_files (r : t) : unit =
-  match r.multipart_form with
-  | Some mf -> remove_multipart_files mf.file
-  | None -> ()
 
 (* defaultUserAgent (request.go). *)
 let default_user_agent = "Go-http-client/1.1"

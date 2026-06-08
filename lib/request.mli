@@ -1,27 +1,9 @@
 (* Port of go/src/net/http/request.go: the Request type and pure helpers.
-   The IO halves (readRequest / Request.Write) live in {!Io}. Multipart/form
-   parsing, GetBody, Cancel, TLS and context fields are intentionally omitted
-   (deferred). *)
-
-type file_header = {
-  filename : string;
-  fh_header : (string * string) list;
-  content : string;
-  tmpfile : string option;
-}
-(** A multipart file part, the analogue of Go's [multipart.FileHeader]. A part
-    within the [max_memory] budget is held in [content]; an oversized part is
-    spilled to disk at [tmpfile] (and [content] is [""]). *)
-
-type multipart_form = {
-  value : Values.t;
-  file : (string, file_header list) Hashtbl.t;
-}
-(** The analogue of Go's [*multipart.Form]: named text values and file parts. *)
-
-val remove_multipart_files : (string, file_header list) Hashtbl.t -> unit
-(** Go's [Form.RemoveAll]: unlink any spilled temp files referenced by the table
-    and clear their [tmpfile]. Idempotent. *)
+   The IO halves (readRequest / Request.Write) live in {!Io}. GetBody, Cancel,
+   TLS and context fields are intentionally omitted (deferred). Form/multipart
+   parsing is NOT cached on the Request (a deliberate deviation from Go's in-place
+   mutation): use the composable body parsers {!Form.of_body} / {!Multipart.of_body},
+   which take the [body] and return a parsed value. *)
 
 type t = {
   mutable meth : Httpg_base.Method.t;
@@ -38,17 +20,8 @@ type t = {
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
-  mutable form : Values.t option;
-      (** Go [Form]: query + urlencoded body params; [None] until parsed. *)
-  mutable post_form : Values.t option;  (** Go [PostForm]: body params only. *)
-  mutable multipart_form : multipart_form option;  (** Go [MultipartForm]. *)
 }
 (** A request mirroring Go's [Request] struct. *)
-
-val remove_multipart_temp_files : t -> unit
-(** Remove any temp files spilled by multipart parsing on [r] (Go's
-    [Request.MultipartForm.RemoveAll]). Idempotent; no-op if nothing spilled.
-    The serve loop wires this to a per-request switch. *)
 
 val default_user_agent : string
 (** [defaultUserAgent]. *)

@@ -567,13 +567,12 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
         else begin
           wrap_read_timeout_body clock ~secs:timeouts.to_read req;
           let keep_alive =
-            (* Per-request switch: temp files spilled by multipart parsing are
-               unlinked on release (success, error, or client-disconnect), so
-               they never outlive the request nor leak across keep-alive. NOT
-               the connection switch, which would accumulate them per request. *)
+            (* Per-request switch handed to the handler as [~sw]: resources the
+               handler opens under it (a file server's fd, multipart tempfiles
+               from {!Multipart.of_body}) are released on its teardown, so they
+               never outlive the request nor leak across keep-alive. NOT the
+               connection switch, which would accumulate them per request. *)
             Eio.Switch.run @@ fun req_sw ->
-            Eio.Switch.on_release req_sw (fun () ->
-                Request.remove_multipart_temp_files req);
             match
               with_deadline clock ~secs:timeouts.to_write (fun () ->
                   try serve_one ~sw:req_sw w req handler with _ -> false)
@@ -626,9 +625,6 @@ let request_of_server_request (r : Httpg_http2.Api.server_request) : Request.t =
        else Some (header_of_api_header r.sreq_trailer));
     request_uri = r.sreq_request_uri;
     remote_addr = r.sreq_remote_addr;
-    form = None;
-    post_form = None;
-    multipart_form = None;
   }
 
 (* Adapt a [Server.handler] into a {!Httpg_http2.Api.handler}: run the handler,
@@ -641,12 +637,11 @@ let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
   let req = request_of_server_request r in
   (* Per-request switch (mirrors the h1 serve loop). The whole response — headers
      AND body — is driven inside the switch, because a [Body.Stream] may read
-     from a resource the handler opened under [~sw] (e.g. the file server's fd);
-     the switch must stay open until the body is fully written. Spilled multipart
-     temp files are unlinked on release, so they never outlive the h2 stream. *)
+     from a resource the handler opened under [~sw] (e.g. the file server's fd, or
+     multipart tempfiles from {!Multipart.of_body}); the switch must stay open
+     until the body is fully written, and releasing it cleans those up so they
+     never outlive the h2 stream. *)
   Eio.Switch.run (fun req_sw ->
-      Eio.Switch.on_release req_sw (fun () ->
-          Request.remove_multipart_temp_files req);
       let resp = handler ~sw:req_sw req in
       let h2h = h2w.Httpg_http2.Api.rw_header () in
       List.iter

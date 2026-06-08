@@ -82,11 +82,11 @@ let modules_with_type_error =
     "internal/http2/hpack";
     "internal/http2/hpack_huffman";
     "internal/pattern";
-    "values";
     "cookie";
     "fs";
     "form";
     "mux";
+    "multipart";
   ]
 
 (* All [.mli] files we sweep for the no-[_exn] guard. *)

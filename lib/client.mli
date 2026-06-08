@@ -96,12 +96,11 @@ val do_one :
 (** Go's [Client.do]: the redirect-following loop (without {!do_}'s timeout
     composition). [?round_trip] overrides the per-hop round-tripper (default:
     the client's {!Transport.round_trip}, passing [?force_h2]); exposed so the
-    redirect loop can be driven against a stub without real DNS. With the default
-    round-tripper the
-    transport's switch must be established ({!Transport.run}); {!do_} does this.
-    Sensitive headers are stripped stickily and subdomain-aware against the
-    initial request host (client.go:691-694); the Referer is set from the
-    previous hop. *)
+    redirect loop can be driven against a stub without real DNS. With the
+    default round-tripper the transport's switch must be established
+    ({!Transport.run}); {!do_} does this. Sensitive headers are stripped
+    stickily and subdomain-aware against the initial request host
+    (client.go:691-694); the Referer is set from the previous hop. *)
 
 val make_request :
   ?body:Body.t ->
@@ -117,8 +116,8 @@ val get : ?force_h2:bool -> sw:Eio.Switch.t -> t -> string -> Response.t
     URLs (see {!do_}). *)
 
 val head : ?force_h2:bool -> sw:Eio.Switch.t -> t -> string -> Response.t
-(** [head ~sw c url] is Go's [Client.Head]. [?force_h2] selects h2c for cleartext
-    URLs (see {!do_}). *)
+(** [head ~sw c url] is Go's [Client.Head]. [?force_h2] selects h2c for
+    cleartext URLs (see {!do_}). *)
 
 val post :
   ?force_h2:bool ->

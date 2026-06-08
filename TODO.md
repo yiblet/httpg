@@ -225,7 +225,11 @@ divergence.
   `Connection: close` injection on the too-big path). Ref: `server.go:1404-1463`,
   `:1690-1711`; Go Issue 15527.
 - `Request.Clone` (`clone.go`); `Header.clone` already exists.
-- Multipart: enforce `max_memory` (temp-file spill) + a streaming `MultipartReader`; currently the `multipart_form` stand-in.
+- Multipart: `Multipart.of_body` settles each part incrementally (memory, or temp-file spill past `max_memory`) and yields a `(part, error) result Seq.t`, but it is not a true *wire*-streaming reader (consume-once part bodies) and drops unstructured custom part headers; both deferred. Backed by the `multipart_form` stand-in.
+- `Form`: drop the dead `Invalid_escape` error variant — it is declared (type + `error_to_string`) to mirror Go's `QueryUnescape` error but is **never constructed** (the `uri`-backed `query_unescape` is lenient), so it is an unreachable arm callers needlessly match. Either remove it or actually detect malformed `%xx`.
+- `Form.of_body` bounded read: it currently `Body.read_all`s the whole body and *then* checks `> max_form_size`, so a hostile huge body is buffered before rejection. Mirror Go's `io.LimitReader(body, maxFormSize+1)` — pull at most `max_form_size + 1` bytes and error without buffering more. (Copied Go's constant but not its mechanism.)
+- Consolidate hand-rolled trims: `header.ml`, `transfer.ml` (`trim_string` + `trim_ows`), `cookie.ml`, `fs.ml` all redefine the identical space+tab OWS trimmer. Hoist one `trim_ows` into `Httpg_base.Textproto` (Go's `textproto.trimString` / `httpguts.trimOWS`, space+tab only — deliberately *not* stdlib `String.trim`, which also strips CR/LF/FF and would mask injection on header values) and point them at it. `multipart.ml`'s `trim` (space/tab/nl/cr) is just `String.trim` — use the stdlib.
+- `Form.create : unit -> t` → `empty : t`: a unit-returning "constructor" for an immutable empty `Map` mirrors `Header.create` but isn't idiomatic for a persistent value.
 - `mime.TypeByExtension` database (today a small built-in table + `Sniff` fallback).
 - `Uri.t` vs `url.URL` divergences: `RawPath`/opaque/scheme-relative URIs, `ParseRequestURI` semantics (a few `request_test.go` rows skipped).
 

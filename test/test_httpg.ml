@@ -19,7 +19,7 @@ let () =
        ("Method", Test_method.tests);
        ("Protocol", Test_protocol.tests);
        ("Status", Test_status.tests);
-       ("Values", Test_values.tests);
+       ("Form", Test_values.tests);
        ("Ascii", Test_ascii.tests);
        ("Mapping", Test_mapping.tests);
        ("Pattern", Test_pattern.tests);
