@@ -81,26 +81,26 @@ let send_get w =
 let server_streams_unbuffered () =
   let release, wake_release = Eio.Promise.create () in
   let handler =
-    Server.handler_func (fun ~sw:_ _r ->
-        (* The streaming loop now lives in the body closure: the serve loop pulls
+   fun ~sw:_ _r ->
+    (* The streaming loop now lives in the body closure: the serve loop pulls
            and flushes each chunk, so "alpha" reaches the client before "beta" is
            produced (the second pull blocks on [release]). *)
-        let state = ref `Alpha in
-        let next () =
-          match !state with
-          | `Alpha ->
-              state := `Beta;
-              Some "alpha"
-          | `Beta ->
-              Eio.Promise.await release;
-              state := `Gamma;
-              Some "beta"
-          | `Gamma ->
-              state := `Done;
-              Some "gamma"
-          | `Done -> None
-        in
-        Response.create () |> Response.with_body (Body.of_stream next))
+    let state = ref `Alpha in
+    let next () =
+      match !state with
+      | `Alpha ->
+          state := `Beta;
+          Some "alpha"
+      | `Beta ->
+          Eio.Promise.await release;
+          state := `Gamma;
+          Some "beta"
+      | `Gamma ->
+          state := `Done;
+          Some "gamma"
+      | `Done -> None
+    in
+    Response.create () |> Response.with_body (Body.of_stream next)
   in
   with_raw_client handler (fun r w ->
       send_get w;
@@ -129,8 +129,8 @@ let server_streams_unbuffered () =
 (* ---- Small response: <=2048 bytes => exact Content-Length, no chunking ---- *)
 let small_response () =
   let handler =
-    Server.handler_func (fun ~sw:_ _r ->
-        Response.with_body_string "hello small body" (Response.create ()))
+   fun ~sw:_ _r ->
+    Response.with_body_string "hello small body" (Response.create ())
   in
   with_raw_client handler (fun r w ->
       send_get w;
@@ -152,8 +152,7 @@ let small_response () =
 let large_response () =
   let payload = String.make 5000 'z' in
   let handler =
-    Server.handler_func (fun ~sw:_ _r ->
-        Response.create () |> Response.with_body_string payload)
+   fun ~sw:_ _r -> Response.create () |> Response.with_body_string payload
   in
   with_raw_client handler (fun r w ->
       send_get w;

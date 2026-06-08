@@ -5,8 +5,7 @@ let capture (f : Eio.Buf_write.t -> unit) : string =
   f w;
   Eio.Buf_write.serialize_to_string w
 
-let dummy_req ?(meth = "GET") ?(proto_minor = 0) () :
-    Httpg.Body.t Httpg.Request.t =
+let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
   {
     Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string "/";
@@ -35,7 +34,7 @@ let header pairs =
 let resp ~status_code ?(proto_major = 1) ?(proto_minor = 1)
     ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?request
-    () : Httpg.Body.t Httpg.Response.t =
+    () : Httpg.Response.t =
   {
     Httpg.Response.status =
       (match Httpg_base.Status.of_int_result status_code with

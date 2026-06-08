@@ -51,7 +51,7 @@ let parse_basic_auth () =
       Alcotest.(check (option (pair string string))) header want got)
     cases
 
-let dummy_req () : Httpg.Body.t Httpg.Request.t =
+let dummy_req () : Httpg.Request.t =
   {
     Httpg.Request.meth = Httpg_base.Method.Get;
     url = Uri.of_string "http://example.com/";

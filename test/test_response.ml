@@ -5,7 +5,7 @@ let read ?request s =
   | Ok r -> r
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let body_of (r : Httpg.Body.t Httpg.Response.t) = Httpg.Body.read_all r.body
+let body_of (r : Httpg.Response.t) = Httpg.Body.read_all r.body
 let i64 = Int64.to_string
 
 (* HTTP/1.0 unchunked, Connection: close, no Content-Length. *)

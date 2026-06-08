@@ -11,8 +11,8 @@ module Ts = Httptest.Server
 (* ---- HttptestServer.server_get ---- *)
 let server_get () =
   let handler =
-    Server.handler_func (fun ~sw:_ r ->
-        Response.create () |> Response.with_body_string (Uri.path r.Request.url))
+   fun ~sw:_ r ->
+    Response.create () |> Response.with_body_string (Uri.path r.Request.url)
   in
   let status, body =
     Test_harness.with_env (fun ~net ~clock ~sw ->
@@ -31,8 +31,7 @@ let server_get () =
 (* ---- HttptestServer.server_tls ---- *)
 let server_tls () =
   let handler =
-    Server.handler_func (fun ~sw:_ _r ->
-        Response.with_body_string "hello" (Response.create ()))
+   fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
   in
   let status, body, url =
     Test_harness.with_env ~secs:15. (fun ~net ~clock ~sw ->
@@ -57,8 +56,7 @@ let server_tls () =
    We serve once before close, capture the port, close, then connect afresh. *)
 let server_close () =
   let handler =
-    Server.handler_func (fun ~sw:_ _r ->
-        Response.with_body_string "hi" (Response.create ()))
+   fun ~sw:_ _r -> Response.with_body_string "hi" (Response.create ())
   in
   let pre_status, refused =
     Test_harness.with_env (fun ~net ~clock ~sw ->

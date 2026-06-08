@@ -82,12 +82,12 @@ val to_http_error : error -> string * Httpg_base.Status.t
     {!Permission} → ["403 Forbidden"]/403, else
     ["500 Internal Server Error"]/500. *)
 
-val local_redirect : Body.t Request.t -> string -> Body.t Response.t
+val local_redirect : Request.t -> string -> Response.t
 (** Go's [localRedirect]: a 301 Moved Permanently response to [new_path],
     preserving the request's raw query, {b without} converting the path to
     absolute (unlike {!Server.redirect}). *)
 
-val dir_list : Body.t Request.t -> file -> Body.t Response.t
+val dir_list : Request.t -> file -> Response.t
 (** Go's [dirList]: a [text/html] response with an HTML [<pre>] listing of the
     directory [f]'s entries as escaped links. *)
 
@@ -100,9 +100,9 @@ val scan_etag : string -> (string * string) option
 val check_preconditions :
   header:Header.t ->
   etag:string ->
-  Body.t Request.t ->
+  Request.t ->
   modtime:float ->
-  [ `Done of Body.t Response.t | `Range of string ]
+  [ `Done of Response.t | `Range of string ]
 (** Go's [checkPreconditions]: evaluate request preconditions per RFC 7232
     section 6 against [modtime] and [etag] (the response's [Etag]). [header] is
     the response header built so far, used to shape a short-circuit response.
@@ -138,12 +138,12 @@ val parse_range : string -> int64 -> (http_range list, error) result
 
 val serve_content :
   ?header:Header.t ->
-  Body.t Request.t ->
+  Request.t ->
   name:string ->
   modtime:float ->
   size:int64 ->
   read_window:(off:int64 -> len:int -> string) ->
-  Body.t Response.t
+  Response.t
 (** Go's [ServeContent] core, building the response. [?header] carries
     caller-set fields ([Etag] for the precondition checks, an explicit
     [Content-Type]); it is taken as the starting response header (copied, not
@@ -159,11 +159,11 @@ val serve_content :
 
 val serve_file :
   sw:Eio.Switch.t ->
-  Body.t Request.t ->
+  Request.t ->
   file_system ->
   string ->
   redirect:bool ->
-  Body.t Response.t
+  Response.t
 (** Go's [serveFile]: serve [name] from [fs] as a response. Files are opened
     under [~sw] (the request switch) so a streamed body outlives this call and
     the fd is closed when the request finishes. Redirects [".../index.html"] to

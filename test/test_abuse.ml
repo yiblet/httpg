@@ -11,8 +11,7 @@
 open Httpg
 
 let hello_handler =
-  Server.handler_func (fun ~sw:_ _r ->
-      Response.with_body_string "hello" (Response.create ()))
+ fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
 
 (* Start [handler] (built via [mk_server ~net ~clock ~sw]) and run [fn r w] over
    a raw buffered client connection, then close the server. *)
@@ -319,9 +318,9 @@ let accepts_valid_host_and_headers () =
 (* ---- Expect: 100-continue handling + 417. *)
 let expect_100_continue () =
   let handler =
-    Server.handler_func (fun ~sw:_ r ->
-        Response.create ()
-        |> Response.with_body_string (Body.read_all r.Request.body))
+   fun ~sw:_ r ->
+    Response.create ()
+    |> Response.with_body_string (Body.read_all r.Request.body)
   in
   let interim, rest =
     with_started ~secs:5.
@@ -441,7 +440,7 @@ let response_header_under_limit_ok () =
 (* ---- client sticky / subdomain-aware redirect header stripping + Referer.
    Driven against a stub round-tripper (no real DNS). *)
 
-let stub_response req ?location () : Body.t Response.t =
+let stub_response req ?location () : Response.t =
   let header, status =
     match location with
     | Some loc ->
@@ -466,7 +465,7 @@ let stub_response req ?location () : Body.t Response.t =
 let drive_redirects ~start:start_url ~routes ~init_headers =
   Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
       let seen = ref [] in
-      let round_trip (req : Body.t Request.t) : Body.t Response.t =
+      let round_trip (req : Request.t) : Response.t =
         seen := !seen @ [ (Uri.to_string req.Request.url, req.Request.header) ];
         match List.assoc_opt (Uri.to_string req.Request.url) routes with
         | Some next -> stub_response req ~location:next ()
@@ -491,7 +490,7 @@ let redirect_strip_sticky_on_bounce_back () =
   let hops =
     Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
         let seen2 = ref [] in
-        let round_trip (req : Body.t Request.t) : Body.t Response.t =
+        let round_trip (req : Request.t) : Response.t =
           let host = Option.value ~default:"" (Uri.host req.Request.url) in
           seen2 := !seen2 @ [ (host, req.Request.header) ];
           match host with

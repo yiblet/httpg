@@ -31,11 +31,7 @@ let http_time_now () =
    the handler returns, so a handler that streams from an opened resource (the
    file server's file handle) must open it under [~sw], which is released once
    the response has been sent. Most handlers ignore [~sw]. *)
-type handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
-
-(* A trivial adapter kept for parity with Go's HandlerFunc; a [handler] is just
-   a function, so this is the identity. *)
-let handler_func (f : handler) : handler = f
+type handler = sw:Eio.Switch.t -> Request.t -> Response.t
 
 (* ---- helpers: Error / NotFound / Redirect (Go server.go) ---- *)
 
@@ -48,7 +44,7 @@ let error msg code =
   |> Response.with_body_string (msg ^ "\n")
 
 let not_found _r = error "404 page not found" Httpg_base.Status.NotFound
-let not_found_handler () = handler_func (fun ~sw:_ r -> not_found r)
+let not_found_handler () ~sw:_ r = not_found r
 
 (* Go's htmlEscape (htmlReplacer). *)
 let html_escape s =
@@ -68,7 +64,7 @@ let html_escape s =
 (* Go's Redirect (HTTP/1.x subset): relative-target resolution against the
    request path is performed as in Go; non-ASCII hex-escaping is narrowed
    (ASCII targets pass through unchanged). *)
-let redirect (r : Body.t Request.t) url code : Body.t Response.t =
+let redirect (r : Request.t) url code : Response.t =
   let url =
     let u = Uri.of_string url in
     if Uri.scheme u = None && Uri.host u = None then begin
@@ -128,8 +124,7 @@ let redirect (r : Body.t Request.t) url code : Body.t Response.t =
       base |> Response.with_set_header "Content-Type" "text/html; charset=utf-8"
   | _ -> base
 
-let redirect_handler url code =
-  handler_func (fun ~sw:_ r -> redirect r url code)
+let redirect_handler url code ~sw:_ r = redirect r url code
 
 (* ---- ServeMux ---- *)
 
@@ -206,7 +201,6 @@ let register mux patstr handler : (unit, error) result =
             Ok ())
 
 let handle mux pattern handler = register mux pattern handler
-let handle_func mux pattern f = register mux pattern (handler_func f)
 
 (* Go's exactMatch. *)
 let exact_match (pat : Pattern.t) path =
@@ -260,16 +254,15 @@ let find_handler_finish mux ~host ~path m =
   | Some ((_pat, h), _captures) -> h
   | None ->
       let allowed = matching_methods mux host path in
-      if List.length allowed > 0 then
-        handler_func (fun ~sw:_ _r ->
-            error
-              (Httpg_base.Status.to_string Httpg_base.Status.MethodNotAllowed)
-              Httpg_base.Status.MethodNotAllowed
-            |> Response.with_set_header "Allow" (String.concat ", " allowed))
+      if List.length allowed > 0 then fun ~sw:_ _r ->
+        error
+          (Httpg_base.Status.to_string Httpg_base.Status.MethodNotAllowed)
+          Httpg_base.Status.MethodNotAllowed
+        |> Response.with_set_header "Allow" (String.concat ", " allowed)
       else not_found_handler ()
 
 (* Go's findHandler. *)
-let find_handler mux (r : Body.t Request.t) =
+let find_handler mux (r : Request.t) =
   let escaped_path = Uri.path r.url in
   let raw_query =
     match Uri.verbatim_query r.url with Some q -> q | None -> ""
@@ -307,7 +300,7 @@ let find_handler mux (r : Body.t Request.t) =
   end
 
 (* Go's ServeMux.ServeHTTP. *)
-let serve_mux_serve_http mux ~sw (r : Body.t Request.t) : Body.t Response.t =
+let serve_mux_serve_http mux ~sw (r : Request.t) : Response.t =
   if r.request_uri = "*" then begin
     let resp =
       Response.create () |> Response.with_status Httpg_base.Status.BadRequest
@@ -318,7 +311,8 @@ let serve_mux_serve_http mux ~sw (r : Body.t Request.t) : Body.t Response.t =
   end
   else (find_handler mux r) ~sw r
 
-let serve_mux_handler mux = handler_func (serve_mux_serve_http mux)
+(* A mux viewed as a handler (Go's ServeMux implements Handler). *)
+let serve_mux_handler mux : handler = serve_mux_serve_http mux
 
 (* ---- Writing the handler's Response to the wire ---- *)
 
@@ -350,7 +344,7 @@ let body_allowed_for_status status =
    Content-Length; a [Stream] body is unknown-length and sent chunked (HTTP/1.1)
    or close-delimited (HTTP/1.0), one DATA flush per pulled chunk so the client
    observes incremental delivery. Returns the keep-alive verdict. *)
-let serve_one ~sw w (r : Body.t Request.t) (h : handler) : bool =
+let serve_one ~sw w (r : Request.t) (h : handler) : bool =
   let resp = h ~sw r in
   let is_head = r.meth = Httpg_base.Method.Head in
   let req_should_close = r.close in
@@ -493,7 +487,7 @@ let max_post_handler_read_bytes = 256 * 1024
 (* Go's finishRequest: consume the unread request body before reusing a
    kept-alive connection, bounded by [max_post_handler_read_bytes]. Returns
    whether the connection may still be reused. *)
-let drain_request_body (r : Body.t Request.t) : bool =
+let drain_request_body (r : Request.t) : bool =
   try
     match Body.drain ~limit:max_post_handler_read_bytes r.Request.body with
     | `Drained -> true
@@ -679,7 +673,7 @@ let with_deadline clock ~secs op =
 (* Wrap the request body so its pulls share a whole-request read deadline (Go's
    ReadTimeout / wholeReqDeadline). On the deadline the pull yields EOF so the
    read terminates. A zero [secs] / no clock leaves the body untouched. *)
-let wrap_read_timeout_body clock ~secs (r : Body.t Request.t) : unit =
+let wrap_read_timeout_body clock ~secs (r : Request.t) : unit =
   match (clock, r.Request.body) with
   | Some clock, Body.Stream inner when secs > 0. ->
       let deadline = Eio.Time.now clock +. secs in
@@ -696,7 +690,7 @@ let wrap_read_timeout_body clock ~secs (r : Body.t Request.t) : unit =
 (* Go's expectContinueReader (server.go:964-983): the FIRST body read replies
    "HTTP/1.1 100 Continue\r\n\r\n" once, then proceeds. Lazy so a client that
    withholds the body until it sees 100 unblocks. *)
-let wrap_expect_continue_body w (r : Body.t Request.t) : unit =
+let wrap_expect_continue_body w (r : Request.t) : unit =
   match r.Request.body with
   | Body.Empty | Body.String _ -> ()
   | Body.Stream inner ->
@@ -905,8 +899,7 @@ let header_of_api_header (t : Httpg_http2.Api.header) : Header.t =
     (Header.create ())
     (Httpg_http2.Api.Header.to_list t)
 
-let request_of_server_request (r : Httpg_http2.Api.server_request) :
-    Body.t Request.t =
+let request_of_server_request (r : Httpg_http2.Api.server_request) : Request.t =
   {
     meth = r.sreq_meth;
     url = r.sreq_url;

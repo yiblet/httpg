@@ -85,7 +85,7 @@ val read_mime_header : Eio.Buf_read.t -> (Header.t, error) result
     [Error (Protocol _)]. *)
 
 val read_request :
-  ?max_header_bytes:int -> Eio.Buf_read.t -> (Body.t Request.t, error) result
+  ?max_header_bytes:int -> Eio.Buf_read.t -> (Request.t, error) result
 (** [read_request ?max_header_bytes r] is [ReadRequest]: parse the request line,
     headers (Host promoted to [host] and deleted from the header map), and body
     framing from [ic]. The body is a streaming {!Body.Stream} reading lazily
@@ -108,10 +108,10 @@ val read_request :
     mid-stream policy. *)
 
 val read_response :
-  ?request:Body.t Request.t ->
+  ?request:Request.t ->
   ?max_header_bytes:int ->
   Eio.Buf_read.t ->
-  (Body.t Response.t, error) result
+  (Response.t, error) result
 (** [read_response ?request ?max_header_bytes r] is [ReadResponse]: parse the
     status line, headers and body framing. [request] optionally supplies the
     corresponding request (for HEAD body suppression); a GET is assumed
@@ -126,13 +126,13 @@ val read_response :
     short-circuits as [Error Response_header_too_large]. Omitting it leaves the
     head read unbounded. *)
 
-val write_request : Eio.Buf_write.t -> Body.t Request.t -> (unit, error) result
+val write_request : Eio.Buf_write.t -> Request.t -> (unit, error) result
 (** [write_request w r] is [Request.Write]: write the request line, Host /
     User-Agent / framing headers, the remaining headers and the body. Always
     emits ["HTTP/1.1"]. Returns [Error Missing_host] when no host is available.
 *)
 
-val write_response : Eio.Buf_write.t -> Body.t Response.t -> unit
+val write_response : Eio.Buf_write.t -> Response.t -> unit
 (** [write_response w r] is [Response.Write]: write the status line, framing
     headers, the remaining headers and the body, applying Go's zero-length-body
     probe and the HTTP/1.1 unknown-length [Connection: close] rule. *)

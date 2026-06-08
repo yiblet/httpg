@@ -5,7 +5,7 @@
    hands off to the HTTP/2 server via a translation shim, Go's http2.go);
    hijacking and graceful-shutdown niceties are out of scope. *)
 
-type handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
+type handler = sw:Eio.Switch.t -> Request.t -> Response.t
 (** An axum-style handler: a function mapping a request to a fully-built
     response. Departs from Go's [ServeHTTP(ResponseWriter, *Request)] — the
     handler returns an immutable {!Response.t} that the serve loop flushes;
@@ -16,22 +16,17 @@ type handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
     resource (the file server's file handle) must open it under [~sw], which is
     released once the response has been sent. Most handlers ignore [~sw]. *)
 
-val handler_func : handler -> handler
-(** Identity, kept for parity with Go's [HandlerFunc]: a {!handler} is already a
-    function, so wrapping is a no-op. *)
-
-val error : string -> Httpg_base.Status.t -> Body.t Response.t
+val error : string -> Httpg_base.Status.t -> Response.t
 (** Go's [Error]: a plain-text [text/plain; nosniff] response with status [code]
     carrying the message. *)
 
-val not_found : Body.t Request.t -> Body.t Response.t
+val not_found : Request.t -> Response.t
 (** Go's [NotFound]: a 404 "404 page not found" response. *)
 
 val not_found_handler : unit -> handler
 (** Go's [NotFoundHandler]. *)
 
-val redirect :
-  Body.t Request.t -> string -> Httpg_base.Status.t -> Body.t Response.t
+val redirect : Request.t -> string -> Httpg_base.Status.t -> Response.t
 (** Go's [Redirect]: a redirect response to [url] (which may be relative to the
     request path) with status [code]. *)
 
@@ -57,15 +52,8 @@ val handle : serve_mux -> string -> handler -> (unit, error) result
 (** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
     [Error (Register _)] on an invalid or conflicting pattern. *)
 
-val handle_func :
-  serve_mux ->
-  string ->
-  (sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t) ->
-  (unit, error) result
-(** Go's [ServeMux.HandleFunc]: register a handler function for [pattern]. *)
-
 val serve_mux_serve_http :
-  serve_mux -> sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
+  serve_mux -> sw:Eio.Switch.t -> Request.t -> Response.t
 (** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 
 val serve_mux_handler : serve_mux -> handler

@@ -9,13 +9,13 @@ open Httpg
 (* A handler: GET -> 200 "hello, h2"; POST /echo echoes the request body. Works
    identically over h2 and http/1.1. *)
 let test_handler =
-  Server.handler_func (fun ~sw:_ (r : Body.t Request.t) ->
-      let body =
-        match (r.Request.meth, Uri.path r.Request.url) with
-        | Httpg_base.Method.Post, "/echo" -> Body.read_all r.Request.body
-        | _, _ -> "hello, h2"
-      in
-      Response.create () |> Response.with_body_string body)
+ fun ~sw:_ (r : Request.t) ->
+  let body =
+    match (r.Request.meth, Uri.path r.Request.url) with
+    | Httpg_base.Method.Post, "/echo" -> Body.read_all r.Request.body
+    | _, _ -> "hello, h2"
+  in
+  Response.create () |> Response.with_body_string body
 
 (* Start a TLS server on an ephemeral port advertising [alpn], run [body] with
    the bound port, then close the server. Bounded. *)
@@ -90,14 +90,13 @@ let test_http11_fallback () =
 let test_concurrent_multiplexing_one_conn () =
   let n = 16 in
   let handler =
-    Server.handler_func (fun ~sw:_ (r : Body.t Request.t) ->
-        let _ = Body.read_all r.Request.body in
-        let path = Uri.path r.Request.url in
-        Response.create ()
-        |> Response.with_body_string
-             ((if r.Request.meth = Httpg_base.Method.Post then "post:"
-               else "get:")
-             ^ path))
+   fun ~sw:_ (r : Request.t) ->
+    let _ = Body.read_all r.Request.body in
+    let path = Uri.path r.Request.url in
+    Response.create ()
+    |> Response.with_body_string
+         ((if r.Request.meth = Httpg_base.Method.Post then "post:" else "get:")
+         ^ path)
   in
   let dials, h2_count, results =
     with_tls_server ~handler ~alpn:[ "h2"; "http/1.1" ]

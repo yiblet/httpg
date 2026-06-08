@@ -6,7 +6,7 @@ open Httpg
 
 let r_of_string = Eio.Buf_read.of_string
 
-let req_no_host () : Body.t Request.t =
+let req_no_host () : Request.t =
   {
     Request.meth = Httpg_base.Method.Get;
     url = Uri.of_string "/just/a/path";

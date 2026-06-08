@@ -301,7 +301,7 @@ let is_token (s : string) : bool =
        s
 
 let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
-    Body.t Request.t =
+    Request.t =
   (* Bound the head against one cumulative budget (initialReadLimitSize =
      maxHeaderBytes + 4096, server.go:929,:1024). *)
   let limit =
@@ -429,8 +429,8 @@ let trim_left_spaces s =
   done;
   String.sub s !i (n - !i)
 
-let read_response_raising ?(request : Body.t Request.t option)
-    ?(max_header_bytes : int option) (r : Eio.Buf_read.t) : Body.t Response.t =
+let read_response_raising ?(request : Request.t option)
+    ?(max_header_bytes : int option) (r : Eio.Buf_read.t) : Response.t =
   (* Client-side mirror of read_request's head budget
      (Transport.MaxResponseHeaderBytes). The shared sentinel remaps to the
      distinct {!Response_header_too_large}. *)
@@ -537,7 +537,7 @@ let string_contains_ctl_byte s =
       b < 0x20 || b = 0x7f)
     s
 
-let write_request_raising (w : Eio.Buf_write.t) (r : Body.t Request.t) : unit =
+let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
   let out = Eio.Buf_write.string w in
   let host =
     if r.Request.host <> "" then r.Request.host
@@ -606,11 +606,10 @@ let to_result (f : unit -> 'a) : ('a, error) result =
 let read_mime_header r : (Header.t, error) result =
   to_result (fun () -> read_mime_header_raising r)
 
-let read_request ?max_header_bytes r : (Body.t Request.t, error) result =
+let read_request ?max_header_bytes r : (Request.t, error) result =
   to_result (fun () -> read_request_raising ?max_header_bytes r)
 
-let read_response ?request ?max_header_bytes r :
-    (Body.t Response.t, error) result =
+let read_response ?request ?max_header_bytes r : (Response.t, error) result =
   to_result (fun () -> read_response_raising ?request ?max_header_bytes r)
 
 let write_request w r : (unit, error) result =
@@ -620,7 +619,7 @@ let write_request w r : (unit, error) result =
 (* write_response (Response.Write).                                    *)
 (* ------------------------------------------------------------------ *)
 
-let write_response (w : Eio.Buf_write.t) (r : Body.t Response.t) : unit =
+let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
   let out = Eio.Buf_write.string w in
   let itoa = string_of_int (Httpg_base.Status.to_int r.Response.status) in
   (* Canonical reason phrase (Go preserves the raw wire text; this port uses the

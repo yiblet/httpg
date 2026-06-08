@@ -5,7 +5,7 @@ let read s =
   | Ok r -> r
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let body_of (r : Httpg.Body.t Httpg.Request.t) = Httpg.Body.read_all r.body
+let body_of (r : Httpg.Request.t) = Httpg.Body.read_all r.body
 
 (* Baseline: all fields included. *)
 let baseline () =

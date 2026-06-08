@@ -2,7 +2,7 @@
    Do entry point with redirect following, and the Get/Post/Head convenience
    verbs. *)
 
-type check_redirect = Body.t Request.t list -> (unit, string) result
+type check_redirect = Request.t list -> (unit, string) result
 (** A redirect policy (Go's [CheckRedirect]): given the requests made so far
     ([via], most recent last), [Ok ()] permits the next hop and [Error msg]
     aborts. *)
@@ -47,7 +47,7 @@ val create :
     given. [?timeout] (seconds) bounds the whole exchange and is enforced only
     when a [?clock] was captured (Go's [Client.Timeout]). *)
 
-val do_ : sw:Eio.Switch.t -> t -> Body.t Request.t -> Body.t Response.t
+val do_ : sw:Eio.Switch.t -> t -> Request.t -> Response.t
 (** [do_ ~sw c req] is Go's [Client.Do]: send [req], following redirects per the
     client's policy (301/302/303 rewrite the method to GET unless the original
     was GET/HEAD and drop the body; 307/308 preserve method and body), composing
@@ -83,10 +83,7 @@ val referer_for_url :
     userinfo stripped. *)
 
 val do_one :
-  ?round_trip:(Body.t Request.t -> Body.t Response.t) ->
-  t ->
-  Body.t Request.t ->
-  Body.t Response.t
+  ?round_trip:(Request.t -> Response.t) -> t -> Request.t -> Response.t
 (** Go's [Client.do]: the redirect-following loop (without {!do_}'s timeout
     composition). [?round_trip] overrides the per-hop round-tripper (default:
     the client's {!Transport.round_trip}); exposed so the redirect loop can be
@@ -101,22 +98,17 @@ val make_request :
   ?content_length:int64 ->
   Httpg_base.Method.t ->
   string ->
-  Body.t Request.t
+  Request.t
 (** [make_request ?body ?content_length meth url] builds a request from a URL
     string (Go's [NewRequest]). The default body is empty. *)
 
-val get : sw:Eio.Switch.t -> t -> string -> Body.t Response.t
+val get : sw:Eio.Switch.t -> t -> string -> Response.t
 (** [get ~sw c url] is Go's [Client.Get]. *)
 
-val head : sw:Eio.Switch.t -> t -> string -> Body.t Response.t
+val head : sw:Eio.Switch.t -> t -> string -> Response.t
 (** [head ~sw c url] is Go's [Client.Head]. *)
 
 val post :
-  sw:Eio.Switch.t ->
-  t ->
-  string ->
-  content_type:string ->
-  Body.t ->
-  Body.t Response.t
+  sw:Eio.Switch.t -> t -> string -> content_type:string -> Body.t -> Response.t
 (** [post ~sw c url ~content_type body] is Go's [Client.Post]: POST [body] with
     the given Content-Type. *)

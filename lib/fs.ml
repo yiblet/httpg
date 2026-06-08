@@ -41,8 +41,7 @@ type file_system = { open_ : sw:Eio.Switch.t -> string -> (file, error) result }
    chunked/close), but byte-range responses pass an explicit length so the
    stream is sent with an exact Content-Length. proto is left HTTP/1.1; the
    serve loop derives the wire proto from the request. *)
-let respond ~header ?(body = Body.Empty) ?content_length status :
-    Body.t Response.t =
+let respond ~header ?(body = Body.Empty) ?content_length status : Response.t =
   let content_length =
     match content_length with
     | Some n -> n
@@ -208,7 +207,7 @@ let to_http_error = function
   | No_overlap | Invalid_range _ | Other _ ->
       ("500 Internal Server Error", Httpg_base.Status.InternalServerError)
 
-let local_redirect (r : Body.t Request.t) new_path : Body.t Response.t =
+let local_redirect (r : Request.t) new_path : Response.t =
   let new_path =
     match Uri.verbatim_query r.Request.url with
     | Some q when q <> "" -> new_path ^ "?" ^ q
@@ -238,7 +237,7 @@ let html_escape s =
     s;
   Buffer.contents buf
 
-let dir_list (_r : Body.t Request.t) (f : file) : Body.t Response.t =
+let dir_list (_r : Request.t) (f : file) : Response.t =
   match f.readdir () with
   | exception _ ->
       Server.error "Error reading directory"
@@ -325,7 +324,7 @@ let etag_weak_match a b =
 type cond_result = Cond_none | Cond_true | Cond_false
 
 (* Go checkIfMatch. *)
-let check_if_match ~etag (r : Body.t Request.t) =
+let check_if_match ~etag (r : Request.t) =
   let im = Header.get r.Request.header "If-Match" in
   if im = "" then Cond_none
   else begin
@@ -345,7 +344,7 @@ let check_if_match ~etag (r : Body.t Request.t) =
   end
 
 (* Go checkIfUnmodifiedSince. *)
-let check_if_unmodified_since (r : Body.t Request.t) ~modtime =
+let check_if_unmodified_since (r : Request.t) ~modtime =
   let ius = Header.get r.Request.header "If-Unmodified-Since" in
   if ius = "" || is_zero_time modtime then Cond_none
   else
@@ -357,7 +356,7 @@ let check_if_unmodified_since (r : Body.t Request.t) ~modtime =
         if modtime <= t then Cond_true else Cond_false
 
 (* Go checkIfNoneMatch. *)
-let check_if_none_match ~etag (r : Body.t Request.t) =
+let check_if_none_match ~etag (r : Request.t) =
   let inm = Header.get r.Request.header "If-None-Match" in
   if inm = "" then Cond_none
   else begin
@@ -377,7 +376,7 @@ let check_if_none_match ~etag (r : Body.t Request.t) =
   end
 
 (* Go checkIfModifiedSince. *)
-let check_if_modified_since (r : Body.t Request.t) ~modtime =
+let check_if_modified_since (r : Request.t) ~modtime =
   if
     r.Request.meth <> Httpg_base.Method.Get
     && r.Request.meth <> Httpg_base.Method.Head
@@ -394,7 +393,7 @@ let check_if_modified_since (r : Body.t Request.t) ~modtime =
   end
 
 (* Go checkIfRange. *)
-let check_if_range ~etag (r : Body.t Request.t) ~modtime =
+let check_if_range ~etag (r : Request.t) ~modtime =
   if
     r.Request.meth <> Httpg_base.Method.Get
     && r.Request.meth <> Httpg_base.Method.Head
@@ -424,7 +423,7 @@ let check_if_range ~etag (r : Body.t Request.t) ~modtime =
 (* Go writeNotModified: clears representation metadata and writes 304. *)
 (* Go writeNotModified: a 304 response, clearing representation metadata from
    the response header built so far. *)
-let not_modified_response header : Body.t Response.t =
+let not_modified_response header : Response.t =
   let h = header in
   let h = Header.del h "Content-Type" in
   let h = Header.del h "Content-Length" in
@@ -440,8 +439,8 @@ let not_modified_response header : Body.t Response.t =
    If-None-Match → If-Modified-Since, then If-Range gates Range. [header] is the
    response header built so far (carrying Etag/Last-Modified); [etag] is its
    Etag. *)
-let check_preconditions ~header ~etag (r : Body.t Request.t) ~modtime :
-    [ `Done of Body.t Response.t | `Range of string ] =
+let check_preconditions ~header ~etag (r : Request.t) ~modtime :
+    [ `Done of Response.t | `Range of string ] =
   let precondition_failed () =
     `Done (respond ~header Httpg_base.Status.PreconditionFailed)
   in
@@ -659,8 +658,7 @@ let window_body ~read_window ~start ~length : Body.t =
       end)
 
 (* Full-body 200 path (no range, or range ignored). *)
-let serve_full (r : Body.t Request.t) ~h ~size ~read_window : Body.t Response.t
-    =
+let serve_full (r : Request.t) ~h ~size ~read_window : Response.t =
   let h = Header.set h "Accept-Ranges" "bytes" in
   (* Go sends Content-Length only when there is no Content-Encoding. *)
   let content_length =
@@ -672,8 +670,8 @@ let serve_full (r : Body.t Request.t) ~h ~size ~read_window : Body.t Response.t
   in
   respond ~header:h ~body ~content_length Httpg_base.Status.Ok
 
-let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
-    ~modtime ~size ~read_window : Body.t Response.t =
+let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
+    ~size ~read_window : Response.t =
   (* [header] carries caller-set fields (e.g. Etag, an explicit Content-Type).
      [h] is the response header we build up (a persistent value held in a ref so
      the conditional sets below read naturally). *)
@@ -805,8 +803,8 @@ let trim_suffix s suffix =
    {!Body.Stream} the serve loop pulls *after* this returns, so the fd must
    outlive the call — [~sw] (released once the response is sent) replaces Go's
    [defer f.Close]. *)
-let serve_file ~sw (r : Body.t Request.t) (fs : file_system) name ~redirect :
-    Body.t Response.t =
+let serve_file ~sw (r : Request.t) (fs : file_system) name ~redirect :
+    Response.t =
   let upath = Uri.path r.Request.url in
   (* redirect .../index.html to .../ *)
   if ends_with upath index_page then local_redirect r "./"
@@ -885,7 +883,7 @@ let serve_file ~sw (r : Body.t Request.t) (fs : file_system) name ~redirect :
 (* ---- FileServer ---- *)
 
 let file_server root =
-  let serve_http ~sw (r : Body.t Request.t) =
+  let serve_http ~sw (r : Request.t) =
     let upath = Uri.path r.Request.url in
     (* Go: if !strings.HasPrefix(upath, "/") { upath = "/"+upath; r.URL.Path = upath } *)
     let has_prefix = String.length upath > 0 && upath.[0] = '/' in
@@ -894,4 +892,4 @@ let file_server root =
     let cleaned = Pattern.path_clean upath in
     serve_file ~sw r root cleaned ~redirect:true
   in
-  Server.handler_func serve_http
+  serve_http

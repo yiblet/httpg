@@ -29,15 +29,14 @@ val parse_media_type : string -> string * (string * string) list
 (** [mime.ParseMediaType v]: the lowercased bare media type and its parameters.
     Raises {!Media_type_error} for invalid parameters. *)
 
-val parse_form : Body.t Request.t -> (unit, error) result
+val parse_form : Request.t -> (unit, error) result
 (** [Request.ParseForm]: populate [r.form] (query + urlencoded body) and
     [r.post_form] (body only). Idempotent. Returns the first error encountered
     instead of raising (mirroring Go's error return). For POST/PUT/PATCH with
     Content-Type application/x-www-form-urlencoded the body is read and parsed;
     body params take precedence in [r.form]. *)
 
-val parse_multipart_form :
-  Body.t Request.t -> max_memory:int64 -> (unit, error) result
+val parse_multipart_form : Request.t -> max_memory:int64 -> (unit, error) result
 (** [Request.ParseMultipartForm ~max_memory]: parse a multipart/form-data body
     into [r.multipart_form], also merging text values into
     [r.form]/[r.post_form] (Issue 9305). Calls {!parse_form} first. Returns
@@ -48,21 +47,21 @@ val parse_multipart_form :
     unlinked; on success they live until {!remove_all} / the request switch
     fires. *)
 
-val remove_all : Body.t Request.t -> unit
+val remove_all : Request.t -> unit
 (** Go's [Request.MultipartForm.RemoveAll]: unlink any temp files spilled while
     parsing [r]'s multipart form. Idempotent; no-op if nothing spilled. The
     server serve loop wires this to a per-request switch so temp files never
     outlive their request. *)
 
-val form_value : Body.t Request.t -> string -> string
+val form_value : Request.t -> string -> string
 (** [Request.FormValue key]: the first value for [key], lazily parsing
     (ParseMultipartForm then ParseForm) and ignoring errors. "" if absent. *)
 
-val post_form_value : Body.t Request.t -> string -> string
+val post_form_value : Request.t -> string -> string
 (** [Request.PostFormValue key]: the first body value for [key] (query ignored),
     lazily parsing and ignoring errors. "" if absent. *)
 
-val form_file : Body.t Request.t -> string -> (string * string) option
+val form_file : Request.t -> string -> (string * string) option
 (** [Request.FormFile key]: the first file for [key] as [(filename, content)] (a
     simplification of Go's [(multipart.File, *multipart.FileHeader)]), lazily
     parsing. [None] if absent. *)

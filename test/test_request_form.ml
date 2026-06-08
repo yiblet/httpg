@@ -14,9 +14,9 @@ open Httpg
    ported call sites read unchanged). *)
 let run x = x
 
-(* Build a Body.t Request.t with the given method, raw URL (query taken from
+(* Build a Request.t with the given method, raw URL (query taken from
    it), Content-Type header and urlencoded/multipart body string. *)
-let make_req ?(meth = "POST") ?content_type ~url ~body () : Body.t Request.t =
+let make_req ?(meth = "POST") ?content_type ~url ~body () : Request.t =
   let header =
     match content_type with
     | Some ct -> Header.set (Header.create ()) "Content-Type" ct

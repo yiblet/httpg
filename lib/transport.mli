@@ -110,7 +110,7 @@ val run : t -> sw:Eio.Switch.t -> (unit -> 'a) -> 'a
 val clock : t -> float Eio.Time.clock_ty Eio.Resource.t option
 (** The clock captured at {!create} (for {!Client} timeout composition). *)
 
-val round_trip : ?force_h2:bool -> t -> Body.t Request.t -> Body.t Response.t
+val round_trip : ?force_h2:bool -> t -> Request.t -> Response.t
 (** [round_trip t req] is Go's [Transport.RoundTrip] (HTTP/1.x path): pick
     scheme/host/port from [req.url] (TLS when the scheme is ["https"]), reuse an
     idle pooled connection or dial a fresh one via {!Net.connect_alpn} (using

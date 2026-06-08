@@ -107,7 +107,7 @@ let content_type_is_multipart (mediatype : string) =
   mediatype = "multipart/form-data"
 
 (* ---- parsePostForm: read & parse an application/x-www-form-urlencoded body. *)
-let parse_post_form (r : Body.t Request.t) : Values.t * (unit, error) result =
+let parse_post_form (r : Request.t) : Values.t * (unit, error) result =
   let ct = Header.get r.Request.header "Content-Type" in
   let ct = if ct = "" then "application/octet-stream" else ct in
   match parse_media_type ct with
@@ -128,7 +128,7 @@ let parse_post_form (r : Body.t Request.t) : Values.t * (unit, error) result =
 
 (* ParseForm: populate r.Form and r.PostForm. Idempotent. Returns the first
    error encountered (as a result) without raising, mirroring Go. *)
-let parse_form (r : Body.t Request.t) : (unit, error) result =
+let parse_form (r : Request.t) : (unit, error) result =
   let err = ref (Ok ()) in
   let set_err e = match !err with Ok () -> err := e | Error _ -> () in
   (match r.Request.post_form with
@@ -217,7 +217,7 @@ let base_filename name =
 
 (* multipartReader content-type check (request.go): error if not
    multipart/form-data. *)
-let multipart_reader_check (r : Body.t Request.t) : (string, error) result =
+let multipart_reader_check (r : Request.t) : (string, error) result =
   let v = Header.get r.Request.header "Content-Type" in
   if v = "" then Error Not_multipart
   else
@@ -302,7 +302,7 @@ let make_emitters ~max_memory ~(stores : part_store list ref) :
    parse error, but a ParseForm error is deferred to the end like Go. File parts
    over [max_memory] are spilled to temp files (cleaned up via the request
    switch / {!Request.remove_multipart_temp_files}). *)
-let parse_multipart_form (r : Body.t Request.t) ~(max_memory : int64) :
+let parse_multipart_form (r : Request.t) ~(max_memory : int64) :
     (unit, error) result =
   match r.Request.multipart_form with
   | Some _ -> Ok ()
@@ -420,23 +420,22 @@ let parse_multipart_form (r : Body.t Request.t) ~(max_memory : int64) :
                   parse_form_err)))
 
 (* Form.RemoveAll: drop the spilled temp files for [r]'s multipart form. *)
-let remove_all (r : Body.t Request.t) : unit =
-  Request.remove_multipart_temp_files r
+let remove_all (r : Request.t) : unit = Request.remove_multipart_temp_files r
 
 (* ---- FormValue / PostFormValue / FormFile: lazily parse, ignoring errors. *)
 
-let try_parse_multipart (r : Body.t Request.t) : unit =
+let try_parse_multipart (r : Request.t) : unit =
   try ignore (parse_multipart_form r ~max_memory:default_max_memory)
   with _ -> ()
 
-let ensure_parsed_for_form (r : Body.t Request.t) : unit =
+let ensure_parsed_for_form (r : Request.t) : unit =
   match r.Request.form with Some _ -> () | None -> try_parse_multipart r
 
-let form_value (r : Body.t Request.t) (key : string) : string =
+let form_value (r : Request.t) (key : string) : string =
   ensure_parsed_for_form r;
   match r.Request.form with Some f -> Values.get f key | None -> ""
 
-let post_form_value (r : Body.t Request.t) (key : string) : string =
+let post_form_value (r : Request.t) (key : string) : string =
   (match r.Request.post_form with
   | Some _ -> ()
   | None -> try_parse_multipart r);
@@ -444,7 +443,7 @@ let post_form_value (r : Body.t Request.t) (key : string) : string =
 
 (* FormFile: simplified to (filename, content) of the first file for [key]. A
    part that spilled is read back from its temp file (Go's FileHeader.Open). *)
-let form_file (r : Body.t Request.t) (key : string) : (string * string) option =
+let form_file (r : Request.t) (key : string) : (string * string) option =
   (match r.Request.multipart_form with
   | Some _ -> ()
   | None -> try_parse_multipart r);

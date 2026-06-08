@@ -27,10 +27,10 @@ let default_user_agent = "httpg-client/1.1"
    the response head, replies, then parks until the response body is released
    (EOF/drained) before returning itself to the idle pool. [close] tears the
    connection down (cancels its switch). *)
-type reply = (Body.t Response.t, exn) result
+type reply = (Response.t, exn) result
 
 type persist_conn = {
-  submit : (Body.t Request.t * reply Eio.Stream.t) Eio.Stream.t;
+  submit : (Request.t * reply Eio.Stream.t) Eio.Stream.t;
   released : bool Eio.Stream.t;
       (* posted with the reuse verdict when the response body hits EOF *)
   mutable broken : bool;
@@ -168,7 +168,7 @@ let current_pool t =
 let conn_key ~scheme ~host ~port = Printf.sprintf "%s|%s:%d" scheme host port
 
 (* Default scheme/host/port for a request URL (Go's connectMethodForRequest). *)
-let scheme_host_port (req : Body.t Request.t) =
+let scheme_host_port (req : Request.t) =
   let url = req.Request.url in
   let scheme =
     match Uri.scheme url with
@@ -212,12 +212,12 @@ let h2_alpn_protocols = [ "h2"; "http/1.1" ]
 (* Reusability after an exchange (Go's persistConn.alive reduced to the HTTP/1.x
    keep-alive rules): not if keep-alives are disabled, the request asked to
    close, or the response asked to close. *)
-let reusable t (req : Body.t Request.t) (resp : Body.t Response.t) =
+let reusable t (req : Request.t) (resp : Response.t) =
   (not t.disable_keep_alives)
   && (not req.Request.close) && not resp.Response.close
 
 (* Set the default request headers Go's Transport/Request.write supplies. *)
-let set_default_headers (req : Body.t Request.t) ~host =
+let set_default_headers (req : Request.t) ~host =
   if req.Request.host = "" then req.Request.host <- host;
   if Header.get req.Request.header "User-Agent" = "" then
     req.Request.header <-
@@ -235,8 +235,8 @@ let or_raise = function
    not reusable). Pooling synchronously at EOF — rather than handing off to the
    fiber — closes the timing gap where a follow-up round trip would miss the
    just-freed connection. *)
-let exchange t pool key ~max_header_bytes ~released r w pc
-    (req : Body.t Request.t) : Body.t Response.t =
+let exchange t pool key ~max_header_bytes ~released r w pc (req : Request.t) :
+    Response.t =
   Io.write_request w req |> or_raise;
   Eio.Buf_write.flush w;
   let resp = Io.read_response ~request:req ~max_header_bytes r |> or_raise in
@@ -347,7 +347,7 @@ let dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2 : dialed =
   match Eio.Stream.take result_box with Ok d -> d | Error exn -> raise exn
 
 (* Submit [req] to a pooled connection fiber and await its response. *)
-let round_trip_over pc (req : Body.t Request.t) : Body.t Response.t =
+let round_trip_over pc (req : Request.t) : Response.t =
   let reply = Eio.Stream.create 1 in
   Eio.Stream.add pc.submit (req, reply);
   match Eio.Stream.take reply with Ok resp -> resp | Error exn -> raise exn
@@ -381,7 +381,7 @@ let header_of_api_header (t : Api.header) : Header.t =
     (fun acc (k, vs) -> Header.set_values acc k vs)
     (Header.create ()) (Api.Header.to_list t)
 
-let client_request_of_request (req : Body.t Request.t) : Api.client_request =
+let client_request_of_request (req : Request.t) : Api.client_request =
   {
     creq_meth = req.Request.meth;
     creq_url = req.Request.url;
@@ -396,7 +396,7 @@ let client_request_of_request (req : Body.t Request.t) : Api.client_request =
     creq_close = req.Request.close;
   }
 
-let response_of_client_response (cr : Api.client_response) : Body.t Response.t =
+let response_of_client_response (cr : Api.client_response) : Response.t =
   {
     Response.status = cr.cres_status_code;
     proto = Httpg_base.Protocol.Http20;
@@ -480,8 +480,7 @@ let h2_round_trip t cc req =
    ["h2";"http/1.1"]; if "h2" is negotiated the request is multiplexed over a
    pooled {!H2_transport.client_conn} keyed by authority, otherwise the HTTP/1.x
    path runs over the dialed channels. Plaintext http always uses HTTP/1.x. *)
-let round_trip ?(force_h2 = false) t (req : Body.t Request.t) :
-    Body.t Response.t =
+let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
   let pool = current_pool t in
   let scheme, host, port = scheme_host_port req in
   if host = "" then raise (Io.Protocol_error "http: no Host in request URL");

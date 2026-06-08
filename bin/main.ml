@@ -16,27 +16,27 @@
 open Httpg
 
 let handler =
-  Server.handler_func (fun ~sw:_ r ->
-      Response.create ()
-      |> Response.with_body_string
-           (Printf.sprintf "Hello from httpg! You requested %s\n"
-              (Uri.path r.Request.url)))
+ fun ~sw:_ r ->
+  Response.create ()
+  |> Response.with_body_string
+       (Printf.sprintf "Hello from httpg! You requested %s\n"
+          (Uri.path r.Request.url))
 
 (* Streaming handler: return a [Body.Stream] that yields a sequence of chunks.
    The serve loop pulls and flushes each chunk, so the client observes them
    incrementally (and the unknown-length body is framed Transfer-Encoding:
    chunked). *)
 let streaming_handler =
-  Server.handler_func (fun ~sw:_ _r ->
-      let chunks = ref [ "chunk-1\n"; "chunk-2\n"; "chunk-3\n"; "chunk-4\n" ] in
-      let next () =
-        match !chunks with
-        | [] -> None
-        | c :: rest ->
-            chunks := rest;
-            Some c
-      in
-      Response.create () |> Response.with_body (Body.of_stream next))
+ fun ~sw:_ _r ->
+  let chunks = ref [ "chunk-1\n"; "chunk-2\n"; "chunk-3\n"; "chunk-4\n" ] in
+  let next () =
+    match !chunks with
+    | [] -> None
+    | c :: rest ->
+        chunks := rest;
+        Some c
+  in
+  Response.create () |> Response.with_body (Body.of_stream next)
 
 (* Bind an ephemeral server, fork its accept loop under [sw], run [body url],
    then close. *)
@@ -100,9 +100,28 @@ let demo_h2 ~net ~clock ~sw =
   let body = Body.read_all resp.Response.body in
   Printf.printf "GET %s (h2 round trips: %d)\n-> %d %s\n%s" url
     (Transport.h2_round_trip_count transport)
-    (Httpg_base.Status.to_int resp.Response.status)
-    (Httpg_base.Status.to_string resp.Response.status)
+    (Httpg.Status.to_int resp.Response.status)
+    (Httpg.Status.to_string resp.Response.status)
     body
+
+let demo_google ~net ~clock ~sw =
+  let client = Client.create ~net ~clock () in
+  let url = "https://www.example.com/" in
+  let resp = Client.get ~sw client url in
+  let buf = Buffer.create 1024 in
+  let add_buf = Buffer.add_string buf in
+  Printf.ksprintf add_buf "GET %s\n" url;
+  Printf.ksprintf add_buf "-> %d %s\n"
+    (Httpg.Status.to_int resp.Response.status)
+    (Httpg.Status.to_string resp.Response.status);
+  Printf.ksprintf add_buf "Protocol: %s\n" (Httpg.Protocol.to_string resp.proto);
+  Httpg.Header.iter
+    (fun k vs -> List.iter (fun v -> Printf.ksprintf add_buf "%s: %s\n" k v) vs)
+    resp.Response.header;
+
+  Printf.ksprintf add_buf "\n%d"
+    (Body.fold (fun s acc -> acc + String.length s) resp.Response.body 0);
+  Printf.printf "%s" (Buffer.contents buf)
 
 let () =
   Eio_main.run @@ fun env ->
@@ -113,4 +132,4 @@ let () =
     (fun i demo ->
       if i <> 0 then print_newline ();
       Eio.Switch.run (fun sw -> demo ~net ~clock ~sw))
-    [ demo_stream; demo_http; demo_h2 ]
+    [ demo_stream; demo_http; demo_h2; demo_google ]

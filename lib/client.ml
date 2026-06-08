@@ -7,11 +7,11 @@
    redirects, and a single Transport.round_trip per hop. *)
 
 (* Go's defaultCheckRedirect: error out after 10 redirects. *)
-type check_redirect = Body.t Request.t list -> (unit, string) result
+type check_redirect = Request.t list -> (unit, string) result
 
 (* Handleable client error: the redirect policy aborted the request (Go's Do
    returning the CheckRedirect error). Surfaced by raising [Aborted], keeping
-   Go's [(resp, err)] split as an exception at the [Body.t Response.t] boundary
+   Go's [(resp, err)] split as an exception at the [Response.t] boundary
    (the convenience verbs and the test suite consume that shape). *)
 type error = Redirect of string
 
@@ -41,7 +41,7 @@ let create ~net ?clock ?transport ?(check_redirect = default_check_redirect)
   { transport; check_redirect; timeout }
 
 (* Go's redirectBehavior: (redirect_method, should_redirect, include_body). *)
-let redirect_behavior ~req_method (resp : Body.t Response.t) =
+let redirect_behavior ~req_method (resp : Response.t) =
   match resp.Response.status |> Httpg_base.Status.to_int with
   | 301 | 302 | 303 ->
       let redirect_method =
@@ -108,7 +108,7 @@ let referer_for_url ~last ~next ~explicit =
 (* Go's Client.do: the redirect-following loop composing Transport.round_trip.
    [round_trip] is the per-hop round-tripper (defaults to the client's transport);
    it is a parameter so tests can drive the loop against a stub. *)
-let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t =
+let do_one ?round_trip c (req : Request.t) : Response.t =
   let round_trip =
     match round_trip with
     | Some f -> f
@@ -182,7 +182,7 @@ let do_one ?round_trip c (req : Body.t Request.t) : Body.t Response.t =
   in
   loop req [] true
 
-let do_ ~sw c (req : Body.t Request.t) : Body.t Response.t =
+let do_ ~sw c (req : Request.t) : Response.t =
   (* The client's [sw] (the session lifetime) owns the transport's pool, so
      pooled conns outlive each round trip but are reclaimed when the client
      session ends. *)

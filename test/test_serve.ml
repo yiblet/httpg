@@ -7,7 +7,7 @@
 
 open Httpg
 
-let handle_func mux pattern f = Result.get_ok (Server.handle_func mux pattern f)
+let handle_func mux pattern f = Result.get_ok (Server.handle mux pattern f)
 
 (* Read everything until EOF (connection close). *)
 let read_to_eof (r : Eio.Buf_read.t) = Eio.Buf_read.take_all r
@@ -80,8 +80,7 @@ let send w s =
 (* ---- handlers ---- *)
 
 let hello_handler =
-  Server.handler_func (fun ~sw:_ _r ->
-      Response.with_body_string "hello" (Response.create ()))
+ fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
 
 (* ---- tests ---- *)
 
@@ -188,13 +187,13 @@ let http10_close_test () =
 let handle_conflict_result () =
   let mux = Server.new_serve_mux () in
   (match
-     Server.handle_func mux "/a/{x}" (fun ~sw:_ _r ->
+     Server.handle mux "/a/{x}" (fun ~sw:_ _r ->
          Response.with_body_string "a" (Response.create ()))
    with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "first registration should succeed");
   (match
-     Server.handle_func mux "/a/{y}" (fun ~sw:_ _r ->
+     Server.handle mux "/a/{y}" (fun ~sw:_ _r ->
          Response.with_body_string "b" (Response.create ()))
    with
   | Error (Server.Register msg) ->
@@ -203,7 +202,7 @@ let handle_conflict_result () =
         (contains msg "conflicts with")
   | Ok () -> Alcotest.fail "conflicting registration should be Error");
   match
-    Server.handle_func mux "" (fun ~sw:_ _r ->
+    Server.handle mux "" (fun ~sw:_ _r ->
         Response.with_body_string "c" (Response.create ()))
   with
   | Error (Server.Register _) -> ()

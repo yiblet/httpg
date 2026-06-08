@@ -34,12 +34,12 @@ let calibrate_iters clock ~target_s =
   (grow 100_000, spin)
 
 let cpu_handler ~iters ~spin ~counter ~mtx =
-  Server.handler_func (fun ~sw:_ _r ->
-      let r = spin iters in
-      Mutex.lock mtx;
-      incr counter;
-      Mutex.unlock mtx;
-      Response.create () |> Response.with_body_string (string_of_int r))
+ fun ~sw:_ _r ->
+  let r = spin iters in
+  Mutex.lock mtx;
+  incr counter;
+  Mutex.unlock mtx;
+  Response.create () |> Response.with_body_string (string_of_int r)
 
 (* Fire [n] concurrent GETs at [url] over a shared transport (the F014-safe
    pattern: one transport switch, one fiber per request), return their count. *)
@@ -107,11 +107,11 @@ let single_domain_serves () =
   Test_harness.with_env_dm (fun ~net ~clock ~domain_mgr ~sw ->
       let counter = ref 0 and mtx = Mutex.create () in
       let handler =
-        Server.handler_func (fun ~sw:_ _r ->
-            Mutex.lock mtx;
-            incr counter;
-            Mutex.unlock mtx;
-            Response.create () |> Response.with_body_string "ok")
+       fun ~sw:_ _r ->
+        Mutex.lock mtx;
+        incr counter;
+        Mutex.unlock mtx;
+        Response.create () |> Response.with_body_string "ok"
       in
       let srv, port, serve_loop =
         Server.listen_and_serve_started ~net ~clock ~domain_mgr ~domains:1 ~sw
@@ -129,8 +129,7 @@ let single_domain_serves () =
 let close_then_reserve () =
   Test_harness.with_env_dm (fun ~net ~clock ~domain_mgr ~sw ->
       let handler =
-        Server.handler_func (fun ~sw:_ _r ->
-            Response.with_body_string "x" (Response.create ()))
+       fun ~sw:_ _r -> Response.with_body_string "x" (Response.create ())
       in
       let serve_once () =
         let srv, port, serve_loop =
@@ -157,8 +156,7 @@ let close_then_reserve () =
 let multicore_tls () =
   Test_harness.with_env_dm ~secs:60. (fun ~net ~clock ~domain_mgr ~sw ->
       let handler =
-        Server.handler_func (fun ~sw:_ _r ->
-            Response.with_body_string "tls-ok" (Response.create ()))
+       fun ~sw:_ _r -> Response.with_body_string "tls-ok" (Response.create ())
       in
       let certificates = Net.test_server_certificate () in
       let srv, port, serve_loop =
@@ -207,12 +205,10 @@ let multicore_client () =
     Test_harness.with_env_dm ~secs:120. (fun ~net ~clock ~domain_mgr ~sw ->
         (* h1 plaintext server + h2-over-TLS server, both multicore. *)
         let h1 =
-          Server.handler_func (fun ~sw:_ _r ->
-              Response.with_body_string "h1-ok" (Response.create ()))
+         fun ~sw:_ _r -> Response.with_body_string "h1-ok" (Response.create ())
         in
         let h2 =
-          Server.handler_func (fun ~sw:_ _r ->
-              Response.with_body_string "h2-ok" (Response.create ()))
+         fun ~sw:_ _r -> Response.with_body_string "h2-ok" (Response.create ())
         in
         (* The servers stay single-domain (~domains:1): this gate exercises the
            CLIENT across domains. Each Eio.Domain_manager.run creates its own
@@ -320,8 +316,7 @@ let multicore_client_parallel_tls () =
   else
     Test_harness.with_env_dm ~secs:120. (fun ~net ~clock ~domain_mgr ~sw ->
         let h =
-          Server.handler_func (fun ~sw:_ _r ->
-              Response.with_body_string "ok" (Response.create ()))
+         fun ~sw:_ _r -> Response.with_body_string "ok" (Response.create ())
         in
         let certificates = Net.test_server_certificate () in
         let srv, port, loop =
