@@ -33,31 +33,9 @@ val redirect : Request.t -> string -> Httpg_base.Status.t -> Response.t
 val redirect_handler : string -> Httpg_base.Status.t -> handler
 (** Go's [RedirectHandler]. *)
 
-(* ---- ServeMux ---- *)
-
-type serve_mux
-(** Go's [ServeMux]: an HTTP request multiplexer backed by the routing tree. *)
-
-val new_serve_mux : unit -> serve_mux
-(** Go's [NewServeMux]. *)
-
-(** A handleable registration error: an invalid or conflicting pattern (Go's
-    [register] error). Carries Go's message text. *)
-type error = Register of string
-
-val error_to_string : error -> string
-(** Render an {!type-error} as its Go message text. *)
-
-val handle : serve_mux -> string -> handler -> (unit, error) result
-(** Go's [ServeMux.Handle]: register [handler] for [pattern]. Returns
-    [Error (Register _)] on an invalid or conflicting pattern. *)
-
-val serve_mux_serve_http :
-  serve_mux -> sw:Eio.Switch.t -> Request.t -> Response.t
-(** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
-
-val serve_mux_handler : serve_mux -> handler
-(** A {!serve_mux} viewed as a {!handler}. *)
+(* Go's [ServeMux] (kept in this same server.go) lives in {!Mux}; it builds on
+   {!handler} and the {!error} / {!not_found_handler} / {!redirect_handler}
+   helpers above. *)
 
 (* ---- Server ---- *)
 

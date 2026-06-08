@@ -86,7 +86,7 @@ let modules_with_type_error =
     "cookie";
     "fs";
     "form";
-    "server";
+    "mux";
   ]
 
 (* All [.mli] files we sweep for the no-[_exn] guard. *)
