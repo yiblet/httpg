@@ -1,46 +1,36 @@
 (* Shared HTTP-date formatting/parsing, mirroring go/src/net/http's
-   [http.TimeFormat] and [http.ParseTime]. See http_time.mli. *)
+   [http.TimeFormat] and [http.ParseTime]. See http_time.mli.
+
+   Civil-date <-> Unix-seconds conversion and date validation are delegated to
+   [Ptime] (Go's time package handles this internally); only the HTTP-specific
+   layout assembly and the per-format tokenizers (RFC1123 / RFC850 / asctime)
+   are hand-written here, since [Ptime] emits/parses only RFC3339. *)
 
 let days_in_month = [| 31; 28; 31; 30; 31; 30; 31; 31; 30; 31; 30; 31 |]
 let is_leap y = (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0
 
-(* Days from civil date to days since 1970-01-01 (Howard Hinnant's algorithm). *)
-let days_from_civil y m d =
-  let y = if m <= 2 then y - 1 else y in
-  let era = (if y >= 0 then y else y - 399) / 400 in
-  let yoe = y - (era * 400) in
-  let doy = (((153 * if m > 2 then m - 3 else m + 9) + 2) / 5) + d - 1 in
-  let doe = (yoe * 365) + (yoe / 4) - (yoe / 100) + doy in
-  (era * 146097) + doe - 719468
-
-(* Convert civil date+time (UTC) to Unix seconds. *)
+(* Convert civil date+time (UTC) to Unix seconds. Mirrors Go's
+   time.Date(...).Unix(): the caller has already validated the components (via
+   {!make_time} on the parse paths), so an out-of-range date here is a bug. *)
 let unix_of_utc y mo d h mi s =
-  let days = days_from_civil y mo d in
-  Float.of_int ((((days * 24) + h) * 3600) + (mi * 60) + s)
+  match Ptime.of_date_time ((y, mo, d), ((h, mi, s), 0)) with
+  | Some t -> Ptime.to_float_s t
+  | None ->
+      invalid_arg
+        (Printf.sprintf "Http_time.unix_of_utc: invalid date %04d-%02d-%02d %02d:%02d:%02d"
+           y mo d h mi s)
 
 (* Inverse: Unix seconds -> (year, month, day, hour, min, sec, weekday).
-   weekday: 0=Sunday .. 6=Saturday. *)
+   weekday: 0=Sunday .. 6=Saturday (same numbering as {!Ptime.weekday_num}). *)
 let utc_of_unix t =
-  let secs = int_of_float (Float.floor t) in
-  let days = if secs >= 0 then secs / 86400 else (secs - 86399) / 86400 in
-  let rem = secs - (days * 86400) in
-  let h = rem / 3600 in
-  let mi = rem mod 3600 / 60 in
-  let s = rem mod 60 in
-  (* 1970-01-01 is a Thursday (=4). *)
-  let weekday = ((((days mod 7) + 4) mod 7) + 7) mod 7 in
-  (* civil_from_days (Hinnant). *)
-  let z = days + 719468 in
-  let era = (if z >= 0 then z else z - 146096) / 146097 in
-  let doe = z - (era * 146097) in
-  let yoe = (doe - (doe / 1460) + (doe / 36524) - (doe / 146096)) / 365 in
-  let y = yoe + (era * 400) in
-  let doy = doe - ((365 * yoe) + (yoe / 4) - (yoe / 100)) in
-  let mp = ((5 * doy) + 2) / 153 in
-  let d = doy - (((153 * mp) + 2) / 5) + 1 in
-  let m = if mp < 10 then mp + 3 else mp - 9 in
-  let y = if m <= 2 then y + 1 else y in
-  (y, m, d, h, mi, s, weekday)
+  match Ptime.of_float_s t with
+  | None ->
+      invalid_arg
+        (Printf.sprintf "Http_time.utc_of_unix: %f out of Ptime range" t)
+  | Some pt ->
+      let (y, mo, d), ((h, mi, s), _tz) = Ptime.to_date_time pt in
+      let weekday = Ptime.weekday_num pt in
+      (y, mo, d, h, mi, s, weekday)
 
 let weekday_names = [| "Sun"; "Mon"; "Tue"; "Wed"; "Thu"; "Fri"; "Sat" |]
 
@@ -82,14 +72,14 @@ let format_gmt t =
 
 (* ---- parsing ---- *)
 
-(* Validate a fully decomposed date/time and return Some unix seconds. *)
+(* Validate a fully decomposed date/time and return Some unix seconds.
+   [Ptime.of_date_time] returns [None] on an invalid date (bad month, day out of
+   range for the month/year, out-of-range time), which subsumes the hand-rolled
+   leap-year / days-in-month / range checks. *)
 let make_time y m d h mi s =
-  if
-    m >= 1 && m <= 12 && d >= 1
-    && (d <= if m = 2 && is_leap y then 29 else days_in_month.(m - 1))
-    && h < 24 && mi < 60 && s < 60
-  then Some (unix_of_utc y m d h mi s)
-  else None
+  match Ptime.of_date_time ((y, m, d), ((h, mi, s), 0)) with
+  | Some t -> Some (Ptime.to_float_s t)
+  | None -> None
 
 (* Parse "HH:MM:SS" into (h,mi,s). *)
 let parse_hms time =

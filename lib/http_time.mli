@@ -23,18 +23,21 @@ val days_in_month : int array
 val is_leap : int -> bool
 (** Whether [y] is a Gregorian leap year. *)
 
-val days_from_civil : int -> int -> int -> int
-(** [days_from_civil y m d] is the day count from 1970-01-01 to the civil date
-    [y]-[m]-[d] (Howard Hinnant's algorithm). *)
-
 val unix_of_utc : int -> int -> int -> int -> int -> int -> float
 (** [unix_of_utc y mo d h mi s] is the Unix-epoch seconds for the UTC civil
-    date/time. *)
+    date/time (via {!Ptime.of_date_time}). The components must form a valid
+    date/time — {!invalid_arg} is raised otherwise (callers on parse paths
+    validate first via {!make_time}). *)
 
 val utc_of_unix : float -> int * int * int * int * int * int * int
 (** [utc_of_unix t] decomposes Unix-epoch seconds [t] into
     [(year, month, day, hour, min, sec, weekday)] where [weekday] is [0]=Sunday
-    .. [6]=Saturday (UTC). *)
+    .. [6]=Saturday (UTC), via {!Ptime.to_date_time}/{!Ptime.weekday_num}. *)
+
+val make_time : int -> int -> int -> int -> int -> int -> float option
+(** [make_time y mo d h mi s] is [Some] the Unix-epoch seconds for the UTC civil
+    date/time, or [None] if the components do not form a valid date/time
+    (delegated to {!Ptime.of_date_time}). *)
 
 val weekday_names : string array
 (** Abbreviated weekday names indexed by [0]=Sun .. [6]=Sat. *)

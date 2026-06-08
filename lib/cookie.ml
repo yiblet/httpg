@@ -242,10 +242,8 @@ let valid_cookie_domain v =
    parser (which accepts "DD-Mon-YYYY HH:MM:SS MST" with a 4-digit year and an
    arbitrary zone token, unlike Go's http.ParseTime) stays here. *)
 
-let days_in_month = Http_time.days_in_month
-let is_leap = Http_time.is_leap
-let unix_of_utc = Http_time.unix_of_utc
 let month_of_name = Http_time.month_of_name
+let make_time = Http_time.make_time
 
 (* http.TimeFormat: "Mon, 02 Jan 2006 15:04:05 GMT". *)
 let format_time = Http_time.format_gmt
@@ -301,14 +299,11 @@ let parse_expires raw =
                   int_of_string_opt mi,
                   int_of_string_opt ss )
               with
-              | Some h, Some min_, Some s
-                when d >= 1
-                     && (d
-                        <=
-                        if m = 2 && is_leap y then 29 else days_in_month.(m - 1)
-                        )
-                     && h < 24 && min_ < 60 && s < 60 ->
-                  Some (unix_of_utc y m d h min_ s)
+              | Some h, Some min_, Some s ->
+                  (* [make_time] (via Ptime) validates the date/time, subsuming
+                     the old hand-rolled leap-year / days-in-month / range
+                     checks. *)
+                  make_time y m d h min_ s
               | _ -> None)
           | _ -> None))
 

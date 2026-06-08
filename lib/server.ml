@@ -11,14 +11,17 @@
    routing tree lives in {!Mux}. *)
 module Pattern = Httpg_internal.Pattern
 
-(* Go's http.TimeFormat applied to the current time. *)
-let http_time_now () =
-  let y, mo, d, h, mi, s, wd = Http_time.utc_of_unix (Unix.gettimeofday ()) in
-  Printf.sprintf "%s, %02d %s %04d %02d:%02d:%02d GMT"
-    Http_time.weekday_names.(wd)
-    d
-    Http_time.month_names.(mo - 1)
-    y h mi s
+(* Go's http.TimeFormat applied to the current time. Go's server.go reads the
+   clock with [time.Now()] in [response.WriteHeader] / [extraHeaders] to set
+   the Date header; here "now" comes from the Eio clock the server captured (so
+   tests can drive a mock clock). With no clock captured there is no wall-clock
+   source, so we return [None] and the Date header is simply omitted — matching
+   the codebase's other clock-optional paths, which skip clock-dependent
+   behaviour when no clock is present. *)
+let http_time_now clock =
+  match clock with
+  | None -> None
+  | Some clock -> Some (Http_time.format_gmt (Eio.Time.now clock))
 
 (* ---- Handler ---- *)
 
@@ -161,7 +164,7 @@ let body_allowed_for_status status =
    Content-Length; a [Stream] body is unknown-length and sent chunked (HTTP/1.1)
    or close-delimited (HTTP/1.0), one DATA flush per pulled chunk so the client
    observes incremental delivery. Returns the keep-alive verdict. *)
-let serve_one ~sw w (r : Request.t) (h : handler) : bool =
+let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   let resp = h ~sw r in
   let is_head = r.meth = Httpg_base.Method.Head in
   let req_should_close = r.close in
@@ -201,7 +204,9 @@ let serve_one ~sw w (r : Request.t) (h : handler) : bool =
   in
   let header =
     if not (Header.has header "Date") then
-      Header.set header "Date" (http_time_now ())
+      match http_time_now clock with
+      | Some date -> Header.set header "Date" date
+      | None -> header
     else header
   in
   if
@@ -575,7 +580,7 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
             Eio.Switch.run @@ fun req_sw ->
             match
               with_deadline clock ~secs:timeouts.to_write (fun () ->
-                  try serve_one ~sw:req_sw w req handler with _ -> false)
+                  try serve_one ~sw:req_sw ~clock w req handler with _ -> false)
             with
             | `Done k -> k
             | `Timeout -> false
