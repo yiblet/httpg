@@ -47,12 +47,17 @@ val create :
     given. [?timeout] (seconds) bounds the whole exchange and is enforced only
     when a [?clock] was captured (Go's [Client.Timeout]). *)
 
-val do_ : sw:Eio.Switch.t -> t -> Request.t -> Response.t
+val do_ : ?force_h2:bool -> sw:Eio.Switch.t -> t -> Request.t -> Response.t
 (** [do_ ~sw c req] is Go's [Client.Do]: send [req], following redirects per the
     client's policy (301/302/303 rewrite the method to GET unless the original
     was GET/HEAD and drop the body; 307/308 preserve method and body), composing
     {!Transport.round_trip} for each hop. A non-2xx status is not an error.
     Raises {!Aborted} when the redirect policy aborts.
+
+    [force_h2] (default [false]) is forwarded to {!Transport.round_trip}: for an
+    ["http"] (cleartext) request it selects h2c via prior knowledge (RFC 9113
+    §3.3) instead of HTTP/1.x; for ["https"] HTTP/2 is already negotiated by
+    ALPN. Symmetric with {!Server.create}'s [?force_h2].
 
     The captured [net] drives {!Transport.round_trip} (dialing + pooled
     connection fibers). When the client carries a [timeout] and a [clock] was
@@ -83,11 +88,16 @@ val referer_for_url :
     userinfo stripped. *)
 
 val do_one :
-  ?round_trip:(Request.t -> Response.t) -> t -> Request.t -> Response.t
+  ?round_trip:(Request.t -> Response.t) ->
+  ?force_h2:bool ->
+  t ->
+  Request.t ->
+  Response.t
 (** Go's [Client.do]: the redirect-following loop (without {!do_}'s timeout
     composition). [?round_trip] overrides the per-hop round-tripper (default:
-    the client's {!Transport.round_trip}); exposed so the redirect loop can be
-    driven against a stub without real DNS. With the default round-tripper the
+    the client's {!Transport.round_trip}, passing [?force_h2]); exposed so the
+    redirect loop can be driven against a stub without real DNS. With the default
+    round-tripper the
     transport's switch must be established ({!Transport.run}); {!do_} does this.
     Sensitive headers are stripped stickily and subdomain-aware against the
     initial request host (client.go:691-694); the Referer is set from the
@@ -102,13 +112,22 @@ val make_request :
 (** [make_request ?body ?content_length meth url] builds a request from a URL
     string (Go's [NewRequest]). The default body is empty. *)
 
-val get : sw:Eio.Switch.t -> t -> string -> Response.t
-(** [get ~sw c url] is Go's [Client.Get]. *)
+val get : ?force_h2:bool -> sw:Eio.Switch.t -> t -> string -> Response.t
+(** [get ~sw c url] is Go's [Client.Get]. [?force_h2] selects h2c for cleartext
+    URLs (see {!do_}). *)
 
-val head : sw:Eio.Switch.t -> t -> string -> Response.t
-(** [head ~sw c url] is Go's [Client.Head]. *)
+val head : ?force_h2:bool -> sw:Eio.Switch.t -> t -> string -> Response.t
+(** [head ~sw c url] is Go's [Client.Head]. [?force_h2] selects h2c for cleartext
+    URLs (see {!do_}). *)
 
 val post :
-  sw:Eio.Switch.t -> t -> string -> content_type:string -> Body.t -> Response.t
+  ?force_h2:bool ->
+  sw:Eio.Switch.t ->
+  t ->
+  string ->
+  content_type:string ->
+  Body.t ->
+  Response.t
 (** [post ~sw c url ~content_type body] is Go's [Client.Post]: POST [body] with
-    the given Content-Type. *)
+    the given Content-Type. [?force_h2] selects h2c for cleartext URLs (see
+    {!do_}). *)

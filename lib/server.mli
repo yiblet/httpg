@@ -82,6 +82,7 @@ val create :
   ?write_timeout:float ->
   ?idle_timeout:float ->
   ?max_header_bytes:int ->
+  ?force_h2:bool ->
   handler ->
   t
 (** [create ~net ?clock ?domain_mgr ?addr ?port handler] builds a server bound
@@ -104,7 +105,15 @@ val create :
     [max_header_bytes] is Go's [Server.MaxHeaderBytes]: the request line +
     header block is bounded cumulatively against [max_header_bytes + 4096]
     bytes; a request exceeding it is answered [431] and the connection closed.
-    Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB). *)
+    Defaults to [DefaultMaxHeaderBytes = 1 lsl 20] (1 MB).
+
+    [force_h2] (default [false]) makes a {b plaintext} listener serve h2c — HTTP/2
+    cleartext via prior knowledge (RFC 9113 §3.3): every accepted connection is
+    handed straight to the HTTP/2 server, which reads and validates the client
+    preface itself, with no ALPN and no [Upgrade:] negotiation. This is a
+    deliberate deviation — Go's [net/http] has no h2c (it lives in
+    [golang.org/x/net/http2/h2c], outside the vendored spec). Has no effect on the
+    TLS entry points, where ALPN selects the protocol. *)
 
 val close : t -> unit
 (** Minimal [Server.Close]: cancel all per-domain accept switches, which stops
@@ -138,6 +147,7 @@ val listen_and_serve :
   ?write_timeout:float ->
   ?idle_timeout:float ->
   ?max_header_bytes:int ->
+  ?force_h2:bool ->
   net:_ Eio.Net.t ->
   ?clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
@@ -149,7 +159,8 @@ val listen_and_serve :
 (** Go's [ListenAndServe]: bind [addr]:[port] (under an internal switch) and
     serve [handler] until the listener is torn down. Pass [?domain_mgr] (with an
     optional [?domains] count) to serve across OS cores; see {!serve}. The four
-    duration knobs and [max_header_bytes] are forwarded to {!create}. *)
+    duration knobs, [max_header_bytes] and [force_h2] (serve cleartext h2c; see
+    {!create}) are forwarded to {!create}. *)
 
 val listen_and_serve_started :
   ?read_timeout:float ->
@@ -157,6 +168,7 @@ val listen_and_serve_started :
   ?write_timeout:float ->
   ?idle_timeout:float ->
   ?max_header_bytes:int ->
+  ?force_h2:bool ->
   net:_ Eio.Net.t ->
   ?clock:_ Eio.Time.clock ->
   ?domain_mgr:_ Eio.Domain_manager.t ->
@@ -170,8 +182,9 @@ val listen_and_serve_started :
     first and returns the running [Server.t], the bound port (useful when
     [port = 0] selects an ephemeral port) and a thunk that runs the accept pool
     — so tests can read the port, fork the accept thunk, connect and {!close}.
-    The four duration knobs and [max_header_bytes] are forwarded to {!create};
-    [?domain_mgr]/[?domains] enable the multicore accept pool (see {!serve}). *)
+    The four duration knobs, [max_header_bytes] and [force_h2] (serve cleartext
+    h2c; see {!create}) are forwarded to {!create}; [?domain_mgr]/[?domains]
+    enable the multicore accept pool (see {!serve}). *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 

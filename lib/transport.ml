@@ -324,16 +324,21 @@ let dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2 : dialed =
          Net.connect_alpn ~sw:csw net ~host ~port ~tls ~alpn
            ~insecure:t.insecure ?authenticator:t.authenticator
            (fun ~proto r w ->
-             match proto with
-             | Some "h2" ->
-                 let cc = H2_transport.new_client_conn ~sw:csw r w in
-                 Eio.Stream.add result_box (Ok (Dialed_h2 cc));
-                 (* Park: keep the channels/read-loop alive until the conn switch
-                   is cancelled (close / pool teardown). *)
-                 Eio.Fiber.await_cancel ()
-             | _ ->
-                 Eio.Stream.add result_box (Ok (Dialed_h1 pc));
-                 conn_loop t pool key ~max_header_bytes pc r w)
+             (* Over cleartext there is no TLS handshake, so ALPN never runs and
+                [proto] is [None]; [force_h2] then means h2c via prior knowledge
+                (RFC 9113 §3.3) — speak HTTP/2 directly. Over TLS, ALPN decides. *)
+             let want_h2 = proto = Some "h2" || (force_h2 && not tls) in
+             if want_h2 then begin
+               let cc = H2_transport.new_client_conn ~sw:csw r w in
+               Eio.Stream.add result_box (Ok (Dialed_h2 cc));
+               (* Park: keep the channels/read-loop alive until the conn switch
+                  is cancelled (close / pool teardown). *)
+               Eio.Fiber.await_cancel ()
+             end
+             else begin
+               Eio.Stream.add result_box (Ok (Dialed_h1 pc));
+               conn_loop t pool key ~max_header_bytes pc r w
+             end)
        with exn -> (
          (* A dial/handshake failure (incl. {!Net.Tls_error}, the analogue of Go's
            addTLS handshake error, transport.go:1803-1819) is delivered to the

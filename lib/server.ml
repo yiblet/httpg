@@ -515,6 +515,11 @@ type t = {
   idle_timeout : float;
   (* Go's Server.MaxHeaderBytes; default DefaultMaxHeaderBytes (1 MB). *)
   max_header_bytes : int;
+  (* h2c (HTTP/2 cleartext, prior-knowledge per RFC 9113 §3.3): when set, the
+     plaintext serve loop runs the HTTP/2 server directly on the cleartext
+     channels instead of HTTP/1.x. No Go-stdlib analogue (h2c lives in
+     golang.org/x/net/http2/h2c, outside the vendored spec). *)
+  force_h2 : bool;
   (* Cross-domain shutdown trigger (Go's Server.Close). [serve] forks a watcher
      that awaits [stop] then fails the pool switch *on the serve domain*; that
      cancellation propagates into each spawned domain (Domain_manager.run docs),
@@ -538,7 +543,7 @@ let default_max_header_bytes = 1 lsl 20
 
 let create ~net ?clock ?domain_mgr ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
     ?(read_header_timeout = 0.) ?(write_timeout = 0.) ?(idle_timeout = 0.)
-    ?(max_header_bytes = default_max_header_bytes) handler =
+    ?(max_header_bytes = default_max_header_bytes) ?(force_h2 = false) handler =
   {
     net :> [ `Generic ] Eio.Net.ty Eio.Resource.t;
     clock =
@@ -555,6 +560,7 @@ let create ~net ?clock ?domain_mgr ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
     write_timeout;
     idle_timeout;
     max_header_bytes;
+    force_h2;
     (* placeholder pair; [serve]/[serve_tls] install a fresh one before use. *)
     stop = fst (Eio.Promise.create ());
     stop_u = snd (Eio.Promise.create ());
@@ -765,126 +771,14 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
   in
   loop ~first:true ()
 
-(* Serve one accepted plaintext connection. *)
-let serve_conn ~clock ?(timeouts = no_timeouts)
-    ?(max_header_bytes = default_max_header_bytes) (handler : handler) flow peer
-    =
-  let remote = Net.sockaddr_to_string peer in
-  Net.with_connection flow (fun r w ->
-      serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote handler)
+(* ---- net/http <-> http2 translation shim (shared by h2c + h2-over-TLS) ----
 
-(* Resolve the domain count: [?domains] clamped to >=1, falling back to all
-   cores; capped to 1 when no domain_mgr was captured (single-domain). *)
-let resolve_domains srv domains =
-  let n =
-    match domains with
-    | Some d -> max 1 d
-    | None -> max 1 (Domain.recommended_domain_count ())
-  in
-  match srv.domain_mgr with Some _ -> n | None -> 1
-
-(* One accept loop over [listen_sock]: fork [conn] per accepted connection (Go's
-   [for { c := l.Accept(); go c.serve(c) }]), under [sw]. [on_error] keeps one
-   bad conn from killing the loop. [Net.ensure_rng] seeds this domain's RNG (the
-   stateless getrandom generator, safe to draw from concurrently across domains;
-   see Net.ensure_rng) before any TLS handshake runs on it. *)
-let accept_loop ~sw listen_sock conn =
-  Net.ensure_rng ();
-  let rec loop () =
-    Net.accept_fork ~sw ~on_error:(fun _ -> ()) listen_sock conn;
-    loop ()
-  in
-  loop ()
-
-(* Pre-spawn a pool of K accept loops, one per domain, all accepting the SAME
-   listening socket (F022 Prototype B: a single Eio listening_socket is safe to
-   accept from concurrently across domains). Loop 0 runs on the calling domain;
-   loops 1..K-1 each run on their own domain via [Domain_manager.run]. K=1 (or
-   no domain_mgr) collapses to today's single-domain accept loop.
-
-   All loops attach to [pool_sw]. A watcher fiber awaits [srv.stop] and, on the
-   serve domain, fails [pool_sw] with {!Shutdown}: that cancels loop 0 and the
-   forked [Domain_manager.run] fibers, propagating cancellation into each
-   spawned domain (its accept loop + in-flight connection fibers). [Shutdown] is
-   swallowed so a clean shutdown returns normally. *)
-let run_accept_pool srv ~domains listen_sock conn =
-  let k = resolve_domains srv domains in
-  let stop, stop_u = Eio.Promise.create () in
-  srv.stop <- stop;
-  srv.stop_u <- stop_u;
-  let graceful, graceful_u = Eio.Promise.create () in
-  srv.graceful <- graceful;
-  srv.graceful_u <- graceful_u;
-  try
-    Eio.Switch.run @@ fun pool_sw ->
-    Eio.Fiber.fork ~sw:pool_sw (fun () ->
-        Eio.Promise.await srv.stop;
-        Eio.Switch.fail pool_sw Shutdown);
-    if k > 1 then begin
-      let dmgr = Option.get srv.domain_mgr in
-      for _ = 2 to k do
-        Eio.Fiber.fork ~sw:pool_sw (fun () ->
-            Eio.Domain_manager.run dmgr (fun () ->
-                Eio.Switch.run @@ fun dsw ->
-                accept_loop ~sw:dsw listen_sock conn))
-      done
-    end;
-    accept_loop ~sw:pool_sw listen_sock conn
-  with Shutdown -> ()
-
-(* Go's Server.Serve: accept connections, handle each in its own fiber, until
-   the accept switches are cancelled. With [?domains > 1] (default all cores) a
-   per-domain pool of accept loops delivers genuine multicore parallelism. *)
-let serve ?domains srv listen_sock =
-  let clock = srv.clock in
-  let timeouts = timeouts_of_server srv in
-  let max_header_bytes = srv.max_header_bytes in
-  srv.close_listener <- (fun () -> Eio.Resource.close listen_sock);
-  run_accept_pool srv ~domains listen_sock (fun flow peer ->
-      serve_conn ~clock ~timeouts ~max_header_bytes srv.handler flow peer)
-
-(* Go's ListenAndServe: bind addr:port and serve until the listener is torn
-   down. With [?domain_mgr] + [?domains] (default all cores) the accept pool
-   runs across domains; without [?domain_mgr] it stays single-domain. *)
-let listen_and_serve ?read_timeout ?read_header_timeout ?write_timeout
-    ?idle_timeout ?max_header_bytes ~net ?clock ?domain_mgr ?domains ~addr ~port
-    handler =
-  let srv =
-    create ~net ?clock ?domain_mgr ?read_timeout ?read_header_timeout
-      ?write_timeout ?idle_timeout ?max_header_bytes ~addr ~port handler
-  in
-  Eio.Switch.run @@ fun sw ->
-  let listen_sock =
-    Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
-  in
-  serve ?domains srv listen_sock
-
-(* Like listen_and_serve but binds first and hands the running server, the bound
-   port and a thunk that runs the accept pool to [fn] — so tests can connect to
-   an ephemeral port and {!close}. The listener lives under [sw]. *)
-let listen_and_serve_started ?read_timeout ?read_header_timeout ?write_timeout
-    ?idle_timeout ?max_header_bytes ~net ?clock ?domain_mgr ?domains ~sw ~addr
-    ~port handler =
-  let srv =
-    create ~net ?clock ?domain_mgr ?read_timeout ?read_header_timeout
-      ?write_timeout ?idle_timeout ?max_header_bytes ~addr ~port handler
-  in
-  let listen_sock =
-    Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
-  in
-  let bound = Net.bound_port listen_sock in
-  (srv, bound, fun () -> serve ?domains srv listen_sock)
-
-(* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
-
-(* The default ALPN protocols advertised by the TLS server (Go's
-   http2.NextProtoTLS + "http/1.1"). *)
-let default_alpn_protocols = [ "h2"; "http/1.1" ]
-
-(* net/http <-> http2 translation shim (Go's http2.go: http2Handler.ServeHTTP).
-   The HTTP/2 server hands the handler a decoupled {!Httpg_http2.Api} request +
-   response_writer; we expand them to a [Request.t] and a {!response_writer}. The
-   http2 library never names the public types — translation lives here. *)
+   The HTTP/2 server (Go's http2.go: http2Handler.ServeHTTP) hands the handler a
+   decoupled {!Httpg_http2.Api} request + response_writer; we expand them to a
+   [Request.t] and drive the writer from the returned [Response.t]. The http2
+   library never names the public types — translation lives here. Defined above
+   the serve loops so both the plaintext (h2c) and TLS (ALPN) dispatchers can
+   reach it. *)
 
 let body_of_api_body (b : Httpg_http2.Api.Body.t) : Body.t =
   match b with
@@ -957,6 +851,137 @@ let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
           in
           loop ());
       h2w.rw_flush ())
+
+(* Serve one accepted plaintext connection. With [~force_h2] the connection is
+   served as h2c (HTTP/2 cleartext, prior-knowledge): {!Httpg_http2.H2_server.serve}
+   reads and validates the client preface itself, then runs the HTTP/2 loop over
+   the cleartext channels — no ALPN, no Upgrade. Otherwise the HTTP/1.x serve loop
+   runs. [?graceful] is threaded into the h2 loop so an h2c connection observes a
+   graceful GOAWAY drain (Go's Server.Shutdown), mirroring {!serve_tls_conn}. *)
+let serve_conn ~clock ?graceful ?(timeouts = no_timeouts)
+    ?(max_header_bytes = default_max_header_bytes) ?(force_h2 = false)
+    (handler : handler) flow peer =
+  let remote = Net.sockaddr_to_string peer in
+  Net.with_connection flow (fun r w ->
+      if force_h2 then
+        Httpg_http2.H2_server.serve ~max_header_bytes ?clock
+          ~idle_timeout:timeouts.to_idle ~read_timeout:timeouts.to_read
+          ?graceful r w
+          ~handler:(h2_handler_of_handler handler)
+      else serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote handler)
+
+(* Resolve the domain count: [?domains] clamped to >=1, falling back to all
+   cores; capped to 1 when no domain_mgr was captured (single-domain). *)
+let resolve_domains srv domains =
+  let n =
+    match domains with
+    | Some d -> max 1 d
+    | None -> max 1 (Domain.recommended_domain_count ())
+  in
+  match srv.domain_mgr with Some _ -> n | None -> 1
+
+(* One accept loop over [listen_sock]: fork [conn] per accepted connection (Go's
+   [for { c := l.Accept(); go c.serve(c) }]), under [sw]. [on_error] keeps one
+   bad conn from killing the loop. [Net.ensure_rng] seeds this domain's RNG (the
+   stateless getrandom generator, safe to draw from concurrently across domains;
+   see Net.ensure_rng) before any TLS handshake runs on it. *)
+let accept_loop ~sw listen_sock conn =
+  Net.ensure_rng ();
+  let rec loop () =
+    Net.accept_fork ~sw ~on_error:(fun _ -> ()) listen_sock conn;
+    loop ()
+  in
+  loop ()
+
+(* Pre-spawn a pool of K accept loops, one per domain, all accepting the SAME
+   listening socket (F022 Prototype B: a single Eio listening_socket is safe to
+   accept from concurrently across domains). Loop 0 runs on the calling domain;
+   loops 1..K-1 each run on their own domain via [Domain_manager.run]. K=1 (or
+   no domain_mgr) collapses to today's single-domain accept loop.
+
+   All loops attach to [pool_sw]. A watcher fiber awaits [srv.stop] and, on the
+   serve domain, fails [pool_sw] with {!Shutdown}: that cancels loop 0 and the
+   forked [Domain_manager.run] fibers, propagating cancellation into each
+   spawned domain (its accept loop + in-flight connection fibers). [Shutdown] is
+   swallowed so a clean shutdown returns normally. *)
+let run_accept_pool srv ~domains listen_sock conn =
+  let k = resolve_domains srv domains in
+  let stop, stop_u = Eio.Promise.create () in
+  srv.stop <- stop;
+  srv.stop_u <- stop_u;
+  let graceful, graceful_u = Eio.Promise.create () in
+  srv.graceful <- graceful;
+  srv.graceful_u <- graceful_u;
+  try
+    Eio.Switch.run @@ fun pool_sw ->
+    Eio.Fiber.fork ~sw:pool_sw (fun () ->
+        Eio.Promise.await srv.stop;
+        Eio.Switch.fail pool_sw Shutdown);
+    if k > 1 then begin
+      let dmgr = Option.get srv.domain_mgr in
+      for _ = 2 to k do
+        Eio.Fiber.fork ~sw:pool_sw (fun () ->
+            Eio.Domain_manager.run dmgr (fun () ->
+                Eio.Switch.run @@ fun dsw ->
+                accept_loop ~sw:dsw listen_sock conn))
+      done
+    end;
+    accept_loop ~sw:pool_sw listen_sock conn
+  with Shutdown -> ()
+
+(* Go's Server.Serve: accept connections, handle each in its own fiber, until
+   the accept switches are cancelled. With [?domains > 1] (default all cores) a
+   per-domain pool of accept loops delivers genuine multicore parallelism. *)
+let serve ?domains srv listen_sock =
+  let clock = srv.clock in
+  let timeouts = timeouts_of_server srv in
+  let max_header_bytes = srv.max_header_bytes in
+  srv.close_listener <- (fun () -> Eio.Resource.close listen_sock);
+  run_accept_pool srv ~domains listen_sock (fun flow peer ->
+      (* [srv.graceful] is the fresh promise installed by run_accept_pool; an h2c
+         connection observes it for a graceful GOAWAY drain. *)
+      serve_conn ~clock ~graceful:srv.graceful ~timeouts ~max_header_bytes
+        ~force_h2:srv.force_h2 srv.handler flow peer)
+
+(* Go's ListenAndServe: bind addr:port and serve until the listener is torn
+   down. With [?domain_mgr] + [?domains] (default all cores) the accept pool
+   runs across domains; without [?domain_mgr] it stays single-domain. *)
+let listen_and_serve ?read_timeout ?read_header_timeout ?write_timeout
+    ?idle_timeout ?max_header_bytes ?force_h2 ~net ?clock ?domain_mgr ?domains
+    ~addr ~port handler =
+  let srv =
+    create ~net ?clock ?domain_mgr ?read_timeout ?read_header_timeout
+      ?write_timeout ?idle_timeout ?max_header_bytes ?force_h2 ~addr ~port
+      handler
+  in
+  Eio.Switch.run @@ fun sw ->
+  let listen_sock =
+    Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
+  in
+  serve ?domains srv listen_sock
+
+(* Like listen_and_serve but binds first and hands the running server, the bound
+   port and a thunk that runs the accept pool to [fn] — so tests can connect to
+   an ephemeral port and {!close}. The listener lives under [sw]. *)
+let listen_and_serve_started ?read_timeout ?read_header_timeout ?write_timeout
+    ?idle_timeout ?max_header_bytes ?force_h2 ~net ?clock ?domain_mgr ?domains
+    ~sw ~addr ~port handler =
+  let srv =
+    create ~net ?clock ?domain_mgr ?read_timeout ?read_header_timeout
+      ?write_timeout ?idle_timeout ?max_header_bytes ?force_h2 ~addr ~port
+      handler
+  in
+  let listen_sock =
+    Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
+  in
+  let bound = Net.bound_port listen_sock in
+  (srv, bound, fun () -> serve ?domains srv listen_sock)
+
+(* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
+
+(* The default ALPN protocols advertised by the TLS server (Go's
+   http2.NextProtoTLS + "http/1.1"). *)
+let default_alpn_protocols = [ "h2"; "http/1.1" ]
 
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the

@@ -58,6 +58,7 @@ let () =
        ("H2Transport", Test_h2_transport.tests);
        ("H2Tls", Test_h2_tls.tests);
        ("H2Clientserver", Test_h2_clientserver.tests);
+       ("H2c", Test_h2c.tests);
        ("Stream_h2", Test_stream_h2.tests);
        ("Abuse_h2", Test_abuse_h2.tests);
      ]

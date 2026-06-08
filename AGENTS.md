@@ -56,6 +56,7 @@ Substantial features are built via **ticketed plan files** in `plans/*.plan.md` 
 - Multipart parsing uses the sans-io `multipart_form` opam lib (Go hand-rolls `mime/multipart`); `max_memory` is accepted but not enforced.
 - MIME-by-extension in `fs` is a small built-in table + `Sniff` fallback (no `mime` package port).
 - TLS client verifies certs by default (`ca-certs`); use `~insecure` for self-signed (e.g. the test server).
+- **h2c (HTTP/2 cleartext) is a deliberate deviation, not a port:** Go's `net/http` has no h2c (it lives in `golang.org/x/net/http2/h2c`, outside the vendored spec). We support only the **prior-knowledge** form (RFC 9113 §3.3), not the HTTP/1.1 `Upgrade: h2c` dance. Server: `Server.create`/`listen_and_serve`/`_started ?force_h2:true` makes a *plaintext* listener hand each connection straight to `H2_server.serve` (which reads/validates the client preface itself) — no ALPN, no `Upgrade:`. Client: `Client.get`/`head`/`post`/`do_`/`do_one ?force_h2:true` (and `Transport.round_trip ?force_h2`) speak h2c over an `http://` URL. The flag is a no-op over TLS, where ALPN selects the protocol.
 
 Remaining gaps and explicit non-goals (HTTP/3, proxies, cookie jar, server push, …) are tracked in **`TODO.md`**.
 

@@ -108,11 +108,11 @@ let referer_for_url ~last ~next ~explicit =
 (* Go's Client.do: the redirect-following loop composing Transport.round_trip.
    [round_trip] is the per-hop round-tripper (defaults to the client's transport);
    it is a parameter so tests can drive the loop against a stub. *)
-let do_one ?round_trip c (req : Request.t) : Response.t =
+let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) : Response.t =
   let round_trip =
     match round_trip with
     | Some f -> f
-    | None -> fun r -> Transport.round_trip c.transport r
+    | None -> fun r -> Transport.round_trip ~force_h2 c.transport r
   in
   let initial_header = req.Request.header in
   let explicit_referer = Header.get req.Request.header "Referer" in
@@ -182,7 +182,7 @@ let do_one ?round_trip c (req : Request.t) : Response.t =
   in
   loop req [] true
 
-let do_ ~sw c (req : Request.t) : Response.t =
+let do_ ?force_h2 ~sw c (req : Request.t) : Response.t =
   (* The client's [sw] (the session lifetime) owns the transport's pool, so
      pooled conns outlive each round trip but are reclaimed when the client
      session ends. *)
@@ -190,8 +190,8 @@ let do_ ~sw c (req : Request.t) : Response.t =
   match (c.timeout, Transport.clock c.transport) with
   | Some secs, Some clock ->
       (* Go's Client.Timeout bounds the whole exchange via Eio.Time. *)
-      Net.with_timeout clock secs (fun () -> do_one c req)
-  | _ -> do_one c req
+      Net.with_timeout clock secs (fun () -> do_one ?force_h2 c req)
+  | _ -> do_one ?force_h2 c req
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
@@ -217,10 +217,13 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     multipart_form = None;
   }
 
-let get ~sw c url = do_ ~sw c (make_request Httpg_base.Method.get url)
-let head ~sw c url = do_ ~sw c (make_request Httpg_base.Method.head url)
+let get ?force_h2 ~sw c url =
+  do_ ?force_h2 ~sw c (make_request Httpg_base.Method.get url)
 
-let post ~sw c url ~content_type body =
+let head ?force_h2 ~sw c url =
+  do_ ?force_h2 ~sw c (make_request Httpg_base.Method.head url)
+
+let post ?force_h2 ~sw c url ~content_type body =
   let len =
     match body with
     | Body.String s -> Int64.of_int (String.length s)
@@ -230,4 +233,4 @@ let post ~sw c url ~content_type body =
   let req = make_request ~body ~content_length:len Httpg_base.Method.post url in
   req.Request.header <-
     Header.set req.Request.header "Content-Type" content_type;
-  do_ ~sw c req
+  do_ ?force_h2 ~sw c req

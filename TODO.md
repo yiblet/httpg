@@ -172,7 +172,7 @@ divergence.
 
 ## HTTP/2 extras
 - Server Push send (`PUSH_PROMISE`) — currently parse-only.
-- RFC 9218 priority scheduler (round-robin only today); h2c (cleartext) upgrade.
+- RFC 9218 priority scheduler (round-robin only today). h2c prior-knowledge (RFC 9113 §3.3) is supported via `?force_h2` on `Server`/`Client` (a deliberate deviation — no Go-stdlib analogue); the HTTP/1.1 `Upgrade: h2c` form is not.
 - Trailers re-surfaced on `Response`; `maxConcurrentStreams` await; GOAWAY-retry-on-new-conn; extended CONNECT.
 - HTTP/2 response content sniffing (reduced to a `text/plain` default).
 
