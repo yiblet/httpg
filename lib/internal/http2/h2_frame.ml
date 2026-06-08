@@ -510,40 +510,13 @@ type meta_headers_frame = {
   truncated : bool;
 }
 
-(* httpguts.IsTokenRune + http2.validWireHeaderFieldName (reject uppercase). *)
-let is_token_byte b =
-  let c = Char.code b in
-  if c >= 128 then false
-  else
-    match b with
-    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
-    | '`' | '|' | '~' ->
-        true
-    | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
-    | _ -> false
+(* http2.validWireHeaderFieldName (httpguts.IsTokenRune + reject uppercase) and
+   httpguts.ValidHeaderFieldValue. Shared with the h1 encoder via Httpcommon
+   (httpg_internal); the byte sets are identical, so there is a single home. *)
+let valid_wire_header_field_name =
+  Httpg_internal.Httpcommon.valid_wire_header_field_name
 
-let valid_wire_header_field_name v =
-  if String.length v = 0 then false
-  else
-    let ok = ref true in
-    String.iter
-      (fun c ->
-        if not (is_token_byte c) then ok := false
-        else if c >= 'A' && c <= 'Z' then ok := false)
-      v;
-    !ok
-
-(* httpguts.ValidHeaderFieldValue: reject CTL chars that are not LWS. *)
-let valid_header_field_value v =
-  let ok = ref true in
-  String.iter
-    (fun c ->
-      let b = Char.code c in
-      let is_ctl = b < 0x20 || b = 0x7f in
-      let is_lws = c = ' ' || c = '\t' in
-      if is_ctl && not is_lws then ok := false)
-    v;
-  !ok
+let valid_header_field_value = Httpg_internal.Httpcommon.valid_header_field_value
 
 let header_field_size (hf : Hpack.header_field) = Hpack_tables.size hf
 let is_pseudo (hf : Hpack.header_field) = Hpack_tables.is_pseudo hf

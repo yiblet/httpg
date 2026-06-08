@@ -60,16 +60,10 @@ let lower_header v =
   done;
   (Bytes.to_string b, !ascii)
 
-let is_token_byte b =
-  let c = Char.code b in
-  if c >= 128 then false
-  else
-    match b with
-    | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_'
-    | '`' | '|' | '~' ->
-        true
-    | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
-    | _ -> false
+(* httpguts.IsTokenRune restricted to ASCII bytes. Same RFC 7230 token (tchar)
+   set as Go's httpguts.isTokenTable; folded onto the single byte predicate in
+   httpg_base ([Textproto.valid_header_field_byte]). *)
+let is_token_byte = Httpg_base.Textproto.valid_header_field_byte
 
 let valid_header_field_name v =
   String.length v > 0 && String.for_all is_token_byte v

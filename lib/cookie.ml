@@ -57,14 +57,10 @@ let default_cookie_max_num = 3000
 let cookie_num_within_max n = n <= default_cookie_max_num
 
 (* ---- isToken / cookie name validity ---- *)
-(* Port of httpguts.isTokenTable / ValidHeaderFieldName (== isToken). *)
-let is_token_byte b =
-  match b with
-  | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`'
-  | '|' | '~' ->
-      true
-  | '0' .. '9' | 'a' .. 'z' | 'A' .. 'Z' -> true
-  | _ -> false
+(* Port of httpguts.isTokenTable / ValidHeaderFieldName (== isToken). The token
+   (tchar) byte set is identical to Go's table, so it shares the single byte
+   predicate in httpg_base ([Textproto.valid_header_field_byte]). *)
+let is_token_byte = Httpg_base.Textproto.valid_header_field_byte
 
 let is_token v =
   if String.length v = 0 then false
