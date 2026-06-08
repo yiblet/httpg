@@ -20,8 +20,7 @@ let clean_path p =
     if p.[String.length p - 1] = '/' && np <> "/" then
       begin if
         String.length p = String.length np + 1
-        && String.length np <= String.length p
-        && String.sub p 0 (String.length np) = np
+        && String.starts_with ~prefix:np p
       then p
       else np ^ "/"
       end

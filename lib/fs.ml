@@ -275,8 +275,7 @@ let is_zero_time t = t = 0.0
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
 let trim_string = Httpg_base.Textproto.trim_string
 
-let has_prefix s p =
-  String.length s >= String.length p && String.sub s 0 (String.length p) = p
+let has_prefix s p = String.starts_with ~prefix:p s
 
 (* Go scanETag: Some (etag, remain) if a syntactically valid ETag (W/"text" or
    "text", RFC 7232 2.3) is present at the start of [s] (after trimming). *)
@@ -304,7 +303,7 @@ let etag_strong_match a b = a = b && a <> "" && a.[0] = '"'
 (* Go etagWeakMatch: strings.TrimPrefix(a,"W/") == strings.TrimPrefix(b,"W/"). *)
 let etag_weak_match a b =
   let strip s =
-    if String.length s >= 2 && s.[0] = 'W' && s.[1] = '/' then
+    if String.starts_with ~prefix:"W/" s then
       String.sub s 2 (String.length s - 2)
     else s
   in
@@ -779,12 +778,10 @@ let path_base p =
       | None -> p
   end
 
-let ends_with s suffix =
-  let ls = String.length s and lf = String.length suffix in
-  ls >= lf && String.sub s (ls - lf) lf = suffix
+let ends_with s suffix = String.ends_with ~suffix s
 
 let trim_suffix s suffix =
-  if ends_with s suffix then
+  if String.ends_with ~suffix s then
     String.sub s 0 (String.length s - String.length suffix)
   else s
 

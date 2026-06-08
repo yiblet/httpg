@@ -143,9 +143,8 @@ let index_byte s c = try String.index s c with Not_found -> -1
 
 (* CutSuffix("name...", "...") *)
 let cut_suffix s suffix =
-  let ls = String.length s and lsf = String.length suffix in
-  if ls >= lsf && String.sub s (ls - lsf) lsf = suffix then
-    (String.sub s 0 (ls - lsf), true)
+  if String.ends_with ~suffix s then
+    (String.sub s 0 (String.length s - String.length suffix), true)
   else (s, false)
 
 (* --- parsePattern --- *)

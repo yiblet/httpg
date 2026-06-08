@@ -27,11 +27,9 @@ let of_string (vers : string) : t option =
   | "HTTP/1.1" -> Some Http11
   | "HTTP/1.0" -> Some Http10
   | _ ->
-      let prefix = "HTTP/" in
       let n = String.length vers in
       if n <> String.length "HTTP/X.Y" then None
-      else if not (String.length vers >= 5 && String.sub vers 0 5 = prefix) then
-        None
+      else if not (String.starts_with ~prefix:"HTTP/" vers) then None
       else if vers.[6] <> '.' then None
       else begin
         (* strconv.ParseUint on a single digit: reject non-digit, '+', leading
