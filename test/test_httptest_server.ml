@@ -11,7 +11,8 @@ module Ts = Httptest.Server
 (* ---- HttptestServer.server_get ---- *)
 let server_get () =
   let handler =
-    Server.handler_func (fun w r -> w.Server.write (Uri.path r.Request.url))
+    Server.handler_func (fun ~sw:_ r ->
+        Response.create () |> Response.with_body_string (Uri.path r.Request.url))
   in
   let status, body =
     Test_harness.with_env (fun ~net ~clock ~sw ->
@@ -29,7 +30,10 @@ let server_get () =
 
 (* ---- HttptestServer.server_tls ---- *)
 let server_tls () =
-  let handler = Server.handler_func (fun w _r -> w.Server.write "hello") in
+  let handler =
+    Server.handler_func (fun ~sw:_ _r ->
+        Response.with_body_string "hello" (Response.create ()))
+  in
   let status, body, url =
     Test_harness.with_env ~secs:15. (fun ~net ~clock ~sw ->
         let s = Ts.new_tls_server ~net ~clock ~sw handler in
@@ -52,7 +56,10 @@ let server_tls () =
 (* After [close], a fresh connect to the (now-unbound) port must fail (refused).
    We serve once before close, capture the port, close, then connect afresh. *)
 let server_close () =
-  let handler = Server.handler_func (fun w _r -> w.Server.write "hi") in
+  let handler =
+    Server.handler_func (fun ~sw:_ _r ->
+        Response.with_body_string "hi" (Response.create ()))
+  in
   let pre_status, refused =
     Test_harness.with_env (fun ~net ~clock ~sw ->
         let s = Ts.new_server ~net ~clock ~sw handler in

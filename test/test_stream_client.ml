@@ -43,13 +43,23 @@ let client_body_streamed () =
   let n_more = 200 in
   let more_chunk = String.make 1024 'x' in
   let handler =
-    Server.handler_func (fun w _r ->
-        w.Server.write "FIRST";
-        w.Server.flush ();
-        Eio.Promise.await released;
-        for _ = 1 to n_more do
-          w.Server.write more_chunk
-        done)
+    Server.handler_func (fun ~sw:_ _r ->
+        let phase = ref `First and more = ref n_more in
+        let next () =
+          match !phase with
+          | `First ->
+              phase := `More;
+              Some "FIRST"
+          | `More ->
+              (* block once, after FIRST has been flushed, before the rest. *)
+              if !more = n_more then Eio.Promise.await released;
+              if !more > 0 then begin
+                decr more;
+                Some more_chunk
+              end
+              else None
+        in
+        Response.create () |> Response.with_body (Body.of_stream next))
   in
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
@@ -78,7 +88,10 @@ let client_body_streamed () =
 
 (* ---- Stream.reuse_after_drain ---- *)
 let reuse_after_drain () =
-  let handler = Server.handler_func (fun w _r -> w.Server.write "hello") in
+  let handler =
+    Server.handler_func (fun ~sw:_ _r ->
+        Response.create () |> Response.with_body_string "hello")
+  in
   let client ~net ~sw ~clock ~port =
     let transport = Transport.create ~net ~clock () in
     let c = Client.create ~net ~clock ~transport () in
@@ -112,11 +125,20 @@ let cancel_mid_body () =
   let first, outcome =
     Test_harness.with_env (fun ~net ~clock ~sw ->
         let handler =
-          Server.handler_func (fun w _r ->
-              w.Server.write "early";
-              w.Server.flush ();
-              Eio.Time.sleep clock 5.0;
-              w.Server.write "late")
+          Server.handler_func (fun ~sw:_ _r ->
+              let phase = ref `Early in
+              let next () =
+                match !phase with
+                | `Early ->
+                    phase := `Late;
+                    Some "early"
+                | `Late ->
+                    Eio.Time.sleep clock 5.0;
+                    phase := `Done;
+                    Some "late"
+                | `Done -> None
+              in
+              Response.create () |> Response.with_body (Body.of_stream next))
         in
         let srv, port, serve_loop =
           Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"

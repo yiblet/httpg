@@ -10,7 +10,9 @@
 
 open Httpg
 
-let hello_handler = Server.handler_func (fun w _r -> w.Server.write "hello")
+let hello_handler =
+  Server.handler_func (fun ~sw:_ _r ->
+      Response.with_body_string "hello" (Response.create ()))
 
 (* Start [handler] (built via [mk_server ~net ~clock ~sw]) and run [fn r w] over
    a raw buffered client connection, then close the server. *)
@@ -317,8 +319,9 @@ let accepts_valid_host_and_headers () =
 (* ---- Expect: 100-continue handling + 417. *)
 let expect_100_continue () =
   let handler =
-    Server.handler_func (fun w r ->
-        w.Server.write (Body.read_all r.Request.body))
+    Server.handler_func (fun ~sw:_ r ->
+        Response.create ()
+        |> Response.with_body_string (Body.read_all r.Request.body))
   in
   let interim, rest =
     with_started ~secs:5.

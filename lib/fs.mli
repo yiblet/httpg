@@ -82,15 +82,14 @@ val to_http_error : error -> string * Httpg_base.Status.t
     {!Permission} → ["403 Forbidden"]/403, else
     ["500 Internal Server Error"]/500. *)
 
-val local_redirect :
-  Server.response_writer -> Body.t Request.t -> string -> unit
-(** Go's [localRedirect]: a 301 Moved Permanently to [new_path], preserving the
-    request's raw query, {b without} converting the path to absolute (unlike
-    {!Server.redirect}). *)
+val local_redirect : Body.t Request.t -> string -> Body.t Response.t
+(** Go's [localRedirect]: a 301 Moved Permanently response to [new_path],
+    preserving the request's raw query, {b without} converting the path to
+    absolute (unlike {!Server.redirect}). *)
 
-val dir_list : Server.response_writer -> Body.t Request.t -> file -> unit
-(** Go's [dirList]: write an HTML [<pre>] listing of the directory [f]'s entries
-    as escaped links; sets [Content-Type: text/html; charset=utf-8]. *)
+val dir_list : Body.t Request.t -> file -> Body.t Response.t
+(** Go's [dirList]: a [text/html] response with an HTML [<pre>] listing of the
+    directory [f]'s entries as escaped links. *)
 
 val scan_etag : string -> (string * string) option
 (** Go's [scanETag]: if a syntactically valid ETag (either ["\"text\""] or
@@ -99,19 +98,21 @@ val scan_etag : string -> (string * string) option
     otherwise [None]. *)
 
 val check_preconditions :
-  Server.response_writer -> Body.t Request.t -> modtime:float -> bool * string
+  header:Header.t ->
+  etag:string ->
+  Body.t Request.t ->
+  modtime:float ->
+  [ `Done of Body.t Response.t | `Range of string ]
 (** Go's [checkPreconditions]: evaluate request preconditions per RFC 7232
-    section 6 against [modtime] and the response's handler-set [Etag] header.
-    Returns [(done_, range_header)]: if a precondition short-circuits the
-    response it writes it ({b 304} via [writeNotModified] — clears
-    Content-Type/Length/Encoding, drops Last-Modified when an Etag is set,
-    status 304 no body — for a matched If-None-Match/If-Modified-Since on
-    GET/HEAD, or {b 412} Precondition Failed for a failed
-    If-Match/If-Unmodified-Since, or for a matched If-None-Match on a
-    non-GET/HEAD method) and returns [done_ = true]. Otherwise [done_ = false]
-    and [range_header] is the request's [Range] header, blanked out when an
-    If-Range condition fails (so the range is not honored). Precedence: If-Match
-    → If-Unmodified-Since → If-None-Match → If-Modified-Since, then If-Range. *)
+    section 6 against [modtime] and [etag] (the response's [Etag]). [header] is
+    the response header built so far, used to shape a short-circuit response.
+    Returns [`Done resp] when a precondition short-circuits — {b 304} (clears
+    Content-Type/Length/Encoding, drops Last-Modified when an Etag is set) for a
+    matched If-None-Match/If-Modified-Since on GET/HEAD, or {b 412} Precondition
+    Failed for a failed If-Match/If-Unmodified-Since (or a matched If-None-Match
+    on a non-GET/HEAD method) — otherwise [`Range range_header], the request's
+    [Range] blanked out when an If-Range condition fails. Precedence: If-Match →
+    If-Unmodified-Since → If-None-Match → If-Modified-Since, then If-Range. *)
 
 type http_range = { start : int64; length : int64 }
 (** Go's [httpRange]: a single requested byte range, [start] inclusive, [length]
@@ -136,34 +137,36 @@ val parse_range : string -> int64 -> (http_range list, error) result
     content. An empty header returns [Ok []]. *)
 
 val serve_content :
-  Server.response_writer ->
+  ?header:Header.t ->
   Body.t Request.t ->
   name:string ->
   modtime:float ->
   size:int64 ->
   read_window:(off:int64 -> len:int -> string) ->
-  unit
-(** Go's [ServeContent] core. Sets [Content-Type] (a small extension→MIME table,
-    falling back to {!Sniff.detect_content_type} on the first bytes when the
-    handler left it unset), [Last-Modified] (via {!Http_time.format_gmt}, unless
-    [modtime] is the zero/epoch time), [Accept-Ranges: bytes] and
-    [Content-Length], then streams the content (skipping the body for a HEAD
-    request). Calls {!check_preconditions} first (304/412). If the (If-Range
-    gated) [Range] header is satisfiable it serves {b 206}: a single range with
-    a [Content-Range] header and just that window, or multiple ranges as a
-    [multipart/byteranges] body (deterministic boundary) with per-part
-    [Content-Range]/[Content-Type]; an unsatisfiable range serves {b 416} with
-    [Content-Range: bytes */SIZE]. [read_window] reads a bounded window of the
-    content (used for the sniff probe, the body stream, and each range). *)
+  Body.t Response.t
+(** Go's [ServeContent] core, building the response. [?header] carries
+    caller-set fields ([Etag] for the precondition checks, an explicit
+    [Content-Type]); it is taken as the starting response header (copied, not
+    mutated). Sets [Content-Type] (a small extension→MIME table, falling back to
+    {!Sniff.detect_content_type} on the first bytes when unset), [Last-Modified]
+    (unless [modtime] is the zero/epoch time), [Accept-Ranges: bytes] and the
+    Content-Length, with the body a {!Body.Stream} over [read_window] (empty for
+    a HEAD). Evaluates {!check_preconditions} first (304/412). A satisfiable
+    (If-Range gated) [Range] yields {b 206}: a single range with [Content-Range]
+    and just that window, or multiple ranges as a [multipart/byteranges] body
+    (deterministic boundary) assembled with {!Body.concat}; an unsatisfiable
+    range yields {b 416} with [Content-Range: bytes */SIZE]. *)
 
 val serve_file :
-  Server.response_writer ->
+  sw:Eio.Switch.t ->
   Body.t Request.t ->
   file_system ->
   string ->
   redirect:bool ->
-  unit
-(** Go's [serveFile]: serve [name] from [fs]. Redirects [".../index.html"] to
+  Body.t Response.t
+(** Go's [serveFile]: serve [name] from [fs] as a response. Files are opened
+    under [~sw] (the request switch) so a streamed body outlives this call and
+    the fd is closed when the request finishes. Redirects [".../index.html"] to
     ["./"]; when [redirect] is set, redirects a directory URL lacking a trailing
     slash to [dir/] (and a file URL with a trailing slash to [../base]). A
     directory serves its [index.html] if present, else {!dir_list}; a regular

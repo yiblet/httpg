@@ -36,6 +36,35 @@ let error_to_string = function
 
 type file_system = { open_ : sw:Eio.Switch.t -> string -> (file, error) result }
 
+(* Build a response carrying [header] (taken verbatim), [body], and [status].
+   [content_length] defaults to the body's known length ([Stream] → -1, i.e.
+   chunked/close), but byte-range responses pass an explicit length so the
+   stream is sent with an exact Content-Length. proto is left HTTP/1.1; the
+   serve loop derives the wire proto from the request. *)
+let respond ~header ?(body = Body.Empty) ?content_length status :
+    Body.t Response.t =
+  let content_length =
+    match content_length with
+    | Some n -> n
+    | None -> (
+        match body with
+        | Body.String s -> Int64.of_int (String.length s)
+        | Body.Empty -> 0L
+        | Body.Stream _ -> -1L)
+  in
+  {
+    Response.status;
+    proto = Httpg_base.Protocol.Http11;
+    header;
+    body;
+    content_length;
+    transfer_encoding = [];
+    close = false;
+    uncompressed = false;
+    trailer = None;
+    request = None;
+  }
+
 (* Internal sentinel: [parse_range] raises this on a malformed Range header and
    [parse_range] maps it back to [Error (Invalid_range _)] at the boundary. *)
 exception Invalid_range_sentinel of string
@@ -179,15 +208,15 @@ let to_http_error = function
   | No_overlap | Invalid_range _ | Other _ ->
       ("500 Internal Server Error", Httpg_base.Status.InternalServerError)
 
-let local_redirect w (r : Body.t Request.t) new_path =
+let local_redirect (r : Body.t Request.t) new_path : Body.t Response.t =
   let new_path =
     match Uri.verbatim_query r.Request.url with
     | Some q when q <> "" -> new_path ^ "?" ^ q
     | _ -> new_path
   in
-  let h = w.Server.header () in
+  let h = Header.create () in
   Header.set h "Location" new_path;
-  w.Server.write_header Httpg_base.Status.MovedPermanently
+  respond ~header:h Httpg_base.Status.MovedPermanently
 
 (* ---- dirList ---- *)
 
@@ -210,29 +239,33 @@ let html_escape s =
     s;
   Buffer.contents buf
 
-let dir_list w (r : Body.t Request.t) (f : file) =
+let dir_list (_r : Body.t Request.t) (f : file) : Body.t Response.t =
   match f.readdir () with
   | exception _ ->
-      Server.error w "Error reading directory"
+      Server.error "Error reading directory"
         Httpg_base.Status.InternalServerError
   | entries ->
       let entries =
         List.sort (fun a b -> compare a.fi_name b.fi_name) entries
       in
-      let h = w.Server.header () in
-      Header.set h "Content-Type" "text/html; charset=utf-8";
-      ignore r;
-      w.Server.write "<!doctype html>\n";
-      w.Server.write "<meta name=\"viewport\" content=\"width=device-width\">\n";
-      w.Server.write "<pre>\n";
+      let buf = Buffer.create 256 in
+      Buffer.add_string buf "<!doctype html>\n";
+      Buffer.add_string buf
+        "<meta name=\"viewport\" content=\"width=device-width\">\n";
+      Buffer.add_string buf "<pre>\n";
       List.iter
         (fun e ->
           let name = if e.fi_is_dir then e.fi_name ^ "/" else e.fi_name in
           let href = escape_path_href name in
-          w.Server.write
+          Buffer.add_string buf
             ("<a href=\"" ^ href ^ "\">" ^ html_escape name ^ "</a>\n"))
         entries;
-      w.Server.write "</pre>\n"
+      Buffer.add_string buf "</pre>\n";
+      let h = Header.create () in
+      Header.set h "Content-Type" "text/html; charset=utf-8";
+      respond ~header:h
+        ~body:(Body.String (Buffer.contents buf))
+        Httpg_base.Status.Ok
 
 (* ---- preconditions (Go fs.go: checkPreconditions + helpers) ---- *)
 
@@ -292,11 +325,11 @@ let etag_weak_match a b =
 type cond_result = Cond_none | Cond_true | Cond_false
 
 (* Go checkIfMatch. *)
-let check_if_match w (r : Body.t Request.t) =
+let check_if_match ~etag (r : Body.t Request.t) =
   let im = Header.get r.Request.header "If-Match" in
   if im = "" then Cond_none
   else begin
-    let etag_hdr = Header.get (w.Server.header ()) "Etag" in
+    let etag_hdr = etag in
     let rec loop im =
       let im = trim_string im in
       if String.length im = 0 then Cond_false
@@ -324,11 +357,11 @@ let check_if_unmodified_since (r : Body.t Request.t) ~modtime =
         if modtime <= t then Cond_true else Cond_false
 
 (* Go checkIfNoneMatch. *)
-let check_if_none_match w (r : Body.t Request.t) =
+let check_if_none_match ~etag (r : Body.t Request.t) =
   let inm = Header.get r.Request.header "If-None-Match" in
   if inm = "" then Cond_none
   else begin
-    let etag_hdr = Header.get (w.Server.header ()) "Etag" in
+    let etag_hdr = etag in
     let rec loop buf =
       let buf = trim_string buf in
       if String.length buf = 0 then Cond_true
@@ -361,7 +394,7 @@ let check_if_modified_since (r : Body.t Request.t) ~modtime =
   end
 
 (* Go checkIfRange. *)
-let check_if_range w (r : Body.t Request.t) ~modtime =
+let check_if_range ~etag (r : Body.t Request.t) ~modtime =
   if
     r.Request.meth <> Httpg_base.Method.Get
     && r.Request.meth <> Httpg_base.Method.Head
@@ -371,10 +404,8 @@ let check_if_range w (r : Body.t Request.t) ~modtime =
     if ir = "" then Cond_none
     else
       begin match scan_etag ir with
-      | Some (etag, _) when etag <> "" ->
-          if etag_strong_match etag (Header.get (w.Server.header ()) "Etag")
-          then Cond_true
-          else Cond_false
+      | Some (etag', _) when etag' <> "" ->
+          if etag_strong_match etag' etag then Cond_true else Cond_false
       | _ -> (
           if
             (* The If-Range value is typically the ETag, but may also be the
@@ -391,64 +422,53 @@ let check_if_range w (r : Body.t Request.t) ~modtime =
   end
 
 (* Go writeNotModified: clears representation metadata and writes 304. *)
-let write_not_modified w =
-  let h = w.Server.header () in
+(* Go writeNotModified: a 304 response, clearing representation metadata from
+   the response header built so far. *)
+let not_modified_response header : Body.t Response.t =
+  let h = Header.clone header in
   Header.del h "Content-Type";
   Header.del h "Content-Length";
   Header.del h "Content-Encoding";
   if Header.get h "Etag" <> "" then Header.del h "Last-Modified";
-  w.Server.write_header Httpg_base.Status.NotModified
+  respond ~header:h Httpg_base.Status.NotModified
 
-(* Go checkPreconditions: evaluates request preconditions and reports whether a
-   precondition resulted in 304/412. Returns [(done_, range_header)]. RFC 7232
-   section 6: If-Match → If-Unmodified-Since → If-None-Match →
-   If-Modified-Since, then If-Range gates the Range header. *)
-let check_preconditions w (r : Body.t Request.t) ~modtime =
-  let ch = check_if_match w r in
+(* Go checkPreconditions: evaluate request preconditions. Returns either a
+   short-circuit 304/412 [`Done] response or the (If-Range-gated) [`Range]
+   header to use for the body. RFC 7232 §6: If-Match → If-Unmodified-Since →
+   If-None-Match → If-Modified-Since, then If-Range gates Range. [header] is the
+   response header built so far (carrying Etag/Last-Modified); [etag] is its
+   Etag. *)
+let check_preconditions ~header ~etag (r : Body.t Request.t) ~modtime :
+    [ `Done of Body.t Response.t | `Range of string ] =
+  let precondition_failed () =
+    `Done
+      (respond ~header:(Header.clone header)
+         Httpg_base.Status.PreconditionFailed)
+  in
+  let gated_range () =
+    let range_header = Header.get r.Request.header "Range" in
+    if range_header <> "" && check_if_range ~etag r ~modtime = Cond_false then
+      `Range ""
+    else `Range range_header
+  in
+  let ch = check_if_match ~etag r in
   let ch =
     if ch = Cond_none then check_if_unmodified_since r ~modtime else ch
   in
-  if ch = Cond_false then begin
-    w.Server.write_header Httpg_base.Status.PreconditionFailed;
-    (true, "")
-  end
+  if ch = Cond_false then precondition_failed ()
   else
-    begin match check_if_none_match w r with
+    match check_if_none_match ~etag r with
     | Cond_false ->
         if
           r.Request.meth = Httpg_base.Method.Get
           || r.Request.meth = Httpg_base.Method.Head
-        then begin
-          write_not_modified w;
-          (true, "")
-        end
-        else begin
-          w.Server.write_header Httpg_base.Status.PreconditionFailed;
-          (true, "")
-        end
+        then `Done (not_modified_response header)
+        else precondition_failed ()
     | Cond_none ->
-        if check_if_modified_since r ~modtime = Cond_false then begin
-          write_not_modified w;
-          (true, "")
-        end
-        else begin
-          let range_header = Header.get r.Request.header "Range" in
-          let range_header =
-            if range_header <> "" && check_if_range w r ~modtime = Cond_false
-            then ""
-            else range_header
-          in
-          (false, range_header)
-        end
-    | Cond_true ->
-        let range_header = Header.get r.Request.header "Range" in
-        let range_header =
-          if range_header <> "" && check_if_range w r ~modtime = Cond_false then
-            ""
-          else range_header
-        in
-        (false, range_header)
-    end
+        if check_if_modified_since r ~modtime = Cond_false then
+          `Done (not_modified_response header)
+        else gated_range ()
+    | Cond_true -> gated_range ()
 
 (* ---- byte ranges (Go fs.go: httpRange / parseRange / mimeHeader) ---- *)
 
@@ -605,125 +625,148 @@ let ext_of name =
 
 (* ---- setLastModified ---- *)
 
-let set_last_modified w modtime =
+(* Set Last-Modified on the response header being built (mutates [h]). *)
+let set_last_modified h modtime =
   if not (is_zero_time modtime) then
-    Header.set (w.Server.header ()) "Last-Modified"
-      (Http_time.format_gmt modtime)
+    Header.set h "Last-Modified" (Http_time.format_gmt modtime)
 
 (* Sniff probe length, mirroring internal.SniffLen (512). *)
 let sniff_len = 512
 
 (* ---- serveContent ---- *)
 
-(* Stream the byte window [start, start+length) to [w] in bounded chunks (Go's
-   io.CopyN over a seeked reader). *)
-let stream_window w ~read_window ~start ~length =
+(* A streaming body over the byte window [start, start+length), read in bounded
+   chunks (Go's io.CopyN over a seeked reader). The serve loop pulls it after the
+   handler returns; the file stays open under the request switch until then. *)
+let window_body ~read_window ~start ~length : Body.t =
   let chunk = 32 * 1024 in
-  let rec loop off remaining =
-    if remaining <= 0L then ()
-    else begin
-      let len =
-        if remaining < Int64.of_int chunk then Int64.to_int remaining else chunk
-      in
-      let data = read_window ~off ~len in
-      if data = "" then ()
+  let off = ref start and remaining = ref length in
+  Body.of_stream (fun () ->
+      if !remaining <= 0L then None
       else begin
-        w.Server.write data;
-        loop
-          (Int64.add off (Int64.of_int (String.length data)))
-          (Int64.sub remaining (Int64.of_int (String.length data)))
-      end
-    end
-  in
-  loop start length
+        let len =
+          if !remaining < Int64.of_int chunk then Int64.to_int !remaining
+          else chunk
+        in
+        let data = read_window ~off:!off ~len in
+        if data = "" then None
+        else begin
+          off := Int64.add !off (Int64.of_int (String.length data));
+          remaining := Int64.sub !remaining (Int64.of_int (String.length data));
+          Some data
+        end
+      end)
 
 (* Full-body 200 path (no range, or range ignored). *)
-let serve_full w (r : Body.t Request.t) ~h ~size ~read_window =
+let serve_full (r : Body.t Request.t) ~h ~size ~read_window : Body.t Response.t
+    =
   Header.set h "Accept-Ranges" "bytes";
-  if Header.get h "Content-Encoding" = "" then
-    Header.set h "Content-Length" (Int64.to_string size);
-  w.Server.write_header Httpg_base.Status.Ok;
-  if r.Request.meth = Httpg_base.Method.Head then ()
-  else stream_window w ~read_window ~start:0L ~length:size
+  (* Go sends Content-Length only when there is no Content-Encoding. *)
+  let content_length =
+    if Header.get h "Content-Encoding" = "" then size else -1L
+  in
+  let body =
+    if r.Request.meth = Httpg_base.Method.Head then Body.Empty
+    else window_body ~read_window ~start:0L ~length:size
+  in
+  respond ~header:h ~body ~content_length Httpg_base.Status.Ok
 
-let serve_content w (r : Body.t Request.t) ~name ~modtime ~size ~read_window =
-  set_last_modified w modtime;
-  let done_, range_req = check_preconditions w r ~modtime in
-  if done_ then ()
-  else begin
-    let h = w.Server.header () in
-    (* Content-Type: ext table → Sniff fallback, unless the handler set it. *)
-    if not (Header.has h "Content-Type") then
-      begin match mime_by_ext (ext_of name) with
-      | Some ctype -> Header.set h "Content-Type" ctype
-      | None ->
-          let probe =
-            if size < Int64.of_int sniff_len then Int64.to_int size
-            else sniff_len
-          in
-          let buf = read_window ~off:0L ~len:probe in
-          Header.set h "Content-Type" (Sniff.detect_content_type buf)
-      end;
-    let ctype = Header.get h "Content-Type" in
-    (* parse the (If-Range-gated) Range header, then dispatch
-       full-200 / single-206 / multipart-206 / 416. *)
-    match parse_range range_req size with
-    | Error No_overlap when size = 0L ->
-        (* Empty file + unsatisfiable range: ignore the range, serve 200. *)
-        serve_full w r ~h ~size ~read_window
-    | Error No_overlap ->
-        Header.set h "Content-Range" (Printf.sprintf "bytes */%Ld" size);
-        Server.error w "invalid range: failed to overlap"
-          Httpg_base.Status.RequestedRangeNotSatisfiable
-    | Error (Invalid_range _) ->
-        Server.error w "invalid range"
-          Httpg_base.Status.RequestedRangeNotSatisfiable
-    | Error (Not_exist | Permission | Invalid_unsafe_path | Other _) ->
-        (* parse_range only yields No_overlap / Invalid_range; the rest are
-           unreachable here but keep the match exhaustive. *)
-        Server.error w "invalid range"
-          Httpg_base.Status.RequestedRangeNotSatisfiable
-    | Ok ranges -> (
-        (* If the total range size exceeds the file, treat as no range (Go). *)
-        let ranges = if sum_ranges_size ranges > size then [] else ranges in
-        Header.set h "Accept-Ranges" "bytes";
-        match ranges with
-        | [] -> serve_full w r ~h ~size ~read_window
-        | [ ra ] ->
-            (* single range → 206 + Content-Range *)
-            Header.set h "Content-Range" (content_range ra size);
-            Header.set h "Content-Length" (Int64.to_string ra.length);
-            w.Server.write_header Httpg_base.Status.PartialContent;
-            if r.Request.meth = Httpg_base.Method.Head then ()
-            else stream_window w ~read_window ~start:ra.start ~length:ra.length
-        | ranges ->
-            (* multiple ranges → 206 multipart/byteranges *)
-            let send_size = ranges_mime_size ranges ~content_type:ctype ~size in
-            Header.set h "Content-Type"
-              ("multipart/byteranges; boundary=" ^ multipart_boundary);
-            Header.set h "Content-Length" (Int64.to_string send_size);
-            w.Server.write_header Httpg_base.Status.PartialContent;
-            if r.Request.meth = Httpg_base.Method.Head then ()
-            else begin
-              List.iteri
-                (fun idx ra ->
-                  let prefix =
-                    if idx = 0 then Printf.sprintf "--%s\r\n" multipart_boundary
-                    else Printf.sprintf "\r\n--%s\r\n" multipart_boundary
+let serve_content ?(header = Header.create ()) (r : Body.t Request.t) ~name
+    ~modtime ~size ~read_window : Body.t Response.t =
+  (* [header] carries caller-set fields (e.g. Etag, an explicit Content-Type).
+     We build the response header on a clone so the caller's value is untouched. *)
+  let h = Header.clone header in
+  set_last_modified h modtime;
+  let etag = Header.get h "Etag" in
+  match check_preconditions ~header:h ~etag r ~modtime with
+  | `Done resp -> resp
+  | `Range range_req ->
+      (* Content-Type: ext table → Sniff fallback, unless the caller set it. *)
+      (if not (Header.has h "Content-Type") then
+         match mime_by_ext (ext_of name) with
+         | Some ctype -> Header.set h "Content-Type" ctype
+         | None ->
+             let probe =
+               if size < Int64.of_int sniff_len then Int64.to_int size
+               else sniff_len
+             in
+             let buf = read_window ~off:0L ~len:probe in
+             Header.set h "Content-Type" (Sniff.detect_content_type buf));
+      let ctype = Header.get h "Content-Type" in
+      let is_head = r.Request.meth = Httpg_base.Method.Head in
+      (* parse the (If-Range-gated) Range header, then dispatch
+         full-200 / single-206 / multipart-206 / 416. *)
+      let range_error msg =
+        Server.error msg Httpg_base.Status.RequestedRangeNotSatisfiable
+      in
+      begin match parse_range range_req size with
+      | Error No_overlap when size = 0L ->
+          (* Empty file + unsatisfiable range: ignore the range, serve 200. *)
+          serve_full r ~h ~size ~read_window
+      | Error No_overlap ->
+          range_error "invalid range: failed to overlap"
+          |> Response.with_set_header "Content-Range"
+               (Printf.sprintf "bytes */%Ld" size)
+      | Error _ -> range_error "invalid range"
+      | Ok ranges -> (
+          (* If the total range size exceeds the file, treat as no range (Go). *)
+          let ranges = if sum_ranges_size ranges > size then [] else ranges in
+          Header.set h "Accept-Ranges" "bytes";
+          match ranges with
+          | [] -> serve_full r ~h ~size ~read_window
+          | [ ra ] ->
+              (* single range → 206 + Content-Range *)
+              Header.set h "Content-Range" (content_range ra size);
+              let body =
+                if is_head then Body.Empty
+                else window_body ~read_window ~start:ra.start ~length:ra.length
+              in
+              respond ~header:h ~body ~content_length:ra.length
+                Httpg_base.Status.PartialContent
+          | ranges ->
+              (* multiple ranges → 206 multipart/byteranges *)
+              let send_size =
+                ranges_mime_size ranges ~content_type:ctype ~size
+              in
+              Header.set h "Content-Type"
+                ("multipart/byteranges; boundary=" ^ multipart_boundary);
+              let body =
+                if is_head then Body.Empty
+                else
+                  let parts =
+                    List.concat
+                      (List.mapi
+                         (fun idx ra ->
+                           let prefix =
+                             if idx = 0 then
+                               Printf.sprintf "--%s\r\n" multipart_boundary
+                             else
+                               Printf.sprintf "\r\n--%s\r\n" multipart_boundary
+                           in
+                           let hdrs =
+                             List.fold_left
+                               (fun acc (k, v) ->
+                                 acc ^ Printf.sprintf "%s: %s\r\n" k v)
+                               ""
+                               (mime_header ra ~content_type:ctype ~size)
+                           in
+                           [
+                             Body.String (prefix ^ hdrs ^ "\r\n");
+                             window_body ~read_window ~start:ra.start
+                               ~length:ra.length;
+                           ])
+                         ranges)
                   in
-                  let hdrs =
-                    List.fold_left
-                      (fun acc (k, v) -> acc ^ Printf.sprintf "%s: %s\r\n" k v)
-                      ""
-                      (mime_header ra ~content_type:ctype ~size)
-                  in
-                  w.Server.write (prefix ^ hdrs ^ "\r\n");
-                  stream_window w ~read_window ~start:ra.start ~length:ra.length)
-                ranges;
-              w.Server.write
-                (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary)
-            end)
-  end
+                  Body.concat
+                    (parts
+                    @ [
+                        Body.String
+                          (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary);
+                      ])
+              in
+              respond ~header:h ~body ~content_length:send_size
+                Httpg_base.Status.PartialContent)
+      end
 
 (* ---- serveFile ---- *)
 
@@ -756,100 +799,97 @@ let trim_suffix s suffix =
     String.sub s 0 (String.length s - String.length suffix)
   else s
 
-let serve_file w (r : Body.t Request.t) (fs : file_system) name ~redirect =
+(* The request switch [~sw] owns any file opened here: a served body is a
+   {!Body.Stream} the serve loop pulls *after* this returns, so the fd must
+   outlive the call — [~sw] (released once the response is sent) replaces Go's
+   [defer f.Close]. *)
+let serve_file ~sw (r : Body.t Request.t) (fs : file_system) name ~redirect :
+    Body.t Response.t =
   let upath = Uri.path r.Request.url in
   (* redirect .../index.html to .../ *)
-  if ends_with upath index_page then local_redirect w r "./"
+  if ends_with upath index_page then local_redirect r "./"
   else
-    (* One switch scopes the open file(s) for the whole serve; teardown closes any
-     still-open fd on every exit (return, error, cancel) — Go's defer f.Close. *)
-    Eio.Switch.run @@ fun sw ->
     match fs.open_ ~sw name with
     | Error e ->
         let msg, code = to_http_error e in
-        Server.error w msg code
-    | Ok f ->
-        Fun.protect ~finally:f.close (fun () ->
-            let d = f.stat () in
-            (* canonical-path redirects *)
-            let redirected =
-              if not redirect then None
-              else begin
-                let url = upath in
-                if d.fi_is_dir then
-                  begin if
-                    String.length url > 0 && url.[String.length url - 1] <> '/'
-                  then Some (`Local (path_base url ^ "/"))
-                  else None
-                  end
-                else if
-                  String.length url > 0 && url.[String.length url - 1] = '/'
-                then begin
-                  let base = path_base url in
-                  if base = "/" || base = "." then Some `NonDir
-                  else Some (`Local ("../" ^ base))
+        Server.error msg code
+    | Ok f -> (
+        let d = f.stat () in
+        (* canonical-path redirects *)
+        let redirected =
+          if not redirect then None
+          else begin
+            let url = upath in
+            if d.fi_is_dir then
+              begin if
+                String.length url > 0 && url.[String.length url - 1] <> '/'
+              then Some (`Local (path_base url ^ "/"))
+              else None
+              end
+            else if String.length url > 0 && url.[String.length url - 1] = '/'
+            then begin
+              let base = path_base url in
+              if base = "/" || base = "." then Some `NonDir
+              else Some (`Local ("../" ^ base))
+            end
+            else None
+          end
+        in
+        match redirected with
+        | Some `NonDir ->
+            Server.error "http: attempting to traverse a non-directory"
+              Httpg_base.Status.InternalServerError
+        | Some (`Local target) -> local_redirect r target
+        | None ->
+            (* directory: redirect if no trailing slash, else index/list *)
+            if
+              d.fi_is_dir
+              && (upath = "" || upath.[String.length upath - 1] <> '/')
+            then local_redirect r (path_base upath ^ "/")
+            else begin
+              (* try index.html for a directory *)
+              let index_opt =
+                if d.fi_is_dir then begin
+                  let index = trim_suffix name "/" ^ index_page in
+                  match fs.open_ ~sw index with
+                  | Ok ff -> Some (ff, ff.stat ())
+                  | Error _ -> None
                 end
                 else None
-              end
-            in
-            match redirected with
-            | Some `NonDir ->
-                Server.error w "http: attempting to traverse a non-directory"
-                  Httpg_base.Status.InternalServerError
-            | Some (`Local target) -> local_redirect w r target
-            | None ->
-                (* directory: redirect if no trailing slash, else index/list *)
-                if
-                  d.fi_is_dir
-                  && (upath = "" || upath.[String.length upath - 1] <> '/')
-                then local_redirect w r (path_base upath ^ "/")
-                else begin
-                  (* try index.html for a directory *)
-                  let index_opt =
-                    if d.fi_is_dir then begin
-                      let index = trim_suffix name "/" ^ index_page in
-                      match fs.open_ ~sw index with
-                      | Ok ff -> Some (ff, ff.stat ())
-                      | Error _ -> None
-                    end
-                    else None
-                  in
-                  match index_opt with
-                  | Some (ff, dd) when not dd.fi_is_dir ->
-                      Fun.protect ~finally:ff.close (fun () ->
-                          serve_content w r ~name:dd.fi_name
-                            ~modtime:dd.fi_mod_time ~size:dd.fi_size
-                            ~read_window:ff.read_window)
-                  | index_opt ->
-                      (* close an opened-but-unusable index *)
-                      (match index_opt with
-                      | Some (ff, _) -> ff.close ()
-                      | None -> ());
-                      if d.fi_is_dir then
-                        begin if
-                          check_if_modified_since r ~modtime:d.fi_mod_time
-                          = Cond_false
-                        then write_not_modified w
-                        else begin
-                          set_last_modified w d.fi_mod_time;
-                          dir_list w r f
-                        end
-                        end
+              in
+              match index_opt with
+              | Some (ff, dd) when not dd.fi_is_dir ->
+                  serve_content r ~name:dd.fi_name ~modtime:dd.fi_mod_time
+                    ~size:dd.fi_size ~read_window:ff.read_window
+              | _ ->
+                  if d.fi_is_dir then
+                    if
+                      check_if_modified_since r ~modtime:d.fi_mod_time
+                      = Cond_false
+                    then not_modified_response (Header.create ())
+                    else begin
+                      let resp = dir_list r f in
+                      if is_zero_time d.fi_mod_time then resp
                       else
-                        serve_content w r ~name:d.fi_name ~modtime:d.fi_mod_time
-                          ~size:d.fi_size ~read_window:f.read_window
-                end)
+                        Response.with_set_header "Last-Modified"
+                          (Http_time.format_gmt d.fi_mod_time)
+                          resp
+                    end
+                  else
+                    serve_content r ~name:d.fi_name ~modtime:d.fi_mod_time
+                      ~size:d.fi_size ~read_window:f.read_window
+            end)
 
 (* ---- FileServer ---- *)
 
 let file_server root =
-  let serve_http w (r : Body.t Request.t) =
+  let serve_http ~sw (r : Body.t Request.t) =
     let upath = Uri.path r.Request.url in
     (* Go: if !strings.HasPrefix(upath, "/") { upath = "/"+upath; r.URL.Path = upath } *)
     let has_prefix = String.length upath > 0 && upath.[0] = '/' in
     let upath = if not has_prefix then "/" ^ upath else upath in
     if not has_prefix then r.Request.url <- Uri.with_path r.Request.url upath;
     let cleaned = Pattern.path_clean upath in
-    serve_file w r root cleaned ~redirect:true
+    serve_file ~sw r root cleaned ~redirect:true
   in
   Server.handler_func serve_http

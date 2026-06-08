@@ -8,6 +8,62 @@ let empty = Empty
 let of_string s = String s
 let of_stream f = Stream f
 
+type stream = unit -> string option
+
+let as_stream (b : t) =
+  match b with
+  | Empty -> fun () -> None
+  | String s ->
+      let returned = ref false in
+      fun () ->
+        if !returned then None
+        else begin
+          returned := true;
+          Some s
+        end
+  | Stream next -> next
+
+let append_stream (s1 : stream) (s2 : stream) : stream =
+  let s1_completed = ref false in
+  let next () =
+    if !s1_completed then s2 ()
+    else
+      match s1 () with
+      | None ->
+          s1_completed := true;
+          s2 ()
+      | Some s -> Some s
+  in
+  next
+
+let append (b1 : t) (b2 : t) : t =
+  match (b1, b2) with
+  | Empty, _ -> b2
+  | _, Empty -> b1
+  | _, _ -> Stream (append_stream (as_stream b1) (as_stream b2))
+
+let concat (gens : t list) : t =
+  let remaining = ref gens in
+  let rec next () =
+    match !remaining with
+    | [] -> None
+    | g :: rest -> (
+        match g with
+        | Empty ->
+            remaining := rest;
+            next ()
+        | String s ->
+            remaining := rest;
+            Some s
+        | Stream st -> (
+            match st () with
+            | None ->
+                remaining := rest;
+                next ()
+            | Some s -> Some s))
+  in
+  Stream next
+
 let read_all (b : t) : string =
   match b with
   | Empty -> ""

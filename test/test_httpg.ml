@@ -41,7 +41,6 @@ let () =
        ("Fs", Test_fs.tests);
        ("Fs_conditional", Test_fs_conditional.tests);
        ("Fs_range", Test_fs_range.tests);
-       ("Httptest", Test_httptest.tests);
        ("Httptest_server", Test_httptest_server.tests);
        ("Request_form", Test_request_form.tests);
        ("Abuse", Test_abuse.tests);

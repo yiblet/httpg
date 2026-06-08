@@ -79,7 +79,9 @@ let send w s =
 
 (* ---- handlers ---- *)
 
-let hello_handler = Server.handler_func (fun w _r -> w.Server.write "hello")
+let hello_handler =
+  Server.handler_func (fun ~sw:_ _r ->
+      Response.with_body_string "hello" (Response.create ()))
 
 (* ---- tests ---- *)
 
@@ -96,7 +98,8 @@ let hello_handler_test () =
 
 let not_found_test () =
   let mux = Server.new_serve_mux () in
-  handle_func mux "/known" (fun w _r -> w.Server.write "ok");
+  handle_func mux "/known" (fun ~sw:_ _r ->
+      Response.with_body_string "ok" (Response.create ()));
   let resp =
     with_raw_client (Server.serve_mux_handler mux) (fun r w ->
         send w
@@ -115,9 +118,12 @@ let not_found_test () =
 
 let mux_routing_test () =
   let mux = Server.new_serve_mux () in
-  handle_func mux "/a" (fun w _r -> w.Server.write "handler-a");
-  handle_func mux "/b" (fun w _r -> w.Server.write "handler-b");
-  handle_func mux "POST /c" (fun w _r -> w.Server.write "handler-c-post");
+  handle_func mux "/a" (fun ~sw:_ _r ->
+      Response.with_body_string "handler-a" (Response.create ()));
+  handle_func mux "/b" (fun ~sw:_ _r ->
+      Response.with_body_string "handler-b" (Response.create ()));
+  handle_func mux "POST /c" (fun ~sw:_ _r ->
+      Response.with_body_string "handler-c-post" (Response.create ()));
   let h = Server.serve_mux_handler mux in
   let get path r w =
     send w
@@ -181,16 +187,25 @@ let http10_close_test () =
 (* Registering two conflicting patterns returns [Error (Register _)]. *)
 let handle_conflict_result () =
   let mux = Server.new_serve_mux () in
-  (match Server.handle_func mux "/a/{x}" (fun w _r -> w.Server.write "a") with
+  (match
+     Server.handle_func mux "/a/{x}" (fun ~sw:_ _r ->
+         Response.with_body_string "a" (Response.create ()))
+   with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "first registration should succeed");
-  (match Server.handle_func mux "/a/{y}" (fun w _r -> w.Server.write "b") with
+  (match
+     Server.handle_func mux "/a/{y}" (fun ~sw:_ _r ->
+         Response.with_body_string "b" (Response.create ()))
+   with
   | Error (Server.Register msg) ->
       Alcotest.(check bool)
         "conflict message" true
         (contains msg "conflicts with")
   | Ok () -> Alcotest.fail "conflicting registration should be Error");
-  match Server.handle_func mux "" (fun w _r -> w.Server.write "c") with
+  match
+    Server.handle_func mux "" (fun ~sw:_ _r ->
+        Response.with_body_string "c" (Response.create ()))
+  with
   | Error (Server.Register _) -> ()
   | Ok () -> Alcotest.fail "empty pattern should be Error"
 

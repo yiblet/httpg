@@ -16,22 +16,27 @@
 open Httpg
 
 let handler =
-  Server.handler_func (fun w r ->
-      w.Server.write
-        (Printf.sprintf "Hello from httpg! You requested %s\n"
-           (Uri.path r.Request.url)))
+  Server.handler_func (fun ~sw:_ r ->
+      Response.create ()
+      |> Response.with_body_string
+           (Printf.sprintf "Hello from httpg! You requested %s\n"
+              (Uri.path r.Request.url)))
 
-(* Streaming handler: emit a sequence of chunks, flushing between each so the
-   client can observe them before the handler returns. *)
+(* Streaming handler: return a [Body.Stream] that yields a sequence of chunks.
+   The serve loop pulls and flushes each chunk, so the client observes them
+   incrementally (and the unknown-length body is framed Transfer-Encoding:
+   chunked). *)
 let streaming_handler =
-  Server.handler_func (fun w _r ->
-      List.iter
-        (fun c ->
-          w.Server.write c;
-          (* flush pushes this chunk out now (and on the first call forces the
-             framing decision -> Transfer-Encoding: chunked). *)
-          w.Server.flush ())
-        [ "chunk-1\n"; "chunk-2\n"; "chunk-3\n"; "chunk-4\n" ])
+  Server.handler_func (fun ~sw:_ _r ->
+      let chunks = ref [ "chunk-1\n"; "chunk-2\n"; "chunk-3\n"; "chunk-4\n" ] in
+      let next () =
+        match !chunks with
+        | [] -> None
+        | c :: rest ->
+            chunks := rest;
+            Some c
+      in
+      Response.create () |> Response.with_body (Body.of_stream next))
 
 (* Bind an ephemeral server, fork its accept loop under [sw], run [body url],
    then close. *)

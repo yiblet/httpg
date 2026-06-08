@@ -81,15 +81,26 @@ let send_get w =
 let server_streams_unbuffered () =
   let release, wake_release = Eio.Promise.create () in
   let handler =
-    Server.handler_func (fun w _r ->
-        w.Server.write "alpha";
-        w.Server.flush ();
-        (* Wait until the test confirms it received the first chunk. *)
-        Eio.Promise.await release;
-        w.Server.write "beta";
-        w.Server.flush ();
-        w.Server.write "gamma";
-        w.Server.flush ())
+    Server.handler_func (fun ~sw:_ _r ->
+        (* The streaming loop now lives in the body closure: the serve loop pulls
+           and flushes each chunk, so "alpha" reaches the client before "beta" is
+           produced (the second pull blocks on [release]). *)
+        let state = ref `Alpha in
+        let next () =
+          match !state with
+          | `Alpha ->
+              state := `Beta;
+              Some "alpha"
+          | `Beta ->
+              Eio.Promise.await release;
+              state := `Gamma;
+              Some "beta"
+          | `Gamma ->
+              state := `Done;
+              Some "gamma"
+          | `Done -> None
+        in
+        Response.create () |> Response.with_body (Body.of_stream next))
   in
   with_raw_client handler (fun r w ->
       send_get w;
@@ -118,7 +129,8 @@ let server_streams_unbuffered () =
 (* ---- Small response: <=2048 bytes => exact Content-Length, no chunking ---- *)
 let small_response () =
   let handler =
-    Server.handler_func (fun w _r -> w.Server.write "hello small body")
+    Server.handler_func (fun ~sw:_ _r ->
+        Response.with_body_string "hello small body" (Response.create ()))
   in
   with_raw_client handler (fun r w ->
       send_get w;
@@ -132,21 +144,28 @@ let small_response () =
         (header_has headers "transfer-encoding:[ \t]*chunked");
       Alcotest.(check string) "body" "hello small body" body)
 
-(* ---- Large response: >2048 bytes without flush => chunked, intact body ---- *)
+(* ---- Large String body: exact Content-Length regardless of size ----
+   Deviation from Go: with [Request -> Response] there is no
+   bufferBeforeChunkingSize heuristic — a [Body.String] always has a known
+   length and is sent with an exact Content-Length (chunking is reserved for an
+   unknown-length [Body.Stream], see [server_streams_unbuffered]). *)
 let large_response () =
   let payload = String.make 5000 'z' in
-  let handler = Server.handler_func (fun w _r -> w.Server.write payload) in
+  let handler =
+    Server.handler_func (fun ~sw:_ _r ->
+        Response.create () |> Response.with_body_string payload)
+  in
   with_raw_client handler (fun r w ->
       send_get w;
       let raw = read_to_eof r in
       let headers, body = split_headers raw in
       Alcotest.(check bool)
-        "chunked" true
-        (header_has headers "transfer-encoding:[ \t]*chunked");
+        "exact Content-Length" true
+        (header_has headers "content-length:[ \t]*5000");
       Alcotest.(check bool)
-        "no Content-Length" false
-        (header_has headers "content-length:");
-      Alcotest.(check string) "dechunked body" payload (dechunk body))
+        "not chunked" false
+        (header_has headers "transfer-encoding:[ \t]*chunked");
+      Alcotest.(check string) "body" payload body)
 
 let tests =
   [

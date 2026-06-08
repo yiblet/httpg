@@ -48,19 +48,19 @@ let scan_etag_unit () =
    mirroring Go's TestServeContent which sets w.Header()'s Etag before
    ServeContent. Uses the [Fs.dir] machinery so the file handle is managed. *)
 let etag_file_handler ~dir ~name ~etag =
-  Server.handler_func (fun w r ->
+  Server.handler_func (fun ~sw r ->
       let fsys = Fs.dir dir in
-      Eio.Switch.run @@ fun sw ->
+      (* Open under the request switch [~sw]: the served body streams from the
+         fd after the handler returns, so it must outlive this call. *)
       match fsys.Fs.open_ ~sw name with
-      | Error _ -> Server.error w "not found" Httpg_base.Status.NotFound
+      | Error _ -> Server.error "not found" Httpg_base.Status.NotFound
       | Ok f ->
-          Fun.protect ~finally:f.Fs.close (fun () ->
-              let d = f.Fs.stat () in
-              (match etag with
-              | Some e -> Header.set (w.Server.header ()) "Etag" e
-              | None -> ());
-              Fs.serve_content w r ~name:d.Fs.fi_name ~modtime:d.Fs.fi_mod_time
-                ~size:d.Fs.fi_size ~read_window:f.Fs.read_window))
+          let d = f.Fs.stat () in
+          let header = Header.create () in
+          (match etag with Some e -> Header.set header "Etag" e | None -> ());
+          Fs.serve_content ~header r ~name:d.Fs.fi_name
+            ~modtime:d.Fs.fi_mod_time ~size:d.Fs.fi_size
+            ~read_window:f.Fs.read_window)
 
 (* Build a GET to [url] with extra headers, send via [Client.do_] (304/412 are
    not redirects, so do_ returns them directly), read its body. *)

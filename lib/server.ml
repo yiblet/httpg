@@ -19,41 +19,36 @@ let http_time_now () =
     Http_time.month_names.(mo - 1)
     y h mi s
 
-(* ---- ResponseWriter / Handler ---- *)
+(* ---- Handler ---- *)
 
-(* Go's ResponseWriter interface. [header] returns the mutable header map the
-   handler writes to before the headers are flushed; [write_header] sets the
-   status; [write] writes body bytes (implicitly calling write_header 200 on
-   first use); [flush] forces the framing decision and pushes buffered bytes. *)
-type response_writer = {
-  header : unit -> Header.t;
-  write_header : Httpg_base.Status.t -> unit;
-  write : string -> unit;
-  flush : unit -> unit;
-}
+(* An axum-style handler: a request maps to a fully-built response. (Departs from
+   Go's [ServeHTTP(ResponseWriter, *Request)]: instead of mutating a writer, the
+   handler returns an immutable {!Response.t} that the serve loop flushes.
+   Streaming is expressed by a {!Body.Stream} body the runtime drives.)
 
-(* Go's Handler interface: ServeHTTP(ResponseWriter, *Request). *)
-type handler = { serve_http : response_writer -> Body.t Request.t -> unit }
+   [~sw] is the request's switch: it scopes resources whose lifetime must outlive
+   the handler return — a {!Body.Stream} body is pulled by the serve loop *after*
+   the handler returns, so a handler that streams from an opened resource (the
+   file server's file handle) must open it under [~sw], which is released once
+   the response has been sent. Most handlers ignore [~sw]. *)
+type handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
 
-(* Go's HandlerFunc adapter. *)
-let handler_func f = { serve_http = f }
+(* A trivial adapter kept for parity with Go's HandlerFunc; a [handler] is just
+   a function, so this is the identity. *)
+let handler_func (f : handler) : handler = f
 
 (* ---- helpers: Error / NotFound / Redirect (Go server.go) ---- *)
 
-let fprintln w s = w.write (s ^ "\n")
+(* Go's Error: a text/plain, nosniff response carrying the message + newline.
+   (Content-Length is derived from the body by the builder.) *)
+let error msg code =
+  Response.create () |> Response.with_status code
+  |> Response.with_set_header "Content-Type" "text/plain; charset=utf-8"
+  |> Response.with_set_header "X-Content-Type-Options" "nosniff"
+  |> Response.with_body_string (msg ^ "\n")
 
-(* Go's Error: reset Content-Type to text/plain, drop Content-Length, set the
-   nosniff option, write the status code, then the message + newline. *)
-let error w msg code =
-  let h = w.header () in
-  Header.del h "Content-Length";
-  Header.set h "Content-Type" "text/plain; charset=utf-8";
-  Header.set h "X-Content-Type-Options" "nosniff";
-  w.write_header code;
-  fprintln w msg
-
-let not_found w _r = error w "404 page not found" Httpg_base.Status.NotFound
-let not_found_handler () = handler_func not_found
+let not_found _r = error "404 page not found" Httpg_base.Status.NotFound
+let not_found_handler () = handler_func (fun ~sw:_ r -> not_found r)
 
 (* Go's htmlEscape (htmlReplacer). *)
 let html_escape s =
@@ -73,7 +68,7 @@ let html_escape s =
 (* Go's Redirect (HTTP/1.x subset): relative-target resolution against the
    request path is performed as in Go; non-ASCII hex-escaping is narrowed
    (ASCII targets pass through unchanged). *)
-let redirect w (r : Body.t Request.t) url code =
+let redirect (r : Body.t Request.t) url code : Body.t Response.t =
   let url =
     let u = Uri.of_string url in
     if Uri.scheme u = None && Uri.host u = None then begin
@@ -115,23 +110,26 @@ let redirect w (r : Body.t Request.t) url code =
     end
     else url
   in
-  let h = w.header () in
-  let had_ct = Header.has h "Content-Type" in
-  Header.set h "Location" url;
-  if
-    (not had_ct)
-    && (r.meth = Httpg_base.Method.Get || r.meth = Httpg_base.Method.Head)
-  then Header.set h "Content-Type" "text/html; charset=utf-8";
-  w.write_header code;
-  if (not had_ct) && r.meth = Httpg_base.Method.Get then
-    let body =
-      "<a href=\"" ^ html_escape url ^ "\">"
-      ^ Httpg_base.Status.to_string code
-      ^ "</a>.\n"
-    in
-    fprintln w body
+  let base =
+    Response.create () |> Response.with_status code
+    |> Response.with_set_header "Location" url
+  in
+  (* Set Content-Type for GET/HEAD; write the HTML body only for GET (Go's
+     Redirect). A fresh response never has a pre-set Content-Type. *)
+  match r.meth with
+  | Httpg_base.Method.Get ->
+      base
+      |> Response.with_set_header "Content-Type" "text/html; charset=utf-8"
+      |> Response.with_body_string
+           ("<a href=\"" ^ html_escape url ^ "\">"
+           ^ Httpg_base.Status.to_string code
+           ^ "</a>.\n")
+  | Httpg_base.Method.Head ->
+      base |> Response.with_set_header "Content-Type" "text/html; charset=utf-8"
+  | _ -> base
 
-let redirect_handler url code = handler_func (fun w r -> redirect w r url code)
+let redirect_handler url code =
+  handler_func (fun ~sw:_ r -> redirect r url code)
 
 (* ---- ServeMux ---- *)
 
@@ -263,12 +261,11 @@ let find_handler_finish mux ~host ~path m =
   | None ->
       let allowed = matching_methods mux host path in
       if List.length allowed > 0 then
-        handler_func (fun w _r ->
-            let hd = w.header () in
-            Header.set hd "Allow" (String.concat ", " allowed);
-            error w
+        handler_func (fun ~sw:_ _r ->
+            error
               (Httpg_base.Status.to_string Httpg_base.Status.MethodNotAllowed)
-              Httpg_base.Status.MethodNotAllowed)
+              Httpg_base.Status.MethodNotAllowed
+            |> Response.with_set_header "Allow" (String.concat ", " allowed))
       else not_found_handler ()
 
 (* Go's findHandler. *)
@@ -310,20 +307,23 @@ let find_handler mux (r : Body.t Request.t) =
   end
 
 (* Go's ServeMux.ServeHTTP. *)
-let serve_mux_serve_http mux w (r : Body.t Request.t) =
+let serve_mux_serve_http mux ~sw (r : Body.t Request.t) : Body.t Response.t =
   if r.request_uri = "*" then begin
+    let resp =
+      Response.create () |> Response.with_status Httpg_base.Status.BadRequest
+    in
     if Request.proto_at_least r 1 1 then
-      Header.set (w.header ()) "Connection" "close";
-    w.write_header Httpg_base.Status.BadRequest
+      Response.with_set_header "Connection" "close" resp
+    else resp
   end
-  else (find_handler mux r).serve_http w r
+  else (find_handler mux r) ~sw r
 
 let serve_mux_handler mux = handler_func (serve_mux_serve_http mux)
 
-(* ---- ResponseWriter implementation over an Eio.Buf_write.t ---- *)
+(* ---- Writing the handler's Response to the wire ---- *)
 
-(* Headers managed by the writer; excluded from the handler header block (Go's
-   excludedHeaders). *)
+(* Headers the serve loop frames itself; excluded from the response header block
+   (Go's excludedHeaders). *)
 let excluded_headers = [ "Content-Length"; "Transfer-Encoding"; "Connection" ]
 
 (* bodyAllowedForStatus: 1xx, 204, 304 carry no body. *)
@@ -333,10 +333,6 @@ let body_allowed_for_status status =
   else if code = 204 then false
   else if code = 304 then false
   else true
-
-(* Go's bufferBeforeChunkingSize (server.go:342): the response is buffered into a
-   bufio.Writer of this size before the framing decision is forced. *)
-let buffer_before_chunking_size = 2048
 
 (* Run the handler for one request on [w], returning whether the connection
    should be kept alive afterward. Mirrors Go's [response]/[chunkWriter]
@@ -349,180 +345,139 @@ let buffer_before_chunking_size = 2048
      not a zero-byte HEAD -> exact Content-Length, NO chunking (the common case).
    - Otherwise HTTP/1.1 -> Transfer-Encoding: chunked; HTTP/1.0 unknown length ->
      Connection: close, raw bytes, close at EOF. *)
-let serve_one w (r : Body.t Request.t) (h : handler) : bool =
-  let header = Header.create () in
-  let status = ref Httpg_base.Status.Ok in
-  let wrote_header = ref false in
-  let headers_emitted = ref false in
-  let chunking = ref false in
-  let handler_done = ref false in
-  let body_buf = Buffer.create 256 in
+(* Run the handler and flush its returned response to the wire, deciding the
+   framing from the response body's shape: a [String]/[Empty] body has an exact
+   Content-Length; a [Stream] body is unknown-length and sent chunked (HTTP/1.1)
+   or close-delimited (HTTP/1.0), one DATA flush per pulled chunk so the client
+   observes incremental delivery. Returns the keep-alive verdict. *)
+let serve_one ~sw w (r : Body.t Request.t) (h : handler) : bool =
+  let resp = h ~sw r in
   let is_head = r.meth = Httpg_base.Method.Head in
   let req_should_close = r.close in
   let close_after_reply = ref req_should_close in
   let proto = if Request.proto_at_least r 1 1 then "HTTP/1.1" else "HTTP/1.0" in
-  (* Emit the status line + headers, deciding the framing. Returns the
-     keep-alive verdict once the header block is written to [w]. *)
-  let emit_headers () =
-    headers_emitted := true;
-    let code = !status in
-    let body_allowed = body_allowed_for_status code in
-    let buffered = Buffer.contents body_buf in
-    (* Content-Type sniff from the first <=512 buffered bytes when unset. *)
-    (if body_allowed && not (Header.has header "Content-Type") then
-       if
-         not
-           (Httpg_internal.Ascii.equal_fold
-              (Header.get header "X-Content-Type-Options")
-              "nosniff")
-       then
-         if String.length buffered > 0 then
-           let sniff_src =
-             if String.length buffered > 512 then String.sub buffered 0 512
-             else buffered
-           in
-           Header.set header "Content-Type"
-             (Sniff.detect_content_type sniff_src));
-    if not (Header.has header "Date") then
-      Header.set header "Date" (http_time_now ());
-    let handler_conn_close =
-      Transfer.has_token
-        (String.lowercase_ascii (Header.get header "Connection"))
-        "close"
-    in
-    if handler_conn_close then close_after_reply := true;
-    let has_explicit_cl = Header.has header "Content-Length" in
-    let has_te = Header.has header "Transfer-Encoding" in
-    (* The exact-Content-Length common case (server.go:1353). *)
-    let auto_cl =
-      !handler_done && (not has_te) && body_allowed && (not has_explicit_cl)
-      && ((not is_head) || String.length buffered > 0)
-    in
-    let content_length =
-      if auto_cl then Some (String.length buffered)
-      else if has_explicit_cl then
-        int_of_string_opt (String.trim (Header.get header "Content-Length"))
-      else None
-    in
-    (* Framing: HEAD / no-body status -> no body framing. Else CL -> exact
-       length, no chunking. Else HTTP/1.1 -> chunked; HTTP/1.0 unknown length ->
-       close-delimited (server.go:1503). *)
-    if (not body_allowed) || (is_head && (not auto_cl) && not has_explicit_cl)
-    then chunking := false
-    else if content_length <> None then chunking := false
-    else if Request.proto_at_least r 1 1 then chunking := true
-    else begin
-      chunking := false;
-      close_after_reply := true
-    end;
-    (* HTTP/1.0 keep-alive (wants10KeepAlive, server.go:1369). *)
-    let wants10_keep_alive =
-      (not (Request.proto_at_least r 1 1))
-      && Request.proto_at_least r 1 0
-      && Transfer.has_token
-           (String.lowercase_ascii (Header.get r.Request.header "Connection"))
-           "keep-alive"
-    in
-    let sent_known_length =
-      is_head || content_length <> None || not body_allowed
-    in
-    let advertise10_keep_alive = ref false in
-    if not (Request.proto_at_least r 1 1) then
-      begin if wants10_keep_alive && sent_known_length && not req_should_close
-      then advertise10_keep_alive := true
-      else close_after_reply := true
-      end;
-    let keep_alive = not !close_after_reply in
-    let status_text = Httpg_base.Status.to_string code in
-    let code_int = Httpg_base.Status.to_int code in
-    let status_line =
-      if status_text = "" then
-        Printf.sprintf "%s %03d status code %d\r\n" proto code_int code_int
-      else Printf.sprintf "%s %03d %s\r\n" proto code_int status_text
-    in
-    let out = Buffer.create 256 in
-    Buffer.add_string out status_line;
-    (match content_length with
-    | Some n ->
-        Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" n)
-    | None ->
-        if !chunking then Buffer.add_string out "Transfer-Encoding: chunked\r\n");
-    if not keep_alive then Buffer.add_string out "Connection: close\r\n"
-    else if !advertise10_keep_alive then
-      Buffer.add_string out "Connection: keep-alive\r\n";
-    Header.write_subset header out ~exclude:excluded_headers;
-    Buffer.add_string out "\r\n";
-    Eio.Buf_write.string w (Buffer.contents out);
-    keep_alive
+  let header = resp.Response.header in
+  let code = resp.Response.status in
+  let body_allowed = body_allowed_for_status code in
+  (* Resolve the body into a leading chunk (for sniffing + exact length) and an
+     optional continuation. A String/Empty body is fully known; a Stream body is
+     unknown-length and streamed (we probe one chunk up front for sniffing). *)
+  let leading, tail_stream =
+    match resp.Response.body with
+    | Body.Empty -> ("", None)
+    | Body.String s -> (s, None)
+    | Body.Stream next -> (
+        match next () with Some c -> (c, Some next) | None -> ("", None))
   in
-  (* Push the buffered bytes under the decided framing; only after emit_headers. *)
-  let flush_buffered () =
-    let data = Buffer.contents body_buf in
-    Buffer.clear body_buf;
-    if is_head || String.length data = 0 then ()
-    else if !chunking then Transfer.chunked_writer_write w data
-    else Eio.Buf_write.string w data
+  let streaming = Option.is_some tail_stream in
+  (* Content-Type sniff from the first <=512 bytes when unset. *)
+  (if body_allowed && not (Header.has header "Content-Type") then
+     if
+       not
+         (Httpg_internal.Ascii.equal_fold
+            (Header.get header "X-Content-Type-Options")
+            "nosniff")
+     then
+       if String.length leading > 0 then
+         let src =
+           if String.length leading > 512 then String.sub leading 0 512
+           else leading
+         in
+         Header.set header "Content-Type" (Sniff.detect_content_type src));
+  if not (Header.has header "Date") then
+    Header.set header "Date" (http_time_now ());
+  if
+    Transfer.has_token
+      (String.lowercase_ascii (Header.get header "Connection"))
+      "close"
+  then close_after_reply := true;
+  (* Framing. A response with a declared [content_length] (>= 0) — including a
+     known-length [Stream] body, as the file server uses for byte ranges — is
+     sent with an exact Content-Length and raw (unchunked) bytes; an
+     unknown-length [Stream] is chunked (HTTP/1.1) or close-delimited (1.0). *)
+  let declared_cl = resp.Response.content_length in
+  let content_length =
+    if not body_allowed then None
+    else if declared_cl >= 0L then Some (Int64.to_int declared_cl)
+    else None
   in
-  let ensure_status () =
-    if not !wrote_header then begin
-      wrote_header := true;
-      status := Httpg_base.Status.Ok
+  let chunking =
+    body_allowed && streaming && content_length = None && (not is_head)
+    && Request.proto_at_least r 1 1
+  in
+  if
+    body_allowed && streaming && content_length = None
+    && not (Request.proto_at_least r 1 1)
+  then close_after_reply := true;
+  (* HTTP/1.0 keep-alive (wants10KeepAlive, server.go:1369). *)
+  let wants10_keep_alive =
+    (not (Request.proto_at_least r 1 1))
+    && Request.proto_at_least r 1 0
+    && Transfer.has_token
+         (String.lowercase_ascii (Header.get r.Request.header "Connection"))
+         "keep-alive"
+  in
+  let sent_known_length =
+    is_head || content_length <> None || not body_allowed
+  in
+  let advertise10_keep_alive = ref false in
+  if not (Request.proto_at_least r 1 1) then
+    if wants10_keep_alive && sent_known_length && not req_should_close then
+      advertise10_keep_alive := true
+    else close_after_reply := true;
+  let keep_alive = not !close_after_reply in
+  (* Status line + headers. *)
+  let code_int = Httpg_base.Status.to_int code in
+  let status_text = Httpg_base.Status.to_string code in
+  let status_line =
+    if status_text = "" then
+      Printf.sprintf "%s %03d status code %d\r\n" proto code_int code_int
+    else Printf.sprintf "%s %03d %s\r\n" proto code_int status_text
+  in
+  let out = Buffer.create 256 in
+  Buffer.add_string out status_line;
+  (match content_length with
+  | Some n -> Buffer.add_string out (Printf.sprintf "Content-Length: %d\r\n" n)
+  | None ->
+      if chunking then Buffer.add_string out "Transfer-Encoding: chunked\r\n");
+  if not keep_alive then Buffer.add_string out "Connection: close\r\n"
+  else if !advertise10_keep_alive then
+    Buffer.add_string out "Connection: keep-alive\r\n";
+  Header.write_subset header out ~exclude:excluded_headers;
+  Buffer.add_string out "\r\n";
+  Eio.Buf_write.string w (Buffer.contents out);
+  (* Body. *)
+  if is_head then ()
+  else if not streaming then
+    begin if String.length leading > 0 then Eio.Buf_write.string w leading
     end
-  in
-  let rw =
-    {
-      header = (fun () -> header);
-      write_header =
-        (fun code ->
-          if not !wrote_header then begin
-            wrote_header := true;
-            status := code
-          end);
-      write =
-        (fun data ->
-          ensure_status ();
-          if body_allowed_for_status !status then begin
-            Buffer.add_string body_buf data;
-            (* Overflow past 2048 with headers not yet emitted: force the
-               framing decision now (handler not done -> chunked/close). *)
-            if
-              (not !headers_emitted)
-              && Buffer.length body_buf > buffer_before_chunking_size
-            then begin
-              ignore (emit_headers ());
-              flush_buffered ()
-            end
-            else if !headers_emitted then flush_buffered ()
-          end);
-      flush =
-        (fun () ->
-          ensure_status ();
-          if not !headers_emitted then ignore (emit_headers ());
-          flush_buffered ();
-          Eio.Buf_write.flush w);
-    }
-  in
-  h.serve_http rw r;
-  handler_done := true;
-  ensure_status ();
-  if not !headers_emitted then begin
-    let keep_alive = emit_headers () in
-    flush_buffered ();
-    Eio.Buf_write.flush w;
-    keep_alive
-  end
   else begin
-    (* Streaming already started: flush residual bytes, then terminate the
-       framing — close the chunk stream + final CRLF (chunkWriter.close); without
-       the trailing CRLF a kept-alive peer reading the chunked trailer blocks. *)
-    flush_buffered ();
-    if !chunking then begin
+    let write_chunk data =
+      if String.length data > 0 then begin
+        if chunking then Transfer.chunked_writer_write w data
+        else Eio.Buf_write.string w data;
+        Eio.Buf_write.flush w
+      end
+    in
+    write_chunk leading;
+    (match tail_stream with
+    | Some next ->
+        let rec loop () =
+          match next () with
+          | Some c ->
+              write_chunk c;
+              loop ()
+          | None -> ()
+        in
+        loop ()
+    | None -> ());
+    if chunking then begin
       Transfer.chunked_writer_close w;
       Eio.Buf_write.string w "\r\n"
-    end;
-    Eio.Buf_write.flush w;
-    not !close_after_reply
-  end
+    end
+  end;
+  Eio.Buf_write.flush w;
+  keep_alive
 
 (* maxPostHandlerReadBytes (server.go): the max number of unread Request.Body
    bytes the server discards to keep a connection alive; past this it closes. *)
@@ -797,7 +752,7 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
                 Request.remove_multipart_temp_files req);
             match
               with_deadline clock ~secs:timeouts.to_write (fun () ->
-                  try serve_one w req handler with _ -> false)
+                  try serve_one ~sw:req_sw w req handler with _ -> false)
             with
             | `Done k -> k
             | `Timeout -> false
@@ -957,29 +912,43 @@ let request_of_server_request (r : Httpg_http2.Api.server_request) :
     multipart_form = None;
   }
 
-(* Adapt a [Server.handler] into a {!Httpg_http2.Api.handler}: expose the H2
-   response_writer to the user handler as a {!response_writer}, run the handler,
-   then flush the buffered headers/body (Go's http2Handler.ServeHTTP). *)
+(* Adapt a [Server.handler] into a {!Httpg_http2.Api.handler}: run the handler,
+   then drive the H2 response_writer from the returned response — seed headers,
+   set the status, then write the body (streaming a [Body.Stream] chunk-by-chunk
+   with a flush per chunk). Go's http2Handler.ServeHTTP. *)
 let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
  fun (h2w : Httpg_http2.Api.response_writer)
      (r : Httpg_http2.Api.server_request) ->
-  let w =
-    {
-      header = h2w.Httpg_http2.Api.rw_header;
-      write_header =
-        (fun code -> h2w.rw_write_header (Httpg_base.Status.to_int code));
-      write = h2w.rw_write;
-      flush = h2w.rw_flush;
-    }
-  in
   let req = request_of_server_request r in
-  (* Per-request switch (mirrors the h1 serve loop): spilled multipart temp
-     files are unlinked on release, so they never outlive the h2 stream. *)
+  (* Per-request switch (mirrors the h1 serve loop). The whole response — headers
+     AND body — is driven inside the switch, because a [Body.Stream] may read
+     from a resource the handler opened under [~sw] (e.g. the file server's fd);
+     the switch must stay open until the body is fully written. Spilled multipart
+     temp files are unlinked on release, so they never outlive the h2 stream. *)
   Eio.Switch.run (fun req_sw ->
       Eio.Switch.on_release req_sw (fun () ->
           Request.remove_multipart_temp_files req);
-      handler.serve_http w req);
-  h2w.rw_flush ()
+      let resp = handler ~sw:req_sw req in
+      let h2h = h2w.Httpg_http2.Api.rw_header () in
+      List.iter
+        (fun (k, vs) ->
+          List.iter (fun v -> Httpg_http2.Api.Header.add h2h k v) vs)
+        (Header.to_list resp.Response.header);
+      h2w.rw_write_header (Httpg_base.Status.to_int resp.Response.status);
+      (match resp.Response.body with
+      | Body.Empty -> ()
+      | Body.String s -> h2w.rw_write s
+      | Body.Stream next ->
+          let rec loop () =
+            match next () with
+            | Some c ->
+                h2w.rw_write c;
+                h2w.rw_flush ();
+                loop ()
+            | None -> ()
+          in
+          loop ());
+      h2w.rw_flush ())
 
 (* Serve one accepted TLS connection, branching on the ALPN-negotiated protocol:
    "h2" runs the HTTP/2 server connection; anything else (incl. no ALPN) runs the

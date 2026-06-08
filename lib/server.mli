@@ -5,48 +5,35 @@
    hands off to the HTTP/2 server via a translation shim, Go's http2.go);
    hijacking and graceful-shutdown niceties are out of scope. *)
 
-type response_writer = {
-  header : unit -> Header.t;
-  write_header : Httpg_base.Status.t -> unit;
-  write : string -> unit;
-  flush : unit -> unit;
-}
-(** Go's [ResponseWriter] interface, modeled as a record of operations.
-    - [header ()] returns the mutable header map the handler writes to before
-      the response headers are flushed (Go's [ResponseWriter.Header]).
-    - [write_header code] sets the status code (Go's [WriteHeader]); the first
-      [write] implicitly calls [write_header 200].
-    - [write data] appends body bytes. Writes accumulate in a
-      [bufferBeforeChunkingSize = 2048] byte buffer; the framing decision
-      (Content-Length vs chunked) fires at first flush = the buffer exceeds 2048
-      bytes, the handler returns, or [flush] is called. A handler that finishes
-      with <=2048 bytes buffered and no explicit Content-Length gets an exact
-      Content-Length (Go's common case); otherwise the response is streamed
-      chunked (HTTP/1.1) or close-delimited (HTTP/1.0).
-    - [flush ()] forces the framing decision and pushes buffered bytes (Go's
-      [http.Flusher.Flush]). *)
+type handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
+(** An axum-style handler: a function mapping a request to a fully-built
+    response. Departs from Go's [ServeHTTP(ResponseWriter, *Request)] — the
+    handler returns an immutable {!Response.t} that the serve loop flushes;
+    streaming is expressed by a {!Body.Stream} body the runtime drives.
 
-type handler = { serve_http : response_writer -> Body.t Request.t -> unit }
-(** Go's [Handler] interface: [ServeHTTP(ResponseWriter, *Request)]. *)
+    [~sw] is the request switch: a {!Body.Stream} body is pulled by the serve
+    loop {e after} the handler returns, so a handler streaming from an opened
+    resource (the file server's file handle) must open it under [~sw], which is
+    released once the response has been sent. Most handlers ignore [~sw]. *)
 
-val handler_func : (response_writer -> Body.t Request.t -> unit) -> handler
-(** Go's [HandlerFunc]: adapt a function to a {!handler}. *)
+val handler_func : handler -> handler
+(** Identity, kept for parity with Go's [HandlerFunc]: a {!handler} is already a
+    function, so wrapping is a no-op. *)
 
-val error : response_writer -> string -> Httpg_base.Status.t -> unit
-(** Go's [Error]: reply with a plain-text error message and status [code],
-    resetting Content-Type, deleting Content-Length and setting the nosniff
-    option. *)
+val error : string -> Httpg_base.Status.t -> Body.t Response.t
+(** Go's [Error]: a plain-text [text/plain; nosniff] response with status [code]
+    carrying the message. *)
 
-val not_found : response_writer -> Body.t Request.t -> unit
-(** Go's [NotFound]: a 404 "404 page not found" reply. *)
+val not_found : Body.t Request.t -> Body.t Response.t
+(** Go's [NotFound]: a 404 "404 page not found" response. *)
 
 val not_found_handler : unit -> handler
 (** Go's [NotFoundHandler]. *)
 
 val redirect :
-  response_writer -> Body.t Request.t -> string -> Httpg_base.Status.t -> unit
-(** Go's [Redirect]: reply with a redirect to [url] (which may be relative to
-    the request path) using status [code]. *)
+  Body.t Request.t -> string -> Httpg_base.Status.t -> Body.t Response.t
+(** Go's [Redirect]: a redirect response to [url] (which may be relative to the
+    request path) with status [code]. *)
 
 val redirect_handler : string -> Httpg_base.Status.t -> handler
 (** Go's [RedirectHandler]. *)
@@ -73,12 +60,12 @@ val handle : serve_mux -> string -> handler -> (unit, error) result
 val handle_func :
   serve_mux ->
   string ->
-  (response_writer -> Body.t Request.t -> unit) ->
+  (sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t) ->
   (unit, error) result
 (** Go's [ServeMux.HandleFunc]: register a handler function for [pattern]. *)
 
 val serve_mux_serve_http :
-  serve_mux -> response_writer -> Body.t Request.t -> unit
+  serve_mux -> sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t
 (** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 
 val serve_mux_handler : serve_mux -> handler

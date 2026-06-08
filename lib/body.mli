@@ -16,6 +16,15 @@ val empty : t
 val of_string : string -> t
 val of_stream : (unit -> string option) -> t
 
+val append : t -> t -> t
+(** [append b1 b2] is a body that yields all of [b1] then all of [b2], streaming
+    (it never materializes a [Stream] operand). *)
+
+val concat : t list -> t
+(** [concat bs] yields every body in [bs] in order, streaming. Used to assemble
+    a composite body (e.g. the file server's multipart/byteranges output)
+    without materializing it. *)
+
 val read_all : t -> string
 (** Read the entire body to a string. *)
 

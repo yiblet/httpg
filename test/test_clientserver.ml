@@ -23,11 +23,15 @@ let with_server handler client =
 
 (* ---- handlers ---- *)
 
-let hello_handler = Server.handler_func (fun w _r -> w.Server.write "hello")
+let hello_handler =
+  Server.handler_func (fun ~sw:_ _r ->
+      Response.create () |> Response.with_body_string "hello")
 
 (* Echo the request body back in the response. *)
 let echo_handler =
-  Server.handler_func (fun w r -> w.Server.write (Body.read_all r.Request.body))
+  Server.handler_func (fun ~sw:_ r ->
+      Response.create ()
+      |> Response.with_body_string (Body.read_all r.Request.body))
 
 (* ---- Clientserver.get_roundtrip ---- *)
 (* Server returns 200 + "hello"; Client.get reads status 200 and body "hello". *)
