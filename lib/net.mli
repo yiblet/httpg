@@ -22,6 +22,17 @@ exception Tls_error of string
     [Failure] kept for genuine usage bugs (write-before-handshake, bad config).
 *)
 
+exception Dial_error of string
+(** A dial failure -- DNS resolution turning up no address for the host (the
+    common case), carrying the offending [host:port]. Handleable: it mirrors
+    Go's [Dial] returning an [error] (a [*net.DNSError] "no such host" for the
+    resolver case) that [Transport.dialConn] propagates through [RoundTrip],
+    rather than a panic, so a caller of the client entry points below /
+    {!Transport.round_trip} can branch on it (e.g. a request to a nonexistent
+    host). Raised by {!connect}/{!connect_tls}/{!connect_alpn} (and {!listen})
+    when the address cannot be resolved. Distinct from the bare [Failure] kept
+    for genuine usage/config bugs. *)
+
 val ensure_rng : unit -> unit
 (** [ensure_rng ()] seeds the [mirage-crypto] RNG (idempotently). It MUST run
     before any TLS handshake or X509 key generation. The TLS entry points below
@@ -73,7 +84,7 @@ val connect :
 (** [connect ~sw net ~host ~port] resolves and connects a client TCP socket
     (closed when [sw] finishes). Use {!with_connection} to obtain buffered
     channels, or {!connect_tls}/{!connect_alpn} which dial and wrap in one step.
-*)
+    Raises {!Dial_error} if [host]/[port] cannot be resolved. *)
 
 val with_connection :
   _ Eio.Net.stream_socket -> (Eio.Buf_read.t -> Eio.Buf_write.t -> 'a) -> 'a
@@ -105,7 +116,11 @@ val connect_tls :
     - [?insecure:true] -- {!null_authenticator} (no verification), the analogue
       of Go's [InsecureSkipVerify = true]. With neither,
       {!default_authenticator} is used. Verifying against an IP literal [host]
-      legitimately fails name matching; such callers opt out via [?insecure]. *)
+      legitimately fails name matching; such callers opt out via [?insecure].
+
+    Raises {!Dial_error} if [host]/[port] cannot be resolved, {!Tls_error} on a
+    TLS handshake/verification failure, and [Failure] only for a setup bug (an
+    invalid TLS config, or the OS trust store failing to load). *)
 
 val connect_alpn :
   sw:Eio.Switch.t ->
@@ -134,7 +149,8 @@ val test_server_certificate : unit -> Tls.Config.certchain
     "now" -- the OCaml-stack analogue of Go's [net/http/internal/testcert]. For
     tests/loopback servers; since the matching client uses
     {!null_authenticator}, the cert only satisfies the handshake's
-    server-certificate step (no real trust). *)
+    server-certificate step (no real trust). Raises [Failure] if key/CSR
+    generation or self-signing fails (a setup bug, not a peer condition). *)
 
 type 'tag tls_server
 (** A listening TLS server: a bound/listening socket plus the negotiated TLS
@@ -153,7 +169,8 @@ val listen_tls :
     plus a server-side TLS configuration carrying [certificates] (one cert chain
     \+ key) and advertising the ALPN protocols [alpn] in descending preference
     (e.g. [["h2"; "http/1.1"]]; [[]] disables ALPN). During the handshake the
-    server selects the first advertised protocol the client also offers. *)
+    server selects the first advertised protocol the client also offers. Raises
+    [Failure] if the resulting TLS server config is invalid (a setup bug). *)
 
 val tls_listen_sock :
   'tag tls_server -> 'tag Eio.Net.listening_socket_ty Eio.Resource.t

@@ -126,8 +126,32 @@ let tls_spin_guard () =
   | Some _ -> Alcotest.fail "unexpected exception"
   | None -> Alcotest.fail "expected the spin guard to trip, but read succeeded"
 
+(* A dial to an unresolvable host surfaces the typed, catchable {!Net.Dial_error}
+   (the analogue of Go's [Dial] returning a [*net.DNSError] "no such host") --
+   not a bare [Failure]. We use a [.invalid] TLD (RFC 6761 §6.4: guaranteed never
+   to resolve) so the resolver returns no address and {!Net.resolve} raises. *)
+let dial_failure_is_typed () =
+  let caught =
+    Test_harness.with_env ~secs:5. (fun ~net ~clock:_ ~sw ->
+        match
+          Net.connect ~sw net ~host:"no-such-host.invalid" ~port:80
+        with
+        | _flow -> None
+        | exception (Net.Dial_error _ as e) -> Some (`Typed e)
+        | exception e -> Some (`Other e))
+  in
+  match caught with
+  | Some (`Typed (Net.Dial_error _)) -> ()
+  | Some (`Typed _) -> Alcotest.fail "unreachable"
+  | Some (`Other (Failure _)) ->
+      Alcotest.fail "dial failure escaped as a bare Failure, expected Net.Dial_error"
+  | Some (`Other e) ->
+      Alcotest.failf "expected Net.Dial_error, got %s" (Printexc.to_string e)
+  | None -> Alcotest.fail "expected Net.Dial_error, but the dial succeeded"
+
 let tests =
   [
     Alcotest.test_case "loopback_roundtrip" `Quick loopback_roundtrip;
     Alcotest.test_case "tls_spin_guard" `Quick tls_spin_guard;
+    Alcotest.test_case "dial_failure_is_typed" `Quick dial_failure_is_typed;
   ]

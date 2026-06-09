@@ -488,6 +488,10 @@ let h2_round_trip t cc req =
 let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
   let pool = current_pool t in
   let scheme, host, port = scheme_host_port req in
+  (* Go's [errMissingHost] (transport.go): a request with no Host is invalid
+     user input, surfaced through the typed request-validation carrier
+     {!Io.Protocol_error} (shared with malformed request/header lines) so the
+     caller can branch on it rather than getting a bare [Failure]. *)
   if host = "" then raise (Io.Protocol_error "http: no Host in request URL");
   let key = conn_key ~scheme ~host ~port in
   set_default_headers req ~host;

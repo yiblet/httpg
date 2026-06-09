@@ -112,8 +112,10 @@ let unhandleable_allowlist =
     (* Failure: scheduler invariant *)
     "net";
     (* Failure: bound_port + TLS/csr setup misuse (write-before-handshake, bad
-       config). Note: a TLS handshake/auth/protocol failure is the typed,
-       handleable [Net.Tls_error] carrier (F006), not a bare Failure. *)
+       config). Note: the handleable network failures are typed exception
+       carriers, not bare Failure -- a TLS handshake/auth/protocol failure is
+       [Net.Tls_error] (F006) and a DNS/dial failure is [Net.Dial_error]
+       (006-typed-network-failures). *)
     "hpack_tables";
     (* Invalid_argument: table-index invariant (evict_oldest) *)
     "hpack";

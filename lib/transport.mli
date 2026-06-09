@@ -123,6 +123,14 @@ val round_trip : ?force_h2:bool -> t -> Request.t -> Response.t
     this may be called under a transient per-request [Eio.Switch.run]; it raises
     [Invalid_argument] if the current domain has no {!run} scope.
 
+    {b Modeled, catchable failures.} A request whose URL has no Host raises
+    {!Io.Protocol_error} ["http: no Host in request URL"] (Go's [errMissingHost],
+    transport.go; the typed request-validation carrier shared with malformed
+    request/header lines). A dial failure surfaces as {!Net.Dial_error} (e.g. an
+    unresolvable host) and a TLS handshake/verification failure as
+    {!Net.Tls_error} — both delivered to the caller rather than escaping as a
+    bare [Failure].
+
     {b The response body streams and gates connection reuse.} The returned
     [resp.body] is a {!Body.Stream} pulling bytes lazily from the connection; it
     is not pre-buffered. Reusability (keep-alives enabled, neither request nor

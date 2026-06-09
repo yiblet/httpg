@@ -17,6 +17,15 @@ module Buf_write = Eio.Buf_write
    stays a bare [Failure]: that is a usage bug, not a peer/protocol condition.) *)
 exception Tls_error of string
 
+(* A dial failure -- DNS resolution turning up no address (or, more generally, a
+   host/port that cannot be connected). Handleable, mirroring Go's [Dial]
+   returning an [error] (a [*net.DNSError] "no such host" for the resolver case)
+   that [Transport.dialConn] propagates up through [RoundTrip] rather than a
+   panic. The Transport/Client public boundary can branch on this distinctly
+   from a generic failure, exactly as it can on {!Tls_error}. Carries the
+   host:port that could not be resolved/dialed. *)
+exception Dial_error of string
+
 let default_backlog = 128
 
 (* Buf_read's own buffer cap. Io owns the real header budget
@@ -45,7 +54,7 @@ let resolve net host port : Eio.Net.Sockaddr.stream =
   match Eio.Net.getaddrinfo_stream ~service:(string_of_int port) net host with
   | addr :: _ -> addr
   | [] ->
-      failwith (Printf.sprintf "Net.resolve: cannot resolve %s:%d" host port)
+      raise (Dial_error (Printf.sprintf "cannot resolve %s:%d" host port))
 
 let sockaddr_to_string : Eio.Net.Sockaddr.stream -> string = function
   | `Tcp (ip, port) ->
