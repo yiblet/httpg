@@ -296,15 +296,15 @@ let test_h2_pool_single_conn_below_saturation () =
 
 let tests =
   [
-    Alcotest.test_case "clientserver_roundtrip" `Quick
+    Alcotest.test_case "clientserver_roundtrip" `Slow
       test_clientserver_roundtrip;
-    Alcotest.test_case "h2_pool_scales_out_when_saturated" `Quick
+    Alcotest.test_case "h2_pool_scales_out_when_saturated" `Slow
       test_h2_pool_scales_out_when_saturated;
-    Alcotest.test_case "h2_pool_single_conn_below_saturation" `Quick
+    Alcotest.test_case "h2_pool_single_conn_below_saturation" `Slow
       test_h2_pool_single_conn_below_saturation;
-    Alcotest.test_case "h2_dead_pooled_conn_redials_and_retries" `Quick
+    Alcotest.test_case "h2_dead_pooled_conn_redials_and_retries" `Slow
       test_h2_dead_pooled_conn_redials_and_retries;
     Alcotest.test_case "http11_fallback" `Quick test_http11_fallback;
-    Alcotest.test_case "concurrent_multiplexing_one_conn" `Quick
+    Alcotest.test_case "concurrent_multiplexing_one_conn" `Slow
       test_concurrent_multiplexing_one_conn;
   ]

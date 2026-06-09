@@ -133,9 +133,7 @@ let tls_spin_guard () =
 let dial_failure_is_typed () =
   let caught =
     Test_harness.with_env ~secs:5. (fun ~net ~clock:_ ~sw ->
-        match
-          Net.connect ~sw net ~host:"no-such-host.invalid" ~port:80
-        with
+        match Net.connect ~sw net ~host:"no-such-host.invalid" ~port:80 with
         | _flow -> None
         | exception (Net.Dial_error _ as e) -> Some (`Typed e)
         | exception e -> Some (`Other e))
@@ -144,7 +142,8 @@ let dial_failure_is_typed () =
   | Some (`Typed (Net.Dial_error _)) -> ()
   | Some (`Typed _) -> Alcotest.fail "unreachable"
   | Some (`Other (Failure _)) ->
-      Alcotest.fail "dial failure escaped as a bare Failure, expected Net.Dial_error"
+      Alcotest.fail
+        "dial failure escaped as a bare Failure, expected Net.Dial_error"
   | Some (`Other e) ->
       Alcotest.failf "expected Net.Dial_error, got %s" (Printexc.to_string e)
   | None -> Alcotest.fail "expected Net.Dial_error, but the dial succeeded"

@@ -77,4 +77,4 @@ let test_h2c_roundtrip () =
   (* Both round trips were genuinely h2c (not an h1 fallback) on one conn. *)
   Alcotest.(check int) "two h2 round trips" 2 h2_count
 
-let tests = [ Alcotest.test_case "h2c_roundtrip" `Quick test_h2c_roundtrip ]
+let tests = [ Alcotest.test_case "h2c_roundtrip" `Slow test_h2c_roundtrip ]

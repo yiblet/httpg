@@ -173,5 +173,5 @@ let tests =
   [
     Alcotest.test_case "client_body_streamed" `Quick client_body_streamed;
     Alcotest.test_case "reuse_after_drain" `Quick reuse_after_drain;
-    Alcotest.test_case "cancel_mid_body" `Quick cancel_mid_body;
+    Alcotest.test_case "cancel_mid_body" `Slow cancel_mid_body;
   ]

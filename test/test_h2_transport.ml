@@ -342,6 +342,6 @@ let tests =
     Alcotest.test_case "early_return_undrained_no_leak" `Slow
       test_early_return_undrained_no_leak;
     Alcotest.test_case "cancel_aborts_stream" `Quick test_cancel_aborts_stream;
-    Alcotest.test_case "slot_accounting_free_after_body" `Quick
+    Alcotest.test_case "slot_accounting_free_after_body" `Slow
       test_slot_accounting_free_after_body;
   ]

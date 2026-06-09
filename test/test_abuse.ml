@@ -551,11 +551,11 @@ let redirect_referer_https_to_http () =
 
 let tests =
   [
-    Alcotest.test_case "slowloris_header_timeout" `Quick
+    Alcotest.test_case "slowloris_header_timeout" `Slow
       slowloris_header_timeout;
-    Alcotest.test_case "slowloris_header_timeout_tls" `Quick
+    Alcotest.test_case "slowloris_header_timeout_tls" `Slow
       slowloris_header_timeout_tls;
-    Alcotest.test_case "idle_timeout" `Quick idle_timeout;
+    Alcotest.test_case "idle_timeout" `Slow idle_timeout;
     Alcotest.test_case "request_header_too_large" `Quick
       request_header_too_large;
     Alcotest.test_case "request_line_too_long" `Quick request_line_too_long;

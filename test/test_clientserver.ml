@@ -119,6 +119,6 @@ let tests =
     Alcotest.test_case "get_roundtrip" `Quick get_roundtrip;
     Alcotest.test_case "post_body" `Quick post_body;
     Alcotest.test_case "keepalive_reuse" `Quick keepalive_reuse;
-    Alcotest.test_case "tls_handshake_failure_is_typed" `Quick
+    Alcotest.test_case "tls_handshake_failure_is_typed" `Slow
       tls_handshake_failure_is_typed;
   ]

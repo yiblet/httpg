@@ -82,6 +82,6 @@ let server_close () =
 let tests =
   [
     Alcotest.test_case "server_get" `Quick server_get;
-    Alcotest.test_case "server_tls" `Quick server_tls;
+    Alcotest.test_case "server_tls" `Slow server_tls;
     Alcotest.test_case "server_close" `Quick server_close;
   ]
