@@ -26,6 +26,11 @@ let check_garbage2 () =
     "empty -> None" true
     (Http_time.parse_http_time "" = None)
 
+let check_month_of_name () =
+  Alcotest.(check (option int))
+    "month_of_name" (Some 2)
+    (Http_time.month_of_name "Feb")
+
 (* Ported from go/src/net/http parsing of http.TimeFormat / http.ParseTime
    (RFC1123, RFC850, ANSIC asctime). *)
 let tests =
@@ -36,4 +41,5 @@ let tests =
     ("parse_http_time asctime", `Quick, check_asctime);
     ("parse_http_time garbage -> None", `Quick, check_garbage);
     ("parse_http_time empty -> None", `Quick, check_garbage2);
+    ("month_of_name", `Quick, check_month_of_name);
   ]

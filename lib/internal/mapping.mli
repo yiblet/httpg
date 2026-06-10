@@ -6,6 +6,9 @@
 
 type ('k, 'v) t
 
+val length : ('k, 'v) t -> int
+(** [length m] returns the number of key-value pairs in [m]. *)
+
 val create : unit -> ('k, 'v) t
 (** [create ()] returns an empty mapping (Go's zero-value mapping). *)
 

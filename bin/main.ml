@@ -120,7 +120,7 @@ let demo_google ~net ~clock ~sw =
     resp.Response.header;
 
   Printf.ksprintf add_buf "\n%d"
-    (Body.fold (fun s acc -> acc + String.length s) resp.Response.body 0);
+    (Body.fold_left (fun  acc  s-> acc + String.length s) resp.Response.body 0);
   Printf.printf "%s" (Buffer.contents buf)
 
 let () =
