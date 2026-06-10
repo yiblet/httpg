@@ -13,10 +13,10 @@ let req_no_host () : Request.t =
     proto = Httpg_base.Protocol.Http11;
     header = Header.create ();
     body = Body.Empty;
-    content_length = 0L;
+    content_length = Some 0L;
     transfer_encoding = [];
     close = false;
-    host = "";
+    host = None;
     trailer = None;
     request_uri = "";
     remote_addr = "";
@@ -52,7 +52,9 @@ let read_request_malformed () =
       Alcotest.(check string)
         "method" "GET"
         (Httpg_base.Method.to_string r.Request.meth);
-      Alcotest.(check string) "host" "foo.com" r.Request.host
+      Alcotest.(check string)
+        "host" "foo.com"
+        (Option.value ~default:"" r.Request.host)
   | Error e ->
       Alcotest.failf "well-formed request -> Error %s; want Ok"
         (Io.error_to_string e));

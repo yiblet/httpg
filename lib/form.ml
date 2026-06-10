@@ -138,8 +138,8 @@ let max_form_size = 10 * 1024 * 1024
    [Error Too_large] if the body exceeds [max_form_size]; otherwise the first
    decode error from {!parse_query}, if any. *)
 let of_body (body : Body.t) : (t, error) result =
-  let s = Body.read_all body in
-  if String.length s > max_form_size then Error Too_large
+  let s, remainder = Body.read_until body max_form_size in
+  if Option.is_some remainder then Error Too_large
   else
     let m, res = parse_query s in
     match res with Ok () -> Ok m | Error e -> Error e

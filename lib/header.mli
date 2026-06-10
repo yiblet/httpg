@@ -40,13 +40,14 @@ val set_values : t -> string -> string list -> t
     canonicalized key replaced by [vs] (which may be [[]] — e.g. to record a
     trailer key). *)
 
-val get : t -> string -> string
-(** [get h key] returns the first value for the canonicalized key, or "" if
-    absent (Go's [Header.Get]). *)
+val get : t -> string -> string option
+(** [get h key] returns the first value for the canonicalized key (Go's
+    [Header.Get]), or [None] if absent — a deliberate departure from Go, where
+    absence is [""]. *)
 
 val values : t -> string -> string list
-(** [values h key] returns all values for the key, or [[]] if absent (Go's
-    [Header.Values]). *)
+(** [values h key] returns all values for the key in insertion order, or [[]] if
+    absent (Go's [Header.Values]). *)
 
 val del : t -> string -> t
 (** [del h key] returns [h] without the canonicalized key (Go's [Header.Del]).

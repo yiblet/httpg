@@ -190,9 +190,9 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
       body_allowed
       && (not (Header.has header "Content-Type"))
       && (not
-            (Httpg_internal.Ascii.equal_fold
-               (Header.get header "X-Content-Type-Options")
-               "nosniff"))
+            (match Header.get header "X-Content-Type-Options" with
+            | Some v -> Httpg_internal.Ascii.equal_fold v "nosniff"
+            | None -> false))
       && String.length leading > 0
     then
       let src =
@@ -209,20 +209,17 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
       | None -> header
     else header
   in
-  if
-    Transfer.has_token
-      (String.lowercase_ascii (Header.get header "Connection"))
-      "close"
-  then close_after_reply := true;
+  (match Header.get header "Connection" with
+  | Some conn when Transfer.has_token (String.lowercase_ascii conn) "close" ->
+      close_after_reply := true
+  | _ -> ());
   (* Framing. A response with a declared [content_length] (>= 0) — including a
      known-length [Stream] body, as the file server uses for byte ranges — is
      sent with an exact Content-Length and raw (unchunked) bytes; an
      unknown-length [Stream] is chunked (HTTP/1.1) or close-delimited (1.0). *)
-  let declared_cl = resp.Response.content_length in
   let content_length =
     if not body_allowed then None
-    else if declared_cl >= 0L then Some (Int64.to_int declared_cl)
-    else None
+    else Option.map Int64.to_int resp.Response.content_length
   in
   let chunking =
     body_allowed && streaming && content_length = None && (not is_head)
@@ -236,9 +233,10 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   let wants10_keep_alive =
     (not (Request.proto_at_least r 1 1))
     && Request.proto_at_least r 1 0
-    && Transfer.has_token
-         (String.lowercase_ascii (Header.get r.Request.header "Connection"))
-         "keep-alive"
+    &&
+    match Header.get r.Request.header "Connection" with
+    | Some conn -> Transfer.has_token (String.lowercase_ascii conn) "keep-alive"
+    | None -> false
   in
   let sent_known_length =
     is_head || content_length <> None || not body_allowed
@@ -271,9 +269,9 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   Eio.Buf_write.string w (Buffer.contents out);
   (* Body. *)
   if is_head then ()
-  else if not streaming then
-    begin if String.length leading > 0 then Eio.Buf_write.string w leading
-    end
+  else if not streaming then begin
+    if String.length leading > 0 then Eio.Buf_write.string w leading
+  end
   else begin
     let write_chunk data =
       if String.length data > 0 then begin
@@ -562,11 +560,12 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
         let unknown_expect =
           if Request.expects_continue req then begin
             if
-              Request.proto_at_least req 1 1 && req.Request.content_length <> 0L
+              Request.proto_at_least req 1 1
+              && req.Request.content_length <> Some 0L
             then wrap_expect_continue_body w req;
             false
           end
-          else Header.get req.Request.header "Expect" <> ""
+          else Option.is_some (Header.get req.Request.header "Expect")
         in
         if unknown_expect then write_expectation_failed w
         else begin
@@ -622,10 +621,12 @@ let request_of_server_request (r : Httpg_http2.Api.server_request) : Request.t =
     proto = r.sreq_proto;
     header = header_of_api_header r.sreq_header;
     body = body_of_api_body r.sreq_body;
-    content_length = r.sreq_content_length;
+    content_length =
+      (let n = r.sreq_content_length in
+       if Int64.compare n 0L < 0 then None else Some n);
     transfer_encoding = [];
     close = false;
-    host = r.sreq_host;
+    host = (if r.sreq_host = "" then None else Some r.sreq_host);
     trailer =
       (if Hashtbl.length r.sreq_trailer = 0 then None
        else Some (header_of_api_header r.sreq_trailer));

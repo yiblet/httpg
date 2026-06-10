@@ -353,7 +353,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
         let host =
           match Uri.host url with
           | Some h when h <> "" -> h
-          | _ -> Header.get header "Host"
+          | _ -> Header.get header "Host" |> Option.value ~default:""
         in
         let header = fix_pragma_cache_control header in
         let close, _ =
@@ -382,11 +382,13 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
             proto = proto_t;
             header;
             body = Body.Empty;
-            content_length = res.Transfer.content_length;
+            content_length =
+              (let n = res.Transfer.content_length in
+               if Int64.compare n 0L < 0 then None else Some n);
             transfer_encoding =
               (if res.Transfer.is_chunked then [ "chunked" ] else []);
             close = res.Transfer.result_close;
-            host;
+            host = (if host = "" then None else Some host);
             trailer = res.Transfer.trailer;
             request_uri;
             remote_addr = "";
@@ -482,7 +484,9 @@ let read_response_raising ?(request : Request.t option)
               proto = proto_t;
               header = res.Transfer.header;
               body = Body.Empty;
-              content_length = res.Transfer.content_length;
+              content_length =
+                (let n = res.Transfer.content_length in
+                 if Int64.compare n 0L < 0 then None else Some n);
               transfer_encoding =
                 (if res.Transfer.is_chunked then [ "chunked" ] else []);
               close = res.Transfer.result_close;
@@ -521,13 +525,14 @@ let string_contains_ctl_byte s =
 let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
   let out = Eio.Buf_write.string w in
   let host =
-    if r.Request.host <> "" then r.Request.host
-    else match Uri.host r.Request.url with Some h -> h | None -> ""
+    match r.Request.host with
+    | Some h -> h
+    | None -> ( match Uri.host r.Request.url with Some h -> h | None -> "")
   in
   if
     host = ""
     && (match Uri.host r.Request.url with Some _ -> false | None -> true)
-    && r.Request.host = ""
+    && r.Request.host = None
   then raise missing_host_sentinel;
   let ruri =
     if r.Request.meth = Httpg_base.Method.Connect && Uri.path r.Request.url = ""
@@ -547,23 +552,25 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
        (Httpg_base.Method.to_string meth)
        ruri);
   out (Printf.sprintf "Host: %s\r\n" host);
-  (* User-Agent: default unless present (a present blank value suppresses it). *)
+  (* User-Agent: default unless present (a present key with no value — i.e.
+     [set_values h "User-Agent" []] — suppresses it). *)
   let user_agent =
     if Header.has r.Request.header "User-Agent" then
       Header.get r.Request.header "User-Agent"
-    else Request.default_user_agent
+    else Some Request.default_user_agent
   in
-  if user_agent <> "" then begin
-    let ua =
-      String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) user_agent
-    in
-    out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua))
-  end;
+  Option.iter
+    (fun ua ->
+      let ua =
+        String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) ua
+      in
+      out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua)))
+    user_agent;
   let tw =
     Transfer.make_transfer_writer ~is_response:false ~method_:meth
       ~at_least_http11:true ~close:r.Request.close ~header:r.Request.header
       ~trailer:r.Request.trailer ~body:r.Request.body
-      ~content_length:r.Request.content_length
+      ~content_length:(Option.value ~default:(-1L) r.Request.content_length)
       ~transfer_encoding:r.Request.transfer_encoding ()
   in
   Transfer.write_transfer_header w tw;
@@ -620,18 +627,17 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
   let body = ref r.Response.body in
   let close = ref r.Response.close in
   (* If ContentLength==0 and body non-nil, probe whether it is actually empty. *)
-  if Int64.compare !content_length 0L = 0 && !body <> Body.Empty then begin
+  if !content_length = Some 0L && !body <> Body.Empty then begin
     let data = Body.read_all !body in
     if data = "" then body := Body.Empty
     else begin
-      content_length := -1L;
+      content_length := None;
       body := Body.String data
     end
   end;
   (* HTTP/1.1 non-chunked unknown length must signal EOF via Connection: close. *)
   if
-    Int64.compare !content_length (-1L) = 0
-    && (not !close)
+    !content_length = None && (not !close)
     && Response.proto_at_least r 1 1
     && (not (Transfer.chunked r.Response.transfer_encoding))
     && not r.Response.uncompressed
@@ -646,7 +652,8 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
     Transfer.make_transfer_writer ~is_response:true ~method_ ~response_to_head
       ~at_least_http11:(Response.proto_at_least r 1 1)
       ~close:!close ~header:r.Response.header ~trailer:r.Response.trailer
-      ~body:!body ~content_length:!content_length
+      ~body:!body
+      ~content_length:(Option.value ~default:(-1L) !content_length)
       ~transfer_encoding:r.Response.transfer_encoding ()
   in
   Transfer.write_transfer_header w tw;
@@ -656,7 +663,7 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
   out (Buffer.contents buf);
   let content_length_already_sent = Transfer.should_send_content_length tw in
   if
-    Int64.compare !content_length 0L = 0
+    !content_length = Some 0L
     && (not (Transfer.chunked r.Response.transfer_encoding))
     && (not content_length_already_sent)
     && Transfer.body_allowed_for_status

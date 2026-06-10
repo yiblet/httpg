@@ -26,10 +26,11 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
            (Printf.sprintf "HTTP/%d.%d" proto_major proto_minor));
     header;
     body;
-    content_length;
+    content_length =
+      (if Int64.compare content_length 0L < 0 then None else Some content_length);
     transfer_encoding;
     close;
-    host;
+    host = (if host = "" then None else Some host);
     trailer = None;
     request_uri = "";
     remote_addr = "";

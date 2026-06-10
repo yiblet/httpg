@@ -417,9 +417,9 @@ let send_window_update_stream sc (st : stream) n =
 (* goAway (server.go:1339): if already in GOAWAY, only upgrade a prior NO_ERROR
    (graceful) to the new error code; otherwise begin the GOAWAY. *)
 let go_away sc code =
-  if sc.in_goaway then
-    begin if sc.goaway_code = H2_error.NoError then sc.goaway_code <- code
-    end
+  if sc.in_goaway then begin
+    if sc.goaway_code = H2_error.NoError then sc.goaway_code <- code
+  end
   else begin
     sc.in_goaway <- true;
     sc.need_to_send_goaway <- true;
@@ -928,8 +928,8 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
           Ok ()
         end
     | Some st ->
-        if state <> State_open || st.got_trailer_header || st.reset_queued then
-          begin if not (H2_flow.inflow_take sc.conn_inflow length) then
+        if state <> State_open || st.got_trailer_header || st.reset_queued then begin
+          if not (H2_flow.inflow_take sc.conn_inflow length) then
             Error H2_error.FlowControlError
           else begin
             send_window_update_conn sc length;
@@ -939,7 +939,7 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
               Ok ()
             end
           end
-          end
+        end
         else begin
           (* declared content-length overflow check *)
           let over =
@@ -947,8 +947,8 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
             && Int64.add st.body_bytes (Int64.of_int (String.length data))
                > st.decl_body_bytes
           in
-          if over then
-            begin if not (H2_flow.inflow_take sc.conn_inflow length) then
+          if over then begin
+            if not (H2_flow.inflow_take sc.conn_inflow length) then
               Error H2_error.FlowControlError
             else begin
               send_window_update_conn sc length;
@@ -961,12 +961,11 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
               reset_stream sc st H2_error.ProtocolError;
               Ok ()
             end
-            end
-          else
-            begin if length > 0 then
-              begin if
-                not (H2_flow.take_inflows sc.conn_inflow st.inflow length)
-              then Error H2_error.FlowControlError
+          end
+          else begin
+            if length > 0 then begin
+              if not (H2_flow.take_inflows sc.conn_inflow st.inflow length) then
+                Error H2_error.FlowControlError
               else begin
                 if String.length data > 0 then begin
                   st.body_bytes <-
@@ -984,12 +983,12 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
                 if df.end_stream then end_stream st;
                 Ok ()
               end
-              end
+            end
             else begin
               if df.end_stream then end_stream st;
               Ok ()
             end
-            end
+          end
         end
 
 let process_settings sc (sf : H2_frame.settings_frame) :
@@ -1220,8 +1219,8 @@ let maybe_finish sc : bool =
     sc.goaway_code = H2_error.NoError && cur_open_streams sc = 0
   in
   if sent_goaway && (sc.goaway_code <> H2_error.NoError || graceful_complete)
-  then
-    begin match (sc.clock, sc.shutdown_timer_armed) with
+  then begin
+    match (sc.clock, sc.shutdown_timer_armed) with
     | Some clock, false ->
         sc.shutdown_timer_armed <- true;
         let t =
@@ -1235,7 +1234,7 @@ let maybe_finish sc : bool =
         false (* keep serving until the linger fires *)
     | None, _ -> true (* no clock: close once flushed *)
     | Some _, true -> false (* linger already armed *)
-    end
+  end
   else false
 
 let rec serve_loop sc : unit =

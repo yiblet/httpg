@@ -7,6 +7,11 @@ let read s =
 
 let body_of (r : Httpg.Request.t) = Httpg.Body.read_all r.body
 
+(* content_length is [int64 option]: [None] = unknown (Go's -1). Render it the
+   Go way for the ported assertions. *)
+let cl_str (cl : int64 option) =
+  Int64.to_string (Option.value ~default:(-1L) cl)
+
 (* Baseline: all fields included. *)
 let baseline () =
   let raw =
@@ -26,15 +31,17 @@ let baseline () =
     (Httpg_base.Protocol.to_string r.proto);
   Alcotest.(check int) "major" 1 (Httpg_base.Protocol.major r.proto);
   Alcotest.(check int) "minor" 1 (Httpg_base.Protocol.minor r.proto);
-  Alcotest.(check string) "host" "www.techcrunch.com" r.host;
+  Alcotest.(check string)
+    "host" "www.techcrunch.com"
+    (Option.value ~default:"" r.host);
   Alcotest.(check string)
     "request_uri" "http://www.techcrunch.com/" r.request_uri;
   Alcotest.(check bool) "close" false r.close;
   Alcotest.(check (list (of_pp Fmt.string)))
     "content_length" [ "7" ]
-    [ Int64.to_string r.content_length ];
-  Alcotest.(check string)
-    "user-agent" "Fake"
+    [ cl_str r.content_length ];
+  Alcotest.(check (option string))
+    "user-agent" (Some "Fake")
     (Httpg.Header.get r.header "User-Agent");
   (* Host promoted out of the header map. *)
   Alcotest.(check bool) "host deleted" false (Httpg.Header.has r.header "Host");
@@ -44,11 +51,9 @@ let baseline () =
 let simple_get () =
   let r = read "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n" in
   Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
-  Alcotest.(check string) "host" "foo.com" r.host;
+  Alcotest.(check string) "host" "foo.com" (Option.value ~default:"" r.host);
   Alcotest.(check string) "request_uri" "/" r.request_uri;
-  Alcotest.(check string)
-    "content_length" "0"
-    (Int64.to_string r.content_length);
+  Alcotest.(check string) "content_length" "0" (cl_str r.content_length);
   Alcotest.(check string) "body" "" (body_of r)
 
 (* Chunked body with trailer. *)
@@ -61,14 +66,12 @@ let chunked_trailer () =
   let r = read raw in
   Alcotest.(check string) "method" "POST" (Httpg_base.Method.to_string r.meth);
   Alcotest.(check (list string)) "te" [ "chunked" ] r.transfer_encoding;
-  Alcotest.(check string)
-    "content_length" "-1"
-    (Int64.to_string r.content_length);
+  Alcotest.(check string) "content_length" "-1" (cl_str r.content_length);
   Alcotest.(check string) "body" "foobar" (body_of r);
   match r.trailer with
   | Some t ->
-      Alcotest.(check string)
-        "trailer" "Trailer-Value"
+      Alcotest.(check (option string))
+        "trailer" (Some "Trailer-Value")
         (Httpg.Header.get t "Trailer-Key")
   | None -> Alcotest.fail "expected trailer"
 
@@ -81,9 +84,7 @@ let chunked_drops_content_length () =
   in
   let r = read raw in
   Alcotest.(check (list string)) "te" [ "chunked" ] r.transfer_encoding;
-  Alcotest.(check string)
-    "content_length" "-1"
-    (Int64.to_string r.content_length);
+  Alcotest.(check string) "content_length" "-1" (cl_str r.content_length);
   Alcotest.(check bool)
     "no content-length header" false
     (Httpg.Header.has r.header "Content-Length");

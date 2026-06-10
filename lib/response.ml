@@ -14,7 +14,7 @@ type t = {
       (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;
   mutable body : Body.t;
-  mutable content_length : int64;  (** -1 means unknown *)
+  mutable content_length : int64 option;  (** None = unknown (Go's -1) *)
   mutable transfer_encoding : string list;
   mutable close : bool;
   mutable uncompressed : bool;
@@ -33,7 +33,7 @@ let create () : t =
     proto = Httpg_base.Protocol.Http11;
     header = Header.create ();
     body = Body.Empty;
-    content_length = 0L;
+    content_length = Some 0L;
     transfer_encoding = [];
     close = false;
     uncompressed = false;
@@ -50,9 +50,9 @@ let with_set_header key value (r : t) : t =
   { r with header = Header.set r.header key value }
 
 let content_length_of_body = function
-  | Body.String s -> Int64.of_int (String.length s)
-  | Body.Empty -> 0L
-  | Body.Stream _ -> -1L
+  | Body.String s -> Some (Int64.of_int (String.length s))
+  | Body.Empty -> Some 0L
+  | Body.Stream _ -> None
 
 let with_body (body : Body.t) (r : t) : t =
   { r with body; content_length = content_length_of_body body }
@@ -71,8 +71,8 @@ let proto_at_least (r : t) major minor =
    Returns None when no Location header is present (Go's ErrNoLocation). *)
 let location (r : t) : Uri.t option =
   match Header.get r.header "Location" with
-  | "" -> None
-  | lv -> (
+  | None -> None
+  | Some lv -> (
       let loc = Uri.of_string lv in
       match r.request with
       | Some req ->

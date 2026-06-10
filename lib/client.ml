@@ -102,8 +102,10 @@ let referer_for_url ~last ~next ~explicit =
   let scheme u = match Uri.scheme u with Some s -> s | None -> "" in
   if String.equal (scheme last) "https" && String.equal (scheme next) "http"
   then None
-  else if explicit <> "" then Some explicit
-  else Some (Uri.to_string (Uri.with_userinfo last None))
+  else
+    match explicit with
+    | Some r -> Some r
+    | None -> Some (Uri.to_string (Uri.with_userinfo last None))
 
 (* Go's Client.do: the redirect-following loop composing Transport.round_trip.
    [round_trip] is the per-hop round-tripper (defaults to the client's transport);
@@ -163,11 +165,11 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) : Response.t =
               header = new_header;
               body = (if include_body then req.Request.body else Body.Empty);
               content_length =
-                (if include_body then req.Request.content_length else 0L);
+                (if include_body then req.Request.content_length else Some 0L);
               transfer_encoding =
                 (if include_body then req.Request.transfer_encoding else []);
               close = false;
-              host = "";
+              host = None;
               trailer = None;
               request_uri = "";
               remote_addr = "";
@@ -193,23 +195,7 @@ let do_ ?force_h2 ~sw c (req : Request.t) : Response.t =
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
 let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
-  let url = Uri.of_string url_str in
-  let header = Header.create () in
-  let host = match Uri.host url with Some h -> h | None -> "" in
-  {
-    Request.meth;
-    url;
-    proto = Httpg_base.Protocol.Http11;
-    header;
-    body;
-    content_length;
-    transfer_encoding = [];
-    close = false;
-    host;
-    trailer = None;
-    request_uri = "";
-    remote_addr = "";
-  }
+  Request.make ~meth ~body ~content_length url_str
 
 let get ?force_h2 ~sw c url =
   do_ ?force_h2 ~sw c (make_request Httpg_base.Method.get url)

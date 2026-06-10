@@ -13,10 +13,12 @@ type t = {
       (** Go [Proto]/[ProtoMajor]/[ProtoMinor], collapsed *)
   mutable header : Header.t;
   mutable body : Body.t;
-  mutable content_length : int64;  (** -1 means unknown *)
+  mutable content_length : int64 option;
+      (** [None] = unknown (Go's [-1]); [Some n] = known length ([Some 0L] =
+          genuinely empty body) *)
   mutable transfer_encoding : string list;
   mutable close : bool;
-  mutable host : string;
+  mutable host : string option;  (** Go [Host]; [None] = derive from URL *)
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
@@ -25,6 +27,24 @@ type t = {
 
 val default_user_agent : string
 (** [defaultUserAgent]. *)
+
+val make :
+  ?meth:Httpg_base.Method.t ->
+  ?proto:Httpg_base.Protocol.t ->
+  ?header:Header.t ->
+  ?body:Body.t ->
+  ?content_length:int64 ->
+  ?transfer_encoding:string list ->
+  ?close:bool ->
+  ?host:string ->
+  ?trailer:Header.t option ->
+  ?request_uri:string ->
+  ?remote_addr:string ->
+  string ->
+  t
+(** [make url] builds a request for [url] (Go's [NewRequest]). [meth] defaults
+    to [GET]; [host] defaults to the URL's host (pass [~host] to override).
+    Replaces starting from a zero-value record. *)
 
 val parse_http_version : string -> (int * int) option
 (** [ParseHTTPVersion vers]: [Some (major, minor)] on success, [None] on a
@@ -37,11 +57,13 @@ val expects_continue : t -> bool
 (** [Request.expectsContinue] (request.go:1518): true when the "Expect" header
     contains the [100-continue] token (case-insensitive). *)
 
-val user_agent : t -> string
-(** [Request.UserAgent]: the "User-Agent" header value, or "". *)
+val user_agent : t -> string option
+(** [Request.UserAgent]: the "User-Agent" header value, or [None] when absent
+    (where Go's [Request.UserAgent] returns ""). *)
 
-val referer : t -> string
-(** [Request.Referer]: the "Referer" header value, or "". *)
+val referer : t -> string option
+(** [Request.Referer]: the "Referer" header value, or [None] when absent (where
+    Go's [Request.Referer] returns ""). *)
 
 val cookies : t -> Cookie.t list
 (** [Request.Cookies]: all cookies in the "Cookie" header. *)

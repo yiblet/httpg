@@ -8,6 +8,11 @@
    faithful GMT formatter and the two parsers Go uses (RFC1123 and
    "Mon, 02-Jan-2006 15:04:05 MST"). *)
 
+(* Optional string attributes are public [string option]; internally driven
+   through [ZS] (Zero.String, transparently [string option]) so "" normalizes to
+   [None] and the zero check stays in one place. *)
+module ZS = Httpg_base.Zero.String
+
 type same_site =
   | Same_site_unset
   | Same_site_default_mode
@@ -19,35 +24,39 @@ type t = {
   name : string;
   value : string;
   quoted : bool;
-  path : string;
-  domain : string;
+  path : string option;
+  domain : string option;
   expires : float;
-  raw_expires : string;
+  raw_expires : string option;
   max_age : int;
   secure : bool;
   http_only : bool;
   same_site : same_site;
   partitioned : bool;
-  raw : string;
+  raw : string option;
   unparsed : string list;
 }
 
-let default =
+(* [name]/[value] required; other fields optional (replaces the zero record). *)
+let make ~name ~value ?(quoted = false) ?(path = "") ?(domain = "")
+    ?(expires = 0.) ?(raw_expires = "") ?(max_age = 0) ?(secure = false)
+    ?(http_only = false) ?(same_site = Same_site_unset) ?(partitioned = false)
+    ?(raw = "") ?(unparsed = []) () =
   {
-    name = "";
-    value = "";
-    quoted = false;
-    path = "";
-    domain = "";
-    expires = 0.;
-    raw_expires = "";
-    max_age = 0;
-    secure = false;
-    http_only = false;
-    same_site = Same_site_unset;
-    partitioned = false;
-    raw = "";
-    unparsed = [];
+    name;
+    value;
+    quoted;
+    path = ZS.of_zero path;
+    domain = ZS.of_zero domain;
+    expires;
+    raw_expires = ZS.of_zero raw_expires;
+    max_age;
+    secure;
+    http_only;
+    same_site;
+    partitioned;
+    raw = ZS.of_zero raw;
+    unparsed;
   }
 
 (* ---- defaultCookieMaxNum ---- *)
@@ -307,7 +316,7 @@ let parse_set_cookie line =
           match parse_cookie_value value ~allow_double_quote:true with
           | None -> Error `InvalidValue
           | Some (value, quoted) ->
-              let c = ref { default with name; value; quoted; raw = line } in
+              let c = ref (make ~name ~value ~quoted ~raw:line ()) in
               let unparsed_rev = ref [] in
               List.iter
                 (fun part ->
@@ -340,7 +349,7 @@ let parse_set_cookie line =
                                   }
                           | "secure" -> c := { !c with secure = true }
                           | "httponly" -> c := { !c with http_only = true }
-                          | "domain" -> c := { !c with domain = v }
+                          | "domain" -> c := { !c with domain = ZS.of_zero v }
                           | "max-age" -> (
                               (* Go: secs, err := strconv.Atoi(val);
                                  if err != nil || secs != 0 && val[0]=='0' { break } *)
@@ -357,8 +366,13 @@ let parse_set_cookie line =
                                 | Some t -> t
                                 | None -> 0.
                               in
-                              c := { !c with raw_expires = v; expires = exp }
-                          | "path" -> c := { !c with path = v }
+                              c :=
+                                {
+                                  !c with
+                                  raw_expires = ZS.of_zero v;
+                                  expires = exp;
+                                }
+                          | "path" -> c := { !c with path = ZS.of_zero v }
                           | "partitioned" -> c := { !c with partitioned = true }
                           | _ -> unparsed_rev := part :: !unparsed_rev)
                   end)
@@ -409,13 +423,13 @@ let read_cookies (h : Header.t) ~filter =
               let name, v, _ = cut part '=' in
               let name = trim_string name in
               if not (is_token name) then ()
-              else if filter <> "" && filter <> name then ()
+                (* Go: filter != "" && filter != name. *)
+              else if ZS.check (fun f -> f <> name) filter then ()
               else
                 match parse_cookie_value v ~allow_double_quote:true with
                 | None -> ()
                 | Some (v, quoted) ->
-                    cookies :=
-                      { default with name; value = v; quoted } :: !cookies
+                    cookies := make ~name ~value:v ~quoted () :: !cookies
           done)
         lines;
       List.rev !cookies
@@ -429,21 +443,23 @@ let set_cookie c =
     Buffer.add_string b c.name;
     Buffer.add_char b '=';
     Buffer.add_string b (sanitize_cookie_value c.value ~quoted:c.quoted);
-    if String.length c.path > 0 then begin
-      Buffer.add_string b "; Path=";
-      Buffer.add_string b (sanitize_cookie_path c.path)
-    end;
-    if String.length c.domain > 0 then
-      begin if valid_cookie_domain c.domain then begin
-        let d =
-          if c.domain.[0] = '.' then
-            String.sub c.domain 1 (String.length c.domain - 1)
-          else c.domain
-        in
-        Buffer.add_string b "; Domain=";
-        Buffer.add_string b d
-      end (* else: invalid domain dropped (Go logs a warning; omitted). *)
-      end;
+    ZS.iter
+      (fun path ->
+        Buffer.add_string b "; Path=";
+        Buffer.add_string b (sanitize_cookie_path path))
+      c.path;
+    ZS.iter
+      (fun domain ->
+        if valid_cookie_domain domain then begin
+          let d =
+            if domain.[0] = '.' then
+              String.sub domain 1 (String.length domain - 1)
+            else domain
+          in
+          Buffer.add_string b "; Domain=";
+          Buffer.add_string b d
+        end (* else: invalid domain dropped (Go logs a warning; omitted). *))
+      c.domain;
     if c.expires <> 0. && valid_cookie_expires c.expires then begin
       Buffer.add_string b "; Expires=";
       Buffer.add_string b (format_time c.expires)
@@ -500,22 +516,22 @@ let valid c =
     | Some b -> Error (Invalid_value b)
     | None -> (
         let invalid_path =
-          if String.length c.path > 0 then begin
-            let bad = ref None in
-            String.iter
-              (fun b ->
-                if !bad = None && not (valid_cookie_path_byte b) then
-                  bad := Some b)
-              c.path;
-            !bad
-          end
-          else None
+          ZS.fold ~zero:None
+            ~set:(fun path ->
+              let bad = ref None in
+              String.iter
+                (fun b ->
+                  if !bad = None && not (valid_cookie_path_byte b) then
+                    bad := Some b)
+                path;
+              !bad)
+            c.path
         in
         match invalid_path with
         | Some b -> Error (Invalid_path b)
         | None ->
-            if String.length c.domain > 0 && not (valid_cookie_domain c.domain)
-            then Error Invalid_domain
+            if ZS.check (fun d -> not (valid_cookie_domain d)) c.domain then
+              Error Invalid_domain
             else if c.partitioned && not c.secure then
               Error Partitioned_without_secure
             else Ok ())

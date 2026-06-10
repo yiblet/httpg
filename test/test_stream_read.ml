@@ -44,7 +44,8 @@ let trailer_after_drain () =
   ignore (Httpg.Body.drain r.Httpg.Response.body);
   match r.Httpg.Response.trailer with
   | Some t ->
-      Alcotest.(check string) "trailer Md5" "abc123" (Httpg.Header.get t "Md5")
+      Alcotest.(check (option string))
+        "trailer Md5" (Some "abc123") (Httpg.Header.get t "Md5")
   | None -> Alcotest.fail "expected trailer after drain"
 
 (* A trailer without a declared Trailer header. *)
@@ -59,7 +60,9 @@ let trailer_undeclared_after_drain () =
     (Httpg.Body.read_all r.Httpg.Response.body);
   match r.Httpg.Response.trailer with
   | Some t ->
-      Alcotest.(check string) "late trailer" "yes" (Httpg.Header.get t "X-Late")
+      Alcotest.(check (option string))
+        "late trailer" (Some "yes")
+        (Httpg.Header.get t "X-Late")
   | None -> Alcotest.fail "expected trailer"
 
 (* Keep-alive: two HTTP/1.1 responses concatenated on one reader. *)

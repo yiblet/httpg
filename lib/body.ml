@@ -46,47 +46,32 @@ let to_stream (b : t) : stream =
         end
   | Stream next -> next
 
-let append_stream (s1 : stream) (s2 : stream) : stream =
-  let s1_completed = ref false in
-  let next () =
-    if !s1_completed then s2 ()
-    else
-      match s1 () with
-      | None ->
-          s1_completed := true;
-          s2 ()
-      | Some s -> Some s
-  in
-  next
+let of_seq (s : string Seq.t) : t =
+  let s = ref s in
+  Stream
+    (fun () ->
+      match !s () with
+      | Seq.Nil -> None
+      | Seq.Cons (cur, rest) ->
+          s := rest;
+          Some cur)
+
+let to_seq (b : t) : string Seq.t =
+  match b with
+  | Empty -> Seq.empty
+  | String s -> Seq.return s
+  | Stream next ->
+      Seq.unfold (fun next -> next () |> Option.map (fun s -> (s, next))) next
 
 let append (b1 : t) (b2 : t) : t =
   match (b1, b2) with
   | Empty, _ -> b2
   | _, Empty -> b1
   | String s1, String s2 -> String (s1 ^ s2)
-  | _, _ -> Stream (append_stream (to_stream b1) (to_stream b2))
+  | _, _ -> Seq.append (to_seq b1) (to_seq b2) |> of_seq
 
 let concat (gens : t list) : t =
-  let remaining = ref gens in
-  let rec next () =
-    match !remaining with
-    | [] -> None
-    | g :: rest -> (
-        match g with
-        | Empty ->
-            remaining := rest;
-            next ()
-        | String s ->
-            remaining := rest;
-            Some s
-        | Stream st -> (
-            match st () with
-            | None ->
-                remaining := rest;
-                next ()
-            | Some s -> Some s))
-  in
-  Stream next
+  List.map to_seq gens |> List.to_seq |> Seq.concat |> of_seq
 
 (* Read and discard until EOF, or until more than [limit] bytes have been read.
    [`Drained] (within [limit]) positions a kept-alive conn at the next message
@@ -110,32 +95,37 @@ let drain ?(limit : int option) (b : t) : [ `Drained | `Too_big ] =
 
 (* Apply [f] to each successive chunk until EOF (the analogue of Go's io.Copy
    pulling from a body reader). *)
-let iter (f : string -> unit) (b : t) : unit =
-  match b with
-  | Empty -> ()
-  | String s -> f s
-  | Stream next ->
-      let rec loop () =
-        match next () with
-        | None -> ()
-        | Some s ->
-            f s;
-            loop ()
-      in
-      loop ()
+let iter (f : string -> unit) (b : t) : unit = to_seq b |> Seq.iter f
+let fold_left f (b : t) acc = to_seq b |> Seq.fold_left f acc
 
-let fold f (b : t) acc =
-  let acc = ref acc in
-  iter (fun s -> acc := f s !acc) b;
-  !acc
+let read_until (b : t) (max : int) : string * t option =
+  let exception Stop of Buffer.t * string in
+  let split s v = (String.sub s 0 v, String.sub s v (String.length s - v)) in
+  let buf = Buffer.create 256 in
+  let folder buf s =
+    if Buffer.length buf + String.length s < max then (
+      Buffer.add_string buf s;
+      buf)
+    else
+      let prefix, remainder = split s (max - Buffer.length buf) in
+      Buffer.add_string buf prefix;
+      raise (Stop (buf, remainder))
+  in
+  try
+    let buf = fold_left folder b buf in
+    (Buffer.contents buf, None)
+  with Stop (buf, remainder) ->
+    ( Buffer.contents buf,
+      if String.length remainder = 0 then None
+      else Some (append (String remainder) b) )
 
 let read_all (b : t) : string =
   let buf = Buffer.create 256 in
-  let folder s buf =
+  let folder buf s =
     Buffer.add_string buf s;
     buf
   in
-  fold folder b buf |> Buffer.contents
+  fold_left folder b buf |> Buffer.contents
 
 (* Write the raw body bytes to [w] (no framing). *)
 let write (w : Eio.Buf_write.t) (b : t) : unit = iter (Eio.Buf_write.string w) b

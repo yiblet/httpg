@@ -6,7 +6,9 @@ let read ?request s =
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
 let body_of (r : Httpg.Response.t) = Httpg.Body.read_all r.body
-let i64 = Int64.to_string
+
+(* content_length is [int64 option]: [None] = unknown (Go's -1). *)
+let i64 (cl : int64 option) = Int64.to_string (Option.value ~default:(-1L) cl)
 
 (* HTTP/1.0 unchunked, Connection: close, no Content-Length. *)
 let http10_close () =
@@ -50,8 +52,8 @@ let content_length () =
   let r = read raw in
   Alcotest.(check string) "content_length" "10" (i64 r.content_length);
   Alcotest.(check bool) "close" true r.close;
-  Alcotest.(check string)
-    "cl header" "10"
+  Alcotest.(check (option string))
+    "cl header" (Some "10")
     (Httpg.Header.get r.header "Content-Length");
   Alcotest.(check string) "body" "Body here\n" (body_of r)
 
@@ -75,10 +77,10 @@ let location () =
       proto = Httpg_base.Protocol.Http11;
       header = Httpg.Header.create ();
       body = Httpg.Body.Empty;
-      content_length = 0L;
+      content_length = Some 0L;
       transfer_encoding = [];
       close = false;
-      host = "";
+      host = None;
       trailer = None;
       request_uri = "";
       remote_addr = "";

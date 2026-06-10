@@ -11,10 +11,10 @@ type t = {
   mutable proto : Httpg_base.Protocol.t;
   mutable header : Header.t;
   mutable body : Body.t;
-  mutable content_length : int64;
+  mutable content_length : int64 option; (* None = unknown (Go's -1) *)
   mutable transfer_encoding : string list;
   mutable close : bool;
-  mutable host : string;
+  mutable host : string option; (* None = derive from URL *)
   mutable trailer : Header.t option;
   mutable request_uri : string;
   mutable remote_addr : string;
@@ -22,6 +22,30 @@ type t = {
 
 (* defaultUserAgent (request.go). *)
 let default_user_agent = "Go-http-client/1.1"
+
+(* Smart constructor (Go's NewRequest): [url] is required; everything else is an
+   optional field. [host] defaults to the URL's host (Go sets [req.Host] from the
+   parsed URL); pass [~host] to override. No zero-value record to start from. *)
+let make ?(meth = Httpg_base.Method.Get) ?(proto = Httpg_base.Protocol.Http11)
+    ?(header = Header.create ()) ?(body = Body.Empty) ?(content_length = 0L)
+    ?(transfer_encoding = []) ?(close = false) ?host ?(trailer = None)
+    ?(request_uri = "") ?(remote_addr = "") url =
+  let url = Uri.of_string url in
+  {
+    meth;
+    url;
+    proto;
+    header;
+    body;
+    content_length =
+      (if Int64.compare content_length 0L < 0 then None else Some content_length);
+    transfer_encoding;
+    close;
+    host = (match host with Some _ as h -> h | None -> Uri.host url);
+    trailer;
+    request_uri;
+    remote_addr;
+  }
 
 (* ParseHTTPVersion(vers): kept as Go's package-level helper; the parsing logic
    now lives in {!Httpg_base.Protocol.of_string}. *)
@@ -38,7 +62,9 @@ let proto_at_least (r : t) major minor =
    carries the [100-continue] token (case-insensitive, token-boundary aware).
    Reuses [Transfer.has_token], the faithful port of header.go's [hasToken]. *)
 let expects_continue (r : t) =
-  Transfer.has_token (Header.get r.header "Expect") "100-continue"
+  match Header.get r.header "Expect" with
+  | None -> false
+  | Some s -> Transfer.has_token s "100-continue"
 
 (* Request.UserAgent. *)
 let user_agent (r : t) = Header.get r.header "User-Agent"
@@ -47,13 +73,13 @@ let user_agent (r : t) = Header.get r.header "User-Agent"
 let referer (r : t) = Header.get r.header "Referer"
 
 (* Request.Cookies. *)
-let cookies (r : t) = Cookie.read_cookies r.header ~filter:""
+let cookies (r : t) = Cookie.read_cookies r.header ~filter:None
 
 (* Request.Cookie(name): the named cookie, or None (ErrNoCookie). *)
 let cookie (r : t) name =
   if name = "" then None
   else
-    match Cookie.read_cookies r.header ~filter:name with
+    match Cookie.read_cookies r.header ~filter:(Some name) with
     | c :: _ -> Some c
     | [] -> None
 
@@ -65,8 +91,9 @@ let add_cookie (r : t) (c : Cookie.t) =
       (Cookie.sanitize_cookie_value c.Cookie.value ~quoted:c.Cookie.quoted)
   in
   match Header.get r.header "Cookie" with
-  | "" -> r.header <- Header.set r.header "Cookie" s
-  | existing -> r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
+  | None -> r.header <- Header.set r.header "Cookie" s
+  | Some existing ->
+      r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
 
 (* parseBasicAuth(auth). *)
 let parse_basic_auth (auth : string) : (string * string) option =
@@ -96,8 +123,8 @@ let parse_basic_auth (auth : string) : (string * string) option =
 (* Request.BasicAuth. *)
 let basic_auth (r : t) : (string * string) option =
   match Header.get r.header "Authorization" with
-  | "" -> None
-  | auth -> parse_basic_auth auth
+  | None -> None
+  | Some auth -> parse_basic_auth auth
 
 (* basicAuth(username, password) (client.go). *)
 let basic_auth_encode username password =

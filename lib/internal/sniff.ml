@@ -53,10 +53,10 @@ let html_sig h : sniff_sig =
   if String.length data < hlen + 1 then ""
   else begin
     let rec loop i =
-      if i >= hlen then
-        (* Next byte must be a tag-terminating byte (0xTT). *)
-        begin if not (is_tt data.[hlen]) then "" else "text/html; charset=utf-8"
-        end
+      if i >= hlen then (* Next byte must be a tag-terminating byte (0xTT). *)
+        begin
+        if not (is_tt data.[hlen]) then "" else "text/html; charset=utf-8"
+      end
       else begin
         let b = Char.code h.[i] in
         let db = Char.code data.[i] in

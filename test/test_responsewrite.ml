@@ -14,10 +14,10 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
         (Httpg_base.Protocol.of_string (Printf.sprintf "HTTP/1.%d" proto_minor));
     header = Httpg.Header.create ();
     body = Httpg.Body.Empty;
-    content_length = 0L;
+    content_length = Some 0L;
     transfer_encoding = [];
     close = false;
-    host = "";
+    host = None;
     trailer = None;
     request_uri = "";
     remote_addr = "";
@@ -43,7 +43,8 @@ let resp ~status_code ?(proto_major = 1) ?(proto_minor = 1)
            (Printf.sprintf "HTTP/%d.%d" proto_major proto_minor));
     header;
     body;
-    content_length;
+    content_length =
+      (if Int64.compare content_length 0L < 0 then None else Some content_length);
     transfer_encoding;
     close;
     uncompressed = false;

@@ -56,7 +56,8 @@ let respond ~header ?(body = Body.Empty) ?content_length status : Response.t =
     proto = Httpg_base.Protocol.Http11;
     header;
     body;
-    content_length;
+    content_length =
+      (if Int64.compare content_length 0L < 0 then None else Some content_length);
     transfer_encoding = [];
     close = false;
     uncompressed = false;
@@ -310,57 +311,66 @@ let etag_weak_match a b =
 
 type cond_result = Cond_none | Cond_true | Cond_false
 
-(* Go checkIfMatch. *)
+(* Go checkIfMatch. [etag] is the response's Etag, when it has one. *)
 let check_if_match ~etag (r : Request.t) =
-  let im = Header.get r.Request.header "If-Match" in
-  if im = "" then Cond_none
-  else begin
-    let etag_hdr = etag in
-    let rec loop im =
-      let im = trim_string im in
-      if String.length im = 0 then Cond_false
-      else if im.[0] = ',' then loop (String.sub im 1 (String.length im - 1))
-      else if im.[0] = '*' then Cond_true
-      else
-        match scan_etag im with
-        | None -> Cond_false
-        | Some (etag, remain) ->
-            if etag_strong_match etag etag_hdr then Cond_true else loop remain
-    in
-    loop im
-  end
+  match Header.get r.Request.header "If-Match" with
+  | None -> Cond_none
+  | Some im ->
+      let strong_match candidate =
+        match etag with
+        | Some etag_hdr -> etag_strong_match candidate etag_hdr
+        | None -> false
+      in
+      let rec loop im =
+        let im = trim_string im in
+        if String.length im = 0 then Cond_false
+        else if im.[0] = ',' then loop (String.sub im 1 (String.length im - 1))
+        else if im.[0] = '*' then Cond_true
+        else
+          match scan_etag im with
+          | None -> Cond_false
+          | Some (etag, remain) ->
+              if strong_match etag then Cond_true else loop remain
+      in
+      loop im
 
 (* Go checkIfUnmodifiedSince. *)
 let check_if_unmodified_since (r : Request.t) ~modtime =
-  let ius = Header.get r.Request.header "If-Unmodified-Since" in
-  if ius = "" || is_zero_time modtime then Cond_none
-  else
-    match Http_time.parse_http_time ius with
-    | None -> Cond_none
-    | Some t ->
-        (* Last-Modified truncates sub-second precision; truncate modtime too. *)
-        let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
-        if modtime <= t then Cond_true else Cond_false
+  match Header.get r.Request.header "If-Unmodified-Since" with
+  | None -> Cond_none
+  | Some _ when is_zero_time modtime -> Cond_none
+  | Some ius -> (
+      match Http_time.parse_http_time ius with
+      | None -> Cond_none
+      | Some t ->
+          (* Last-Modified truncates sub-second precision; truncate modtime
+             too. *)
+          let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
+          if modtime <= t then Cond_true else Cond_false)
 
-(* Go checkIfNoneMatch. *)
+(* Go checkIfNoneMatch. [etag] is the response's Etag, when it has one. *)
 let check_if_none_match ~etag (r : Request.t) =
-  let inm = Header.get r.Request.header "If-None-Match" in
-  if inm = "" then Cond_none
-  else begin
-    let etag_hdr = etag in
-    let rec loop buf =
-      let buf = trim_string buf in
-      if String.length buf = 0 then Cond_true
-      else if buf.[0] = ',' then loop (String.sub buf 1 (String.length buf - 1))
-      else if buf.[0] = '*' then Cond_false
-      else
-        match scan_etag buf with
-        | None -> Cond_true
-        | Some (etag, remain) ->
-            if etag_weak_match etag etag_hdr then Cond_false else loop remain
-    in
-    loop inm
-  end
+  match Header.get r.Request.header "If-None-Match" with
+  | None -> Cond_none
+  | Some inm ->
+      let weak_match candidate =
+        match etag with
+        | Some etag_hdr -> etag_weak_match candidate etag_hdr
+        | None -> false
+      in
+      let rec loop buf =
+        let buf = trim_string buf in
+        if String.length buf = 0 then Cond_true
+        else if buf.[0] = ',' then
+          loop (String.sub buf 1 (String.length buf - 1))
+        else if buf.[0] = '*' then Cond_false
+        else
+          match scan_etag buf with
+          | None -> Cond_true
+          | Some (etag, remain) ->
+              if weak_match etag then Cond_false else loop remain
+      in
+      loop inm
 
 (* Go checkIfModifiedSince. *)
 let check_if_modified_since (r : Request.t) ~modtime =
@@ -368,16 +378,16 @@ let check_if_modified_since (r : Request.t) ~modtime =
     r.Request.meth <> Httpg_base.Method.Get
     && r.Request.meth <> Httpg_base.Method.Head
   then Cond_none
-  else begin
-    let ims = Header.get r.Request.header "If-Modified-Since" in
-    if ims = "" || is_zero_time modtime then Cond_none
-    else
-      match Http_time.parse_http_time ims with
-      | None -> Cond_none
-      | Some t ->
-          let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
-          if modtime <= t then Cond_false else Cond_true
-  end
+  else
+    match Header.get r.Request.header "If-Modified-Since" with
+    | None -> Cond_none
+    | Some _ when is_zero_time modtime -> Cond_none
+    | Some ims -> (
+        match Http_time.parse_http_time ims with
+        | None -> Cond_none
+        | Some t ->
+            let modtime = Float.of_int (int_of_float (Float.floor modtime)) in
+            if modtime <= t then Cond_false else Cond_true)
 
 (* Go checkIfRange. *)
 let check_if_range ~etag (r : Request.t) ~modtime =
@@ -385,27 +395,27 @@ let check_if_range ~etag (r : Request.t) ~modtime =
     r.Request.meth <> Httpg_base.Method.Get
     && r.Request.meth <> Httpg_base.Method.Head
   then Cond_none
-  else begin
-    let ir = Header.get r.Request.header "If-Range" in
-    if ir = "" then Cond_none
-    else
-      begin match scan_etag ir with
-      | Some (etag', _) when etag' <> "" ->
-          if etag_strong_match etag' etag then Cond_true else Cond_false
-      | _ -> (
-          if
-            (* The If-Range value is typically the ETag, but may also be the
-             modtime date. *)
-            is_zero_time modtime
-          then Cond_false
-          else
-            match Http_time.parse_http_time ir with
-            | None -> Cond_false
-            | Some t ->
-                if int_of_float t = int_of_float modtime then Cond_true
-                else Cond_false)
-      end
-  end
+  else
+    match Header.get r.Request.header "If-Range" with
+    | None -> Cond_none
+    | Some ir -> (
+        match scan_etag ir with
+        | Some (etag', _) when etag' <> "" -> (
+            match etag with
+            | Some etag_hdr when etag_strong_match etag' etag_hdr -> Cond_true
+            | _ -> Cond_false)
+        | _ -> (
+            if
+              (* The If-Range value is typically the ETag, but may also be the
+                 modtime date. *)
+              is_zero_time modtime
+            then Cond_false
+            else
+              match Http_time.parse_http_time ir with
+              | None -> Cond_false
+              | Some t ->
+                  if int_of_float t = int_of_float modtime then Cond_true
+                  else Cond_false))
 
 (* Go writeNotModified: clears representation metadata and writes 304. *)
 (* Go writeNotModified: a 304 response, clearing representation metadata from
@@ -416,7 +426,8 @@ let not_modified_response header : Response.t =
   let h = Header.del h "Content-Length" in
   let h = Header.del h "Content-Encoding" in
   let h =
-    if Header.get h "Etag" <> "" then Header.del h "Last-Modified" else h
+    if Option.is_some (Header.get h "Etag") then Header.del h "Last-Modified"
+    else h
   in
   respond ~header:h Httpg_base.Status.NotModified
 
@@ -427,15 +438,15 @@ let not_modified_response header : Response.t =
    response header built so far (carrying Etag/Last-Modified); [etag] is its
    Etag. *)
 let check_preconditions ~header ~etag (r : Request.t) ~modtime :
-    [ `Done of Response.t | `Range of string ] =
+    [ `Done of Response.t | `Range of string option ] =
   let precondition_failed () =
     `Done (respond ~header Httpg_base.Status.PreconditionFailed)
   in
   let gated_range () =
-    let range_header = Header.get r.Request.header "Range" in
-    if range_header <> "" && check_if_range ~etag r ~modtime = Cond_false then
-      `Range ""
-    else `Range range_header
+    match Header.get r.Request.header "Range" with
+    | None -> `Range None
+    | Some _ when check_if_range ~etag r ~modtime = Cond_false -> `Range None
+    | Some range_header -> `Range (Some range_header)
   in
   let ch = check_if_match ~etag r in
   let ch =
@@ -486,8 +497,8 @@ let parse_range s size =
   else
     let b = "bytes=" in
     if not (has_prefix s b) then Error (Invalid_range "")
-    else
-      begin try
+    else begin
+      try
         let body =
           String.sub s (String.length b) (String.length s - String.length b)
         in
@@ -498,8 +509,8 @@ let parse_range s size =
             (fun acc ra ->
               let ra = trim_string ra in
               if ra = "" then acc
-              else
-                begin match String.index_opt ra '-' with
+              else begin
+                match String.index_opt ra '-' with
                 | None -> raise (Invalid_range_sentinel "")
                 | Some dash ->
                     let start = trim_string (String.sub ra 0 dash) in
@@ -518,8 +529,8 @@ let parse_range s size =
                           let st = Int64.sub size i in
                           { start = st; length = Int64.sub size st } :: acc
                     end
-                    else
-                      begin match parse_int64 start with
+                    else begin
+                      match parse_int64 start with
                       | None -> raise (Invalid_range_sentinel "")
                       | Some i ->
                           if i >= size then begin
@@ -545,14 +556,14 @@ let parse_range s size =
                                   }
                                   :: acc
                           end
-                      end
-                end)
+                    end
+              end)
             [] parts
         in
         let ranges = List.rev ranges in
         if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
       with Invalid_range_sentinel m -> Error (Invalid_range m)
-      end
+    end
 
 let sum_ranges_size ranges =
   List.fold_left (fun acc ra -> Int64.add acc ra.length) 0L ranges
@@ -649,7 +660,7 @@ let serve_full (r : Request.t) ~h ~size ~read_window : Response.t =
   let h = Header.set h "Accept-Ranges" "bytes" in
   (* Go sends Content-Length only when there is no Content-Encoding. *)
   let content_length =
-    if Header.get h "Content-Encoding" = "" then size else -1L
+    match Header.get h "Content-Encoding" with None -> size | Some _ -> -1L
   in
   let body =
     if r.Request.meth = Httpg_base.Method.Head then Body.Empty
@@ -668,24 +679,35 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
   | `Done resp -> resp
   | `Range range_req ->
       (* Content-Type: ext table → Sniff fallback, unless the caller set it. *)
-      (if not (Header.has !h "Content-Type") then
-         match mime_by_ext (ext_of name) with
-         | Some ctype -> h := Header.set !h "Content-Type" ctype
-         | None ->
-             let probe =
-               if size < Int64.of_int sniff_len then Int64.to_int size
-               else sniff_len
-             in
-             let buf = read_window ~off:0L ~len:probe in
-             h := Header.set !h "Content-Type" (Sniff.detect_content_type buf));
-      let ctype = Header.get !h "Content-Type" in
+      let ctype =
+        match Header.get !h "Content-Type" with
+        | Some ctype -> ctype
+        | None ->
+            let ctype =
+              match mime_by_ext (ext_of name) with
+              | Some ctype -> ctype
+              | None ->
+                  let probe =
+                    if size < Int64.of_int sniff_len then Int64.to_int size
+                    else sniff_len
+                  in
+                  let buf = read_window ~off:0L ~len:probe in
+                  Sniff.detect_content_type buf
+            in
+            h := Header.set !h "Content-Type" ctype;
+            ctype
+      in
       let is_head = r.Request.meth = Httpg_base.Method.Head in
       (* parse the (If-Range-gated) Range header, then dispatch
          full-200 / single-206 / multipart-206 / 416. *)
       let range_error msg =
         Server.error msg Httpg_base.Status.RequestedRangeNotSatisfiable
       in
-      begin match parse_range range_req size with
+      begin match
+        match range_req with
+        | None -> Ok []
+        | Some range_req -> parse_range range_req size
+      with
       | Error No_overlap when size = 0L ->
           (* Empty file + unsatisfiable range: ignore the range, serve 200. *)
           serve_full r ~h:!h ~size ~read_window
@@ -805,12 +827,11 @@ let serve_file ~sw (r : Request.t) (fs : file_system) name ~redirect :
           if not redirect then None
           else begin
             let url = upath in
-            if d.fi_is_dir then
-              begin if
-                String.length url > 0 && url.[String.length url - 1] <> '/'
+            if d.fi_is_dir then begin
+              if String.length url > 0 && url.[String.length url - 1] <> '/'
               then Some (`Local (path_base url ^ "/"))
               else None
-              end
+            end
             else if String.length url > 0 && url.[String.length url - 1] = '/'
             then begin
               let base = path_base url in

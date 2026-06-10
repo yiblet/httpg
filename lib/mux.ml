@@ -17,13 +17,13 @@ let clean_path p =
   else begin
     let p = if p.[0] <> '/' then "/" ^ p else p in
     let np = Pattern.path_clean p in
-    if p.[String.length p - 1] = '/' && np <> "/" then
-      begin if
+    if p.[String.length p - 1] = '/' && np <> "/" then begin
+      if
         String.length p = String.length np + 1
         && String.starts_with ~prefix:np p
       then p
       else np ^ "/"
-      end
+    end
     else np
   end
 
@@ -157,14 +157,15 @@ let find_handler mux (r : Request.t) =
     match redir with
     | Some u -> Server.redirect_handler u Httpg_base.Status.TemporaryRedirect
     | None ->
+        let host = Option.value ~default:"" r.host in
         let m, _ =
-          match_or_redirect mux ~host:r.host ~method_:r.meth ~path:escaped_path
+          match_or_redirect mux ~host ~method_:r.meth ~path:escaped_path
             ~try_redirect:false ~raw_query
         in
-        find_handler_finish mux ~host:r.host ~path:escaped_path m
+        find_handler_finish mux ~host ~path:escaped_path m
   end
   else begin
-    let host = strip_host_port r.host in
+    let host = strip_host_port (Option.value ~default:"" r.host) in
     let path = clean_path escaped_path in
     let m, redir =
       match_or_redirect mux ~host ~method_:r.meth ~path ~try_redirect:true

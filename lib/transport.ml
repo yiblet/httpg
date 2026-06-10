@@ -176,7 +176,9 @@ let scheme_host_port (req : Request.t) =
     | None -> "http"
   in
   let host =
-    match Uri.host url with Some h when h <> "" -> h | _ -> req.Request.host
+    match Uri.host url with
+    | Some h when h <> "" -> h
+    | _ -> Option.value ~default:"" req.Request.host
   in
   let port =
     match Uri.port url with
@@ -218,10 +220,12 @@ let reusable t (req : Request.t) (resp : Response.t) =
 
 (* Set the default request headers Go's Transport/Request.write supplies. *)
 let set_default_headers (req : Request.t) ~host =
-  if req.Request.host = "" then req.Request.host <- host;
-  if Header.get req.Request.header "User-Agent" = "" then
-    req.Request.header <-
-      Header.set req.Request.header "User-Agent" default_user_agent
+  if req.Request.host = None then req.Request.host <- Some host;
+  match Header.get req.Request.header "User-Agent" with
+  | None ->
+      req.Request.header <-
+        Header.set req.Request.header "User-Agent" default_user_agent
+  | Some _ -> ()
 
 let or_raise = function
   | Ok v -> v
@@ -396,8 +400,8 @@ let client_request_of_request (req : Request.t) : Api.client_request =
       | Some t -> api_header_of_header t
       | None -> Api.Header.create ());
     creq_body = api_body_of_body req.Request.body;
-    creq_host = req.Request.host;
-    creq_content_length = req.Request.content_length;
+    creq_host = Option.value ~default:"" req.Request.host;
+    creq_content_length = Option.value ~default:(-1L) req.Request.content_length;
     creq_close = req.Request.close;
   }
 
@@ -407,7 +411,9 @@ let response_of_client_response (cr : Api.client_response) : Response.t =
     proto = Httpg_base.Protocol.Http20;
     header = header_of_api_header cr.cres_header;
     body = body_of_api_body cr.cres_body;
-    content_length = cr.cres_content_length;
+    content_length =
+      (let n = cr.cres_content_length in
+       if Int64.compare n 0L < 0 then None else Some n);
     transfer_encoding = [];
     close = false;
     uncompressed = cr.cres_uncompressed;

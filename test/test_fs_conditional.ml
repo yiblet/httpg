@@ -95,11 +95,11 @@ let if_modified_since_304 () =
                 let last_mod = Header.get r0.Response.header "Last-Modified" in
                 let status, body, _ =
                   request_with_headers ~sw c (url ^ "/x.txt")
-                    [ ("If-Modified-Since", last_mod) ]
+                    [ ("If-Modified-Since", Option.get last_mod) ]
                 in
                 (last_mod, status, body))))
   in
-  Alcotest.(check bool) "Last-Modified present" true (last_mod <> "");
+  Alcotest.(check bool) "Last-Modified present" true (Option.is_some last_mod);
   Alcotest.(check int) "If-Modified-Since >= modtime -> 304" 304 status;
   Alcotest.(check string) "304 body empty" "" body
 
@@ -194,7 +194,9 @@ let if_unmodified_since_412 () =
                 in
                 let r0 = Client.get ~sw c (url ^ "/u.txt") in
                 ignore (Body.drain r0.Response.body);
-                let last_mod = Header.get r0.Response.header "Last-Modified" in
+                let last_mod =
+                  Option.get (Header.get r0.Response.header "Last-Modified")
+                in
                 let st_eq, b_eq, _ =
                   request_with_headers ~sw c (url ^ "/u.txt")
                     [ ("If-Unmodified-Since", last_mod) ]

@@ -21,6 +21,9 @@ val to_stream : t -> unit -> string option
     immediately, [String s] yields [s] once then [None], [Stream next] is
     [next]. The dual of {!of_stream}. *)
 
+val of_seq : string Seq.t -> t
+val to_seq : t -> string Seq.t
+
 val of_flow : ?chunk:int -> _ Eio.Flow.source -> t
 (** [of_flow src] is a streaming body that reads [src] in chunks (up to [chunk]
     bytes, default 64 KiB) until EOF. [src] must remain open for the body's
@@ -45,6 +48,11 @@ val concat : t list -> t
 val read_all : t -> string
 (** Read the entire body to a string. *)
 
+val read_until : t -> int -> string * t option
+(** [read_until b max] reads the body until EOF or [max] bytes have been read.
+    The first string is the read bytes, the second is the remainder of the body
+    (if any). *)
+
 val drain : ?limit:int -> t -> [ `Drained | `Too_big ]
 (** [drain ?limit b] reads and discards the body until EOF, or until more than
     [limit] bytes have been read. [`Drained] (within [limit] when given)
@@ -57,9 +65,10 @@ val iter : (string -> unit) -> t -> unit
     streaming without materializing ([Empty] yields no calls; [String s] one
     call [f s]; a [Stream] one call per chunk). *)
 
-val fold : (string -> 'a -> 'a) -> t -> 'a -> 'a
-(** [fold f b init] folds [f] over each successive chunk in order until EOF,
-    streaming without materializing (same chunk sequence as {!iter}). *)
+val fold_left : ('a -> string -> 'a) -> t -> 'a -> 'a
+(** [fold_left f b init] folds [f] over each successive chunk in order until
+    EOF, streaming without materializing (same chunk sequence as {!iter}). The
+    accumulator is passed to [f] as the second argument. *)
 
 val write : Eio.Buf_write.t -> t -> unit
 (** [write w b] writes the raw body bytes to [w] with no transfer framing. *)

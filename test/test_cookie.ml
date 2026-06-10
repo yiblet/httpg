@@ -30,10 +30,15 @@ let cookie_to_string c =
     "{name=%S value=%S quoted=%b path=%S domain=%S expires=%g raw_expires=%S \
      max_age=%d secure=%b http_only=%b same_site=%s partitioned=%b raw=%S \
      unparsed=[%s]}"
-    c.name c.value c.quoted c.path c.domain c.expires c.raw_expires c.max_age
-    c.secure c.http_only
+    c.name c.value c.quoted
+    (Option.value ~default:"" c.path)
+    (Option.value ~default:"" c.domain)
+    c.expires
+    (Option.value ~default:"" c.raw_expires)
+    c.max_age c.secure c.http_only
     (same_site_to_string c.same_site)
-    c.partitioned c.raw
+    c.partitioned
+    (Option.value ~default:"" c.raw)
     (String.concat "; " c.unparsed)
 
 let cookie_eq a b =
@@ -67,114 +72,58 @@ let exp_1600 = -11644556339. (* year 1600 -> invalid *)
 
 let write_set_cookies_tests =
   [
-    ({ default with name = "cookie-1"; value = "v$1" }, "cookie-1=v$1");
-    ( { default with name = "cookie-2"; value = "two"; max_age = 3600 },
+    (make ~name:"cookie-1" ~value:"v$1" (), "cookie-1=v$1");
+    ( make ~name:"cookie-2" ~value:"two" ~max_age:3600 (),
       "cookie-2=two; Max-Age=3600" );
-    ( {
-        default with
-        name = "cookie-3";
-        value = "three";
-        domain = ".example.com";
-      },
+    ( make ~name:"cookie-3" ~value:"three" ~domain:".example.com" (),
       "cookie-3=three; Domain=example.com" );
-    ( { default with name = "cookie-4"; value = "four"; path = "/restricted/" },
+    ( make ~name:"cookie-4" ~value:"four" ~path:"/restricted/" (),
       "cookie-4=four; Path=/restricted/" );
-    ( {
-        default with
-        name = "cookie-5";
-        value = "five";
-        domain = "wrong;bad.abc";
-      },
+    ( make ~name:"cookie-5" ~value:"five" ~domain:"wrong;bad.abc" (),
       "cookie-5=five" );
-    ( { default with name = "cookie-6"; value = "six"; domain = "bad-.abc" },
-      "cookie-6=six" );
-    ( { default with name = "cookie-7"; value = "seven"; domain = "127.0.0.1" },
+    (make ~name:"cookie-6" ~value:"six" ~domain:"bad-.abc" (), "cookie-6=six");
+    ( make ~name:"cookie-7" ~value:"seven" ~domain:"127.0.0.1" (),
       "cookie-7=seven; Domain=127.0.0.1" );
-    ( { default with name = "cookie-8"; value = "eight"; domain = "::1" },
-      "cookie-8=eight" );
-    ( { default with name = "cookie-9"; value = "expiring"; expires = exp_2009 },
+    (make ~name:"cookie-8" ~value:"eight" ~domain:"::1" (), "cookie-8=eight");
+    ( make ~name:"cookie-9" ~value:"expiring" ~expires:exp_2009 (),
       "cookie-9=expiring; Expires=Tue, 10 Nov 2009 23:00:00 GMT" );
-    ( {
-        default with
-        name = "cookie-10";
-        value = "expiring-1601";
-        expires = exp_1601;
-      },
+    ( make ~name:"cookie-10" ~value:"expiring-1601" ~expires:exp_1601 (),
       "cookie-10=expiring-1601; Expires=Mon, 01 Jan 1601 01:01:01 GMT" );
-    ( {
-        default with
-        name = "cookie-11";
-        value = "invalid-expiry";
-        expires = exp_1600;
-      },
+    ( make ~name:"cookie-11" ~value:"invalid-expiry" ~expires:exp_1600 (),
       "cookie-11=invalid-expiry" );
-    ( {
-        default with
-        name = "cookie-12";
-        value = "samesite-default";
-        same_site = Same_site_default_mode;
-      },
+    ( make ~name:"cookie-12" ~value:"samesite-default"
+        ~same_site:Same_site_default_mode (),
       "cookie-12=samesite-default" );
-    ( {
-        default with
-        name = "cookie-13";
-        value = "samesite-lax";
-        same_site = Same_site_lax_mode;
-      },
+    ( make ~name:"cookie-13" ~value:"samesite-lax" ~same_site:Same_site_lax_mode
+        (),
       "cookie-13=samesite-lax; SameSite=Lax" );
-    ( {
-        default with
-        name = "cookie-14";
-        value = "samesite-strict";
-        same_site = Same_site_strict_mode;
-      },
+    ( make ~name:"cookie-14" ~value:"samesite-strict"
+        ~same_site:Same_site_strict_mode (),
       "cookie-14=samesite-strict; SameSite=Strict" );
-    ( {
-        default with
-        name = "cookie-15";
-        value = "samesite-none";
-        same_site = Same_site_none_mode;
-      },
+    ( make ~name:"cookie-15" ~value:"samesite-none"
+        ~same_site:Same_site_none_mode (),
       "cookie-15=samesite-none; SameSite=None" );
-    ( {
-        default with
-        name = "cookie-16";
-        value = "partitioned";
-        same_site = Same_site_none_mode;
-        secure = true;
-        path = "/";
-        partitioned = true;
-      },
+    ( make ~name:"cookie-16" ~value:"partitioned" ~same_site:Same_site_none_mode
+        ~secure:true ~path:"/" ~partitioned:true (),
       "cookie-16=partitioned; Path=/; Secure; SameSite=None; Partitioned" );
-    ({ default with name = "special-1"; value = "a z" }, "special-1=\"a z\"");
-    ({ default with name = "special-2"; value = " z" }, "special-2=\" z\"");
-    ({ default with name = "special-3"; value = "a " }, "special-3=\"a \"");
-    ({ default with name = "special-4"; value = " " }, "special-4=\" \"");
-    ({ default with name = "special-5"; value = "a,z" }, "special-5=\"a,z\"");
-    ({ default with name = "special-6"; value = ",z" }, "special-6=\",z\"");
-    ({ default with name = "special-7"; value = "a," }, "special-7=\"a,\"");
-    ({ default with name = "special-8"; value = "," }, "special-8=\",\"");
-    ({ default with name = "empty-value"; value = "" }, "empty-value=");
-    ({ default with name = "" }, "");
-    ({ default with name = "\t" }, "");
-    ({ default with name = "\r" }, "");
-    ({ default with name = "a\nb"; value = "v" }, "");
-    ({ default with name = "a\rb"; value = "v" }, "");
-    ( { default with name = "cookie"; value = "quoted"; quoted = true },
-      "cookie=\"quoted\"" );
-    ( {
-        default with
-        name = "cookie";
-        value = "quoted with spaces";
-        quoted = true;
-      },
+    (make ~name:"special-1" ~value:"a z" (), "special-1=\"a z\"");
+    (make ~name:"special-2" ~value:" z" (), "special-2=\" z\"");
+    (make ~name:"special-3" ~value:"a " (), "special-3=\"a \"");
+    (make ~name:"special-4" ~value:" " (), "special-4=\" \"");
+    (make ~name:"special-5" ~value:"a,z" (), "special-5=\"a,z\"");
+    (make ~name:"special-6" ~value:",z" (), "special-6=\",z\"");
+    (make ~name:"special-7" ~value:"a," (), "special-7=\"a,\"");
+    (make ~name:"special-8" ~value:"," (), "special-8=\",\"");
+    (make ~name:"empty-value" ~value:"" (), "empty-value=");
+    (make ~name:"" ~value:"" (), "");
+    (make ~name:"\t" ~value:"" (), "");
+    (make ~name:"\r" ~value:"" (), "");
+    (make ~name:"a\nb" ~value:"v" (), "");
+    (make ~name:"a\rb" ~value:"v" (), "");
+    (make ~name:"cookie" ~value:"quoted" ~quoted:true (), "cookie=\"quoted\"");
+    ( make ~name:"cookie" ~value:"quoted with spaces" ~quoted:true (),
       "cookie=\"quoted with spaces\"" );
-    ( {
-        default with
-        name = "cookie";
-        value = "quoted,with,commas";
-        quoted = true;
-      },
+    ( make ~name:"cookie" ~value:"quoted,with,commas" ~quoted:true (),
       "cookie=\"quoted,with,commas\"" );
   ]
 
@@ -191,9 +140,7 @@ let write_set_cookies_cases =
 let read_set_cookies_tests =
   [
     ( [ ("Set-Cookie", [ "Cookie-1=v$1" ]) ],
-      [
-        { default with name = "Cookie-1"; value = "v$1"; raw = "Cookie-1=v$1" };
-      ] );
+      [ make ~name:"Cookie-1" ~value:"v$1" ~raw:"Cookie-1=v$1" () ] );
     ( [
         ( "Set-Cookie",
           [
@@ -202,19 +149,13 @@ let read_set_cookies_tests =
           ] );
       ],
       [
-        {
-          default with
-          name = "NID";
-          value = "99=YsDT5i3E-CXax-";
-          path = "/";
-          domain = ".google.ch";
-          http_only = true;
-          expires = exp_2011;
-          raw_expires = "Wed, 23-Nov-2011 01:05:03 GMT";
-          raw =
+        make ~name:"NID" ~value:"99=YsDT5i3E-CXax-" ~path:"/"
+          ~domain:".google.ch" ~http_only:true ~expires:exp_2011
+          ~raw_expires:"Wed, 23-Nov-2011 01:05:03 GMT"
+          ~raw:
             "NID=99=YsDT5i3E-CXax-; expires=Wed, 23-Nov-2011 01:05:03 GMT; \
-             path=/; domain=.google.ch; HttpOnly";
-        };
+             path=/; domain=.google.ch; HttpOnly"
+          ();
       ] );
     ( [
         ( "Set-Cookie",
@@ -224,171 +165,84 @@ let read_set_cookies_tests =
           ] );
       ],
       [
-        {
-          default with
-          name = ".ASPXAUTH";
-          value = "7E3AA";
-          path = "/";
-          expires = exp_2012;
-          raw_expires = "Wed, 07-Mar-2012 14:25:06 GMT";
-          http_only = true;
-          raw =
+        make ~name:".ASPXAUTH" ~value:"7E3AA" ~path:"/" ~expires:exp_2012
+          ~raw_expires:"Wed, 07-Mar-2012 14:25:06 GMT" ~http_only:true
+          ~raw:
             ".ASPXAUTH=7E3AA; expires=Wed, 07-Mar-2012 14:25:06 GMT; path=/; \
-             HttpOnly";
-        };
+             HttpOnly"
+          ();
       ] );
     ( [ ("Set-Cookie", [ "ASP.NET_SessionId=foo; path=/; HttpOnly" ]) ],
       [
-        {
-          default with
-          name = "ASP.NET_SessionId";
-          value = "foo";
-          path = "/";
-          http_only = true;
-          raw = "ASP.NET_SessionId=foo; path=/; HttpOnly";
-        };
+        make ~name:"ASP.NET_SessionId" ~value:"foo" ~path:"/" ~http_only:true
+          ~raw:"ASP.NET_SessionId=foo; path=/; HttpOnly" ();
       ] );
     ( [ ("Set-Cookie", [ "samesitedefault=foo; SameSite" ]) ],
       [
-        {
-          default with
-          name = "samesitedefault";
-          value = "foo";
-          same_site = Same_site_default_mode;
-          raw = "samesitedefault=foo; SameSite";
-        };
+        make ~name:"samesitedefault" ~value:"foo"
+          ~same_site:Same_site_default_mode ~raw:"samesitedefault=foo; SameSite"
+          ();
       ] );
     ( [ ("Set-Cookie", [ "samesiteinvalidisdefault=foo; SameSite=invalid" ]) ],
       [
-        {
-          default with
-          name = "samesiteinvalidisdefault";
-          value = "foo";
-          same_site = Same_site_default_mode;
-          raw = "samesiteinvalidisdefault=foo; SameSite=invalid";
-        };
+        make ~name:"samesiteinvalidisdefault" ~value:"foo"
+          ~same_site:Same_site_default_mode
+          ~raw:"samesiteinvalidisdefault=foo; SameSite=invalid" ();
       ] );
     ( [ ("Set-Cookie", [ "samesitelax=foo; SameSite=Lax" ]) ],
       [
-        {
-          default with
-          name = "samesitelax";
-          value = "foo";
-          same_site = Same_site_lax_mode;
-          raw = "samesitelax=foo; SameSite=Lax";
-        };
+        make ~name:"samesitelax" ~value:"foo" ~same_site:Same_site_lax_mode
+          ~raw:"samesitelax=foo; SameSite=Lax" ();
       ] );
     ( [ ("Set-Cookie", [ "samesitestrict=foo; SameSite=Strict" ]) ],
       [
-        {
-          default with
-          name = "samesitestrict";
-          value = "foo";
-          same_site = Same_site_strict_mode;
-          raw = "samesitestrict=foo; SameSite=Strict";
-        };
+        make ~name:"samesitestrict" ~value:"foo"
+          ~same_site:Same_site_strict_mode
+          ~raw:"samesitestrict=foo; SameSite=Strict" ();
       ] );
     ( [ ("Set-Cookie", [ "samesitenone=foo; SameSite=None" ]) ],
       [
-        {
-          default with
-          name = "samesitenone";
-          value = "foo";
-          same_site = Same_site_none_mode;
-          raw = "samesitenone=foo; SameSite=None";
-        };
+        make ~name:"samesitenone" ~value:"foo" ~same_site:Same_site_none_mode
+          ~raw:"samesitenone=foo; SameSite=None" ();
       ] );
     ( [ ("Set-Cookie", [ "special-1=a z" ]) ],
-      [
-        {
-          default with
-          name = "special-1";
-          value = "a z";
-          raw = "special-1=a z";
-        };
-      ] );
+      [ make ~name:"special-1" ~value:"a z" ~raw:"special-1=a z" () ] );
     ( [ ("Set-Cookie", [ "special-2=\" z\"" ]) ],
       [
-        {
-          default with
-          name = "special-2";
-          value = " z";
-          quoted = true;
-          raw = "special-2=\" z\"";
-        };
+        make ~name:"special-2" ~value:" z" ~quoted:true ~raw:"special-2=\" z\""
+          ();
       ] );
     ( [ ("Set-Cookie", [ "special-3=\"a \"" ]) ],
       [
-        {
-          default with
-          name = "special-3";
-          value = "a ";
-          quoted = true;
-          raw = "special-3=\"a \"";
-        };
+        make ~name:"special-3" ~value:"a " ~quoted:true ~raw:"special-3=\"a \""
+          ();
       ] );
     ( [ ("Set-Cookie", [ "special-4=\" \"" ]) ],
       [
-        {
-          default with
-          name = "special-4";
-          value = " ";
-          quoted = true;
-          raw = "special-4=\" \"";
-        };
+        make ~name:"special-4" ~value:" " ~quoted:true ~raw:"special-4=\" \"" ();
       ] );
     ( [ ("Set-Cookie", [ "special-5=a,z" ]) ],
-      [
-        {
-          default with
-          name = "special-5";
-          value = "a,z";
-          raw = "special-5=a,z";
-        };
-      ] );
+      [ make ~name:"special-5" ~value:"a,z" ~raw:"special-5=a,z" () ] );
     ( [ ("Set-Cookie", [ "special-6=\",z\"" ]) ],
       [
-        {
-          default with
-          name = "special-6";
-          value = ",z";
-          quoted = true;
-          raw = "special-6=\",z\"";
-        };
+        make ~name:"special-6" ~value:",z" ~quoted:true ~raw:"special-6=\",z\""
+          ();
       ] );
     ( [ ("Set-Cookie", [ "special-7=a," ]) ],
-      [
-        { default with name = "special-7"; value = "a,"; raw = "special-7=a," };
-      ] );
+      [ make ~name:"special-7" ~value:"a," ~raw:"special-7=a," () ] );
     ( [ ("Set-Cookie", [ "special-8=\",\"" ]) ],
       [
-        {
-          default with
-          name = "special-8";
-          value = ",";
-          quoted = true;
-          raw = "special-8=\",\"";
-        };
+        make ~name:"special-8" ~value:"," ~quoted:true ~raw:"special-8=\",\"" ();
       ] );
     ( [ ("Set-Cookie", [ "special-9 =\",\"" ]) ],
       [
-        {
-          default with
-          name = "special-9";
-          value = ",";
-          quoted = true;
-          raw = "special-9 =\",\"";
-        };
+        make ~name:"special-9" ~value:"," ~quoted:true ~raw:"special-9 =\",\""
+          ();
       ] );
     ( [ ("Set-Cookie", [ "cookie=\"quoted\"" ]) ],
       [
-        {
-          default with
-          name = "cookie";
-          value = "quoted";
-          quoted = true;
-          raw = "cookie=\"quoted\"";
-        };
+        make ~name:"cookie" ~value:"quoted" ~quoted:true
+          ~raw:"cookie=\"quoted\"" ();
       ] );
     (* Default cookie-limit exceeded -> empty slice. *)
     ( [ ("Set-Cookie", List.init (default_cookie_max_num + 1) (fun _ -> "a=")) ],
@@ -412,36 +266,32 @@ let read_set_cookies_cases =
 let read_cookies_tests =
   [
     ( [ ("Cookie", [ "Cookie-1=v$1"; "c2=v2" ]) ],
-      "",
-      [
-        { default with name = "Cookie-1"; value = "v$1" };
-        { default with name = "c2"; value = "v2" };
-      ] );
+      None,
+      [ make ~name:"Cookie-1" ~value:"v$1" (); make ~name:"c2" ~value:"v2" () ]
+    );
     ( [ ("Cookie", [ "Cookie-1=v$1"; "c2=v2" ]) ],
-      "c2",
-      [ { default with name = "c2"; value = "v2" } ] );
+      Some "c2",
+      [ make ~name:"c2" ~value:"v2" () ] );
     ( [ ("Cookie", [ "Cookie-1=v$1; c2=v2" ]) ],
-      "",
-      [
-        { default with name = "Cookie-1"; value = "v$1" };
-        { default with name = "c2"; value = "v2" };
-      ] );
+      None,
+      [ make ~name:"Cookie-1" ~value:"v$1" (); make ~name:"c2" ~value:"v2" () ]
+    );
     ( [ ("Cookie", [ "Cookie-1=v$1; c2=v2" ]) ],
-      "c2",
-      [ { default with name = "c2"; value = "v2" } ] );
+      Some "c2",
+      [ make ~name:"c2" ~value:"v2" () ] );
     ( [ ("Cookie", [ "Cookie-1=\"v$1\"; c2=\"v2\"" ]) ],
-      "",
+      None,
       [
-        { default with name = "Cookie-1"; value = "v$1"; quoted = true };
-        { default with name = "c2"; value = "v2"; quoted = true };
+        make ~name:"Cookie-1" ~value:"v$1" ~quoted:true ();
+        make ~name:"c2" ~value:"v2" ~quoted:true ();
       ] );
     ( [ ("Cookie", [ "Cookie-1=\"v$1\"; c2=v2;" ]) ],
-      "",
+      None,
       [
-        { default with name = "Cookie-1"; value = "v$1"; quoted = true };
-        { default with name = "c2"; value = "v2" };
+        make ~name:"Cookie-1" ~value:"v$1" ~quoted:true ();
+        make ~name:"c2" ~value:"v2" ();
       ] );
-    ([ ("Cookie", [ "" ]) ], "", []);
+    ([ ("Cookie", [ "" ]) ], None, []);
     (* Default cookie-limit exceeded (one Cookie field) -> empty slice. *)
     ( [
         ( "Cookie",
@@ -455,11 +305,11 @@ let read_cookies_tests =
              Buffer.contents b);
           ] );
       ],
-      "",
+      None,
       [] );
     (* Default cookie-limit exceeded (multiple Cookie fields) -> empty slice. *)
     ( [ ("Cookie", List.init (default_cookie_max_num + 1) (fun _ -> "a=")) ],
-      "",
+      None,
       [] );
   ]
 
@@ -530,61 +380,30 @@ let sanitize_path_cases =
 
 let valid_tests =
   [
-    ({ default with name = "" }, false);
-    ({ default with name = "invalid-value"; value = "foo\"bar" }, false);
-    ({ default with name = "invalid-path"; path = "/foo;bar/" }, false);
-    ( {
-        default with
-        name = "invalid-secure-for-partitioned";
-        value = "foo";
-        path = "/";
-        secure = false;
-        partitioned = true;
-      },
+    (make ~name:"" ~value:"" (), false);
+    (make ~name:"invalid-value" ~value:"foo\"bar" (), false);
+    (make ~name:"invalid-path" ~value:"" ~path:"/foo;bar/" (), false);
+    ( make ~name:"invalid-secure-for-partitioned" ~value:"foo" ~path:"/"
+        ~secure:false ~partitioned:true (),
       false );
-    ({ default with name = "invalid-domain"; domain = "example.com:80" }, false);
-    ( { default with name = "invalid-expiry"; value = ""; expires = exp_1600 },
-      false );
-    ({ default with name = "valid-empty" }, true);
-    ( {
-        default with
-        name = "valid-expires";
-        value = "foo";
-        path = "/bar";
-        domain = "example.com";
-        (* time.Unix(0,0) = 1970-01-01: year 1970 >= 1601 but expires<>0., so
+    (make ~name:"invalid-domain" ~value:"" ~domain:"example.com:80" (), false);
+    (make ~name:"invalid-expiry" ~value:"" ~expires:exp_1600 (), false);
+    (make ~name:"valid-empty" ~value:"" (), true);
+    ( make ~name:"valid-expires" ~value:"foo" ~path:"/bar"
+        ~domain:"example.com"
+          (* time.Unix(0,0) = 1970-01-01: year 1970 >= 1601 but expires<>0., so
            validated; valid. Use a small positive epoch (1.) since 0. means
            unset in this port and Go's time.Unix(0,0) is NOT the zero time. *)
-        expires = 1.;
-      },
+        ~expires:1. (),
       true );
-    ( {
-        default with
-        name = "valid-max-age";
-        value = "foo";
-        path = "/bar";
-        domain = "example.com";
-        max_age = 60;
-      },
+    ( make ~name:"valid-max-age" ~value:"foo" ~path:"/bar" ~domain:"example.com"
+        ~max_age:60 (),
       true );
-    ( {
-        default with
-        name = "valid-all-fields";
-        value = "foo";
-        path = "/bar";
-        domain = "example.com";
-        expires = 1.;
-        max_age = 0;
-      },
+    ( make ~name:"valid-all-fields" ~value:"foo" ~path:"/bar"
+        ~domain:"example.com" ~expires:1. ~max_age:0 (),
       true );
-    ( {
-        default with
-        name = "valid-partitioned";
-        value = "foo";
-        path = "/";
-        secure = true;
-        partitioned = true;
-      },
+    ( make ~name:"valid-partitioned" ~value:"foo" ~path:"/" ~secure:true
+        ~partitioned:true (),
       true );
   ]
 
@@ -612,31 +431,25 @@ let valid_typed_cases =
   [
     ( "valid_typed bad name",
       `Quick,
-      check "bad name" { default with name = "in valid"; value = "v" } (function
+      check "bad name" (make ~name:"in valid" ~value:"v" ()) (function
         | Invalid_name -> true
         | _ -> false) );
     ( "valid_typed bad value",
       `Quick,
-      check "bad value" { default with name = "ok"; value = "bad\x00value" }
-        (function
+      check "bad value" (make ~name:"ok" ~value:"bad\x00value" ()) (function
         | Invalid_value _ -> true
         | _ -> false) );
     ( "valid_typed partitioned without secure",
       `Quick,
       check "partitioned"
-        {
-          default with
-          name = "ok";
-          value = "v";
-          partitioned = true;
-          secure = false;
-        } (function
+        (make ~name:"ok" ~value:"v" ~partitioned:true ~secure:false ())
+        (function
         | Partitioned_without_secure -> true
         | _ -> false) );
     ( "valid_typed ok",
       `Quick,
       fun () ->
-        match valid { default with name = "ok"; value = "v" } with
+        match valid (make ~name:"ok" ~value:"v" ()) with
         | Ok () -> ()
         | Error e -> Alcotest.failf "expected Ok, got %s" (error_to_string e) );
   ]

@@ -10,7 +10,9 @@ type t = {
   mutable proto : Httpg_base.Protocol.t;
   mutable header : Header.t;
   mutable body : Body.t;
-  mutable content_length : int64;  (** -1 means unknown *)
+  mutable content_length : int64 option;
+      (** [None] = unknown (Go's [-1]); [Some n] = known length ([Some 0L] =
+          genuinely empty body) *)
   mutable transfer_encoding : string list;
   mutable close : bool;
   mutable uncompressed : bool;
@@ -21,7 +23,7 @@ type t = {
 
 val create : unit -> t
 (** [create ()] is a fresh 200 response: empty header, [Body.Empty],
-    [content_length = 0], HTTP/1.1. The base for the builder. *)
+    [content_length = Some 0L], HTTP/1.1. The base for the builder. *)
 
 val with_status : Httpg_base.Status.t -> t -> t
 (** [with_status code r] is [r] with its status set to [code]. *)
@@ -36,7 +38,8 @@ val with_set_header : string -> string -> t -> t
 
 val with_body : Body.t -> t -> t
 (** [with_body body r] returns [r] carrying [body], with [content_length]
-    derived from it ([String] → its length, [Empty] → 0, [Stream] → -1). *)
+    derived from it ([String] → [Some] its length, [Empty] → [Some 0L], [Stream]
+    → [None] = unknown). *)
 
 val with_body_string : string -> t -> t
 (** [with_body_string s r] is [with_body (Body.String s) r]. *)

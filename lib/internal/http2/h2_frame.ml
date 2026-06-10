@@ -569,9 +569,9 @@ let read_meta_headers_raising ?(max_size = max_frame_size)
   Hpack.set_max_string_length dec max_header_list_size;
   Hpack.set_emit_func dec (fun (f : Hpack.header_field) ->
       if not (valid_header_field_value f.value) then invalid := true;
-      if is_pseudo f then
-        begin if !saw_regular then invalid := true
-        end
+      if is_pseudo f then begin
+        if !saw_regular then invalid := true
+      end
       else begin
         saw_regular := true;
         if not (valid_wire_header_field_name f.name) then invalid := true

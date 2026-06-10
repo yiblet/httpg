@@ -460,10 +460,10 @@ let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit =
       end
 
 let process_settings cc (sf : F.settings_frame) : unit =
-  if sf.ack then
-    begin if cc.want_settings_ack then cc.want_settings_ack <- false
+  if sf.ack then begin
+    if cc.want_settings_ack then cc.want_settings_ack <- false
     else raise (H2_error.Connection_error H2_error.ProtocolError)
-    end
+  end
   else begin
     let seen_mcs = ref false in
     List.iter
@@ -499,11 +499,11 @@ let process_settings cc (sf : F.settings_frame) : unit =
 let process_window_update cc (fh : F.frame_header) (wf : F.window_update_frame)
     : unit =
   let id = fh.stream_id in
-  if id = 0 then
-    begin if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
+  if id = 0 then begin
+    if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
       raise (H2_error.Connection_error H2_error.FlowControlError)
     else Eio.Condition.broadcast cc.cond
-    end
+  end
   else
     match stream_by_id cc id with
     | None -> ()
@@ -527,13 +527,13 @@ let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
       H2_pipe.close_with_error cs.buf_pipe serr
 
 let process_ping cc (pf : F.ping_frame) : unit =
-  if pf.ack then
+  if pf.ack then begin
     (* clear pendingResets on any PING ACK (transport.go:1500-1502 comment). *)
-    begin if cc.pending_resets > 0 then begin
+    if cc.pending_resets > 0 then begin
       cc.pending_resets <- 0;
       Eio.Condition.broadcast cc.cond
     end
-    end
+  end
   else
     Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
         F.write_ping cc.w true pf.data;

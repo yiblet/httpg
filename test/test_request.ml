@@ -58,10 +58,10 @@ let dummy_req () : Httpg.Request.t =
     proto = Httpg_base.Protocol.Http11;
     header = Httpg.Header.create ();
     body = Httpg.Body.Empty;
-    content_length = 0L;
+    content_length = Some 0L;
     transfer_encoding = [];
     close = false;
-    host = "";
+    host = None;
     trailer = None;
     request_uri = "";
     remote_addr = "";
@@ -87,13 +87,35 @@ let basic_auth_roundtrip () =
 
 let add_cookie () =
   let r = dummy_req () in
-  Httpg.Request.add_cookie r
-    { Httpg.Cookie.default with name = "a"; value = "1" };
-  Httpg.Request.add_cookie r
-    { Httpg.Cookie.default with name = "b"; value = "2" };
-  Alcotest.(check string)
-    "cookie header" "a=1; b=2"
+  Httpg.Request.add_cookie r (Httpg.Cookie.make ~name:"a" ~value:"1" ());
+  Httpg.Request.add_cookie r (Httpg.Cookie.make ~name:"b" ~value:"2" ());
+  Alcotest.(check (option string))
+    "cookie header" (Some "a=1; b=2")
     (Httpg.Header.get r.header "Cookie")
+
+let make () =
+  (* defaults + host derived from the URL *)
+  let r = Httpg.Request.make "http://example.com/path" in
+  Alcotest.(check bool)
+    "meth GET" true
+    (r.Httpg.Request.meth = Httpg_base.Method.Get);
+  Alcotest.(check (option string))
+    "host from url" (Some "example.com") r.Httpg.Request.host;
+  Alcotest.(check bool)
+    "proto 1.1" true
+    (r.Httpg.Request.proto = Httpg_base.Protocol.Http11);
+  Alcotest.(check (option int64))
+    "content_length 0" (Some 0L) r.Httpg.Request.content_length;
+  (* explicit host overrides the URL-derived one; meth honored *)
+  let r2 =
+    Httpg.Request.make ~meth:Httpg_base.Method.Post ~host:"override.example"
+      "http://example.com/"
+  in
+  Alcotest.(check (option string))
+    "host override" (Some "override.example") r2.Httpg.Request.host;
+  Alcotest.(check bool)
+    "meth POST" true
+    (r2.Httpg.Request.meth = Httpg_base.Method.Post)
 
 let tests =
   [
@@ -101,4 +123,5 @@ let tests =
     ("parse_basic_auth", `Quick, parse_basic_auth);
     ("basic_auth_roundtrip", `Quick, basic_auth_roundtrip);
     ("add_cookie", `Quick, add_cookie);
+    ("make", `Quick, make);
   ]

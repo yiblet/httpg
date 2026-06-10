@@ -16,17 +16,17 @@ type t = {
   name : string;
   value : string;
   quoted : bool;  (** whether [value] was originally quoted *)
-  path : string;
-  domain : string;
+  path : string option;  (** [None] = no Path attribute *)
+  domain : string option;  (** [None] = no Domain attribute *)
   expires : float;  (** Unix seconds; 0. = unset *)
-  raw_expires : string;  (** for reading cookies only *)
+  raw_expires : string option;  (** for reading cookies only *)
   max_age : int;
       (** 0 = no Max-Age; <0 = delete now (Max-Age:0); >0 = seconds *)
   secure : bool;
   http_only : bool;
   same_site : same_site;
   partitioned : bool;
-  raw : string;
+  raw : string option;
   unparsed : string list;  (** raw text of unparsed attribute-value pairs *)
 }
 (** A [t] represents an HTTP cookie as sent in the Set-Cookie header of a
@@ -34,18 +34,34 @@ type t = {
     is a Unix-epoch time in seconds; [0.] means unset (mirroring Go's zero
     [time.Time], detected via [IsZero]). *)
 
-val default : t
-(** An empty cookie (all fields zero/empty), used as a base for record updates.
-*)
+val make :
+  name:string ->
+  value:string ->
+  ?quoted:bool ->
+  ?path:string ->
+  ?domain:string ->
+  ?expires:float ->
+  ?raw_expires:string ->
+  ?max_age:int ->
+  ?secure:bool ->
+  ?http_only:bool ->
+  ?same_site:same_site ->
+  ?partitioned:bool ->
+  ?raw:string ->
+  ?unparsed:string list ->
+  unit ->
+  t
+(** Build a cookie. [name]/[value] are required; other fields are optional
+    attributes defaulting to their zero. Replaces a bare [default] record. *)
 
 val read_set_cookies : Header.t -> t list
 (** [read_set_cookies h] parses all "Set-Cookie" values from header [h] and
     returns the successfully parsed cookies (Go's [readSetCookies]). *)
 
-val read_cookies : Header.t -> filter:string -> t list
+val read_cookies : Header.t -> filter:string option -> t list
 (** [read_cookies h ~filter] parses all "Cookie" values from header [h]. If
-    [filter] isn't empty, only cookies of that name are returned (Go's
-    [readCookies]). *)
+    [filter] is [Some name], only cookies of that name are returned; [None]
+    returns all (Go's [readCookies]). *)
 
 val set_cookie : t -> string
 (** [set_cookie c] returns the serialization of the cookie for use in a Cookie

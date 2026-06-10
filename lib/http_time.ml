@@ -57,12 +57,9 @@ let month_names =
   |]
 
 let month_of_name s =
-  let rec find i =
-    if i >= 12 then None
-    else if month_names.(i) = s then Some (i + 1)
-    else find (i + 1)
-  in
-  find 0
+  month_names
+  |> Array.find_index (String.equal s)
+  |> Option.map (fun i -> i + 1)
 
 (* http.TimeFormat: "Mon, 02 Jan 2006 15:04:05 GMT". *)
 let format_gmt t =

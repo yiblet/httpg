@@ -397,13 +397,13 @@ let difference_path p1 p2 =
            end;
            if (not s1.multi) && s2.multi then write_segment b s1
            else if s1.wild && s2.wild then write_segment b s1
-           else if s1.wild && not s2.wild then
-             begin if s1.s <> s2.s then write_segment b s1
+           else if s1.wild && not s2.wild then begin
+             if s1.s <> s2.s then write_segment b s1
              else begin
                Buffer.add_char b '/';
                Buffer.add_string b (s2.s ^ "x")
              end
-             end
+           end
            else if (not s1.wild) && s2.wild then write_segment b s1
            else begin
              (* both literals; precondition: same literal *)

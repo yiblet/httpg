@@ -196,8 +196,8 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t)
 
   (* Hardening against request smuggling: collapse duplicate Content-Length. *)
   let dup_check : (Header.t * string list, error) result =
-    if List.length content_lens > 1 then
-      begin match content_lens with
+    if List.length content_lens > 1 then begin
+      match content_lens with
       | first0 :: rest ->
           let first = trim_string first0 in
           let conflict = List.exists (fun ct -> first <> trim_string ct) rest in
@@ -212,7 +212,7 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t)
             let header = Header.set header "Content-Length" first in
             Ok (header, Header.values header "Content-Length")
       | [] -> Ok (header, content_lens)
-      end
+    end
     else Ok (header, content_lens)
   in
   bind dup_check (fun (header, content_lens) ->
@@ -553,7 +553,12 @@ let should_send_content_length (t : transfer_writer) : bool =
    on an invalid Trailer key. *)
 let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   let out = Eio.Buf_write.string w in
-  if t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close")
+  if
+    t.tw_close
+    && not
+         (match Header.get t.tw_header "Connection" with
+         | Some v -> has_token v "close"
+         | None -> false)
   then out "Connection: close\r\n";
   if should_send_content_length t then
     out (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)
