@@ -271,7 +271,8 @@ let test_parse_errors_typed () =
 
 let rel_testable =
   Alcotest.testable
-    (fun fmt r -> Format.pp_print_string fmt (Pattern.Private.relationship_to_string r))
+    (fun fmt r ->
+      Format.pp_print_string fmt (Pattern.Private.relationship_to_string r))
     ( = )
 
 (* TestCompareMethods (with commutative inverse check). *)

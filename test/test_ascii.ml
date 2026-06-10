@@ -36,7 +36,8 @@ let test_is_print () =
     ]
   in
   List.iter
-    (fun (name, s, want) -> Alcotest.(check bool) name want (Ascii.Private.is_print s))
+    (fun (name, s, want) ->
+      Alcotest.(check bool) name want (Ascii.Private.is_print s))
     cases
 
 let test_is () =
@@ -59,21 +60,26 @@ let test_trim_string () =
   Alcotest.(check string)
     "OWS only, keeps trailing newline" "a \n"
     (Textproto.trim_string "\t a \n");
-  Alcotest.(check string) "both sides space+tab" "x"
+  Alcotest.(check string)
+    "both sides space+tab" "x"
     (Textproto.trim_string " \t x \t ");
   Alcotest.(check string) "all OWS" "" (Textproto.trim_string " \t\t ");
-  Alcotest.(check string) "keeps leading cr" "\rx"
+  Alcotest.(check string)
+    "keeps leading cr" "\rx"
     (Textproto.trim_string "\rx ")
 
 let test_trim_right () =
   Alcotest.(check string) "trailing only" " a" (Textproto.trim_right " a \t ");
-  Alcotest.(check string) "keeps trailing newline" "a\n"
+  Alcotest.(check string)
+    "keeps trailing newline" "a\n"
     (Textproto.trim_right "a\n ")
 
 let test_trim_left () =
-  Alcotest.(check string) "left space+tab" "a \t"
+  Alcotest.(check string)
+    "left space+tab" "a \t"
     (Textproto.trim_left ~chars:" \t" " \t a \t");
-  Alcotest.(check string) "left space only" "\ta "
+  Alcotest.(check string)
+    "left space only" "\ta "
     (Textproto.trim_left ~chars:" " "  \ta ")
 
 let tests =

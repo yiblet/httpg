@@ -194,9 +194,12 @@ module Private : sig
       [Error (Bad_header _)] on a forbidden trailer key. *)
 
   val parse_transfer_encoding :
-    major:int -> minor:int -> header:Header.t -> (bool * Header.t, error) Stdlib.result
+    major:int ->
+    minor:int ->
+    header:Header.t ->
+    (bool * Header.t, error) Stdlib.result
   (** [parse_transfer_encoding]: returns whether the message is chunked and the
       header with Transfer-Encoding consumed. HTTP/1.0 ignores Transfer-Encoding
-      (Issue 12785). [Error (Unsupported_transfer_encoding _)] / [Error (Chunk
-      _)] for unsupported / too-many encodings. *)
+      (Issue 12785). [Error (Unsupported_transfer_encoding _)] /
+      [Error (Chunk _)] for unsupported / too-many encodings. *)
 end

@@ -17,8 +17,9 @@ let unix_of_utc y mo d h mi s =
   | Some t -> Ptime.to_float_s t
   | None ->
       invalid_arg
-        (Printf.sprintf "Http_time.unix_of_utc: invalid date %04d-%02d-%02d %02d:%02d:%02d"
-           y mo d h mi s)
+        (Printf.sprintf
+           "Http_time.unix_of_utc: invalid date %04d-%02d-%02d %02d:%02d:%02d" y
+           mo d h mi s)
 
 (* Inverse: Unix seconds -> (year, month, day, hour, min, sec, weekday).
    weekday: 0=Sunday .. 6=Saturday (same numbering as {!Ptime.weekday_num}). *)

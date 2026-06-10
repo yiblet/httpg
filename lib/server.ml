@@ -580,7 +580,8 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
             Eio.Switch.run @@ fun req_sw ->
             match
               with_deadline clock ~secs:timeouts.to_write (fun () ->
-                  try serve_one ~sw:req_sw ~clock w req handler with _ -> false)
+                  try serve_one ~sw:req_sw ~clock w req handler
+                  with _ -> false)
             with
             | `Done k -> k
             | `Timeout -> false

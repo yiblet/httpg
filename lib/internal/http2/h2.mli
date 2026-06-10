@@ -100,6 +100,6 @@ module Private : sig
   *)
 
   val setting_id_string : setting_id -> string
-  (** Mirrors Go's [settingName]; unknown settings become
-      ["UNKNOWN_SETTING_N"]. *)
+  (** Mirrors Go's [settingName]; unknown settings become ["UNKNOWN_SETTING_N"].
+  *)
 end

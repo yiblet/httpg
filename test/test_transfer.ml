@@ -243,7 +243,9 @@ let test_parse_transfer_encoding () =
   in
   Alcotest.(check bool)
     "HTTP/1.0 ignores TE" false
-    (match Transfer.Private.parse_transfer_encoding ~major:1 ~minor:0 ~header:h with
+    (match
+       Transfer.Private.parse_transfer_encoding ~major:1 ~minor:0 ~header:h
+     with
     | Ok (b, _) -> b
     | Error _ -> true)
 
@@ -336,11 +338,14 @@ let test_fix_trailer () =
   let mk_tr v = Header.set_values (Header.create ()) "Trailer" [ v ] in
   Alcotest.(check bool)
     "trailer ignored when not chunked" true
-    (match Transfer.Private.fix_trailer ~header:(mk_tr "Md5") ~chunked:false with
+    (match
+       Transfer.Private.fix_trailer ~header:(mk_tr "Md5") ~chunked:false
+     with
     | Ok (None, _) -> true
     | _ -> false);
   (match
-     Transfer.Private.fix_trailer ~header:(mk_tr "md5, Some-Other") ~chunked:true
+     Transfer.Private.fix_trailer ~header:(mk_tr "md5, Some-Other")
+       ~chunked:true
    with
   | Ok (Some tr, h') ->
       Alcotest.(check bool)
@@ -351,7 +356,9 @@ let test_fix_trailer () =
         (Header.has tr "Some-Other")
   | Ok (None, _) -> Alcotest.fail "expected a trailer"
   | Error e -> Alcotest.failf "unexpected error %s" (Transfer.error_to_string e));
-  match Transfer.Private.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true with
+  match
+    Transfer.Private.fix_trailer ~header:(mk_tr "Content-Length") ~chunked:true
+  with
   | Ok _ -> Alcotest.fail "expected bad trailer key error"
   | Error (Transfer.Bad_header (w, _)) ->
       Alcotest.(check string) "bad trailer key" "bad trailer key" w

@@ -23,5 +23,5 @@ val serve_http : t -> sw:Eio.Switch.t -> Request.t -> Response.t
 (** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
 
 val handler : t -> Server.handler
-(** A {!t} viewed as a {!Server.handler} (Go's [ServeMux] implements
-    [Handler]). *)
+(** A {!t} viewed as a {!Server.handler} (Go's [ServeMux] implements [Handler]).
+*)

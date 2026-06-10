@@ -93,7 +93,9 @@ let preface_tests =
       check_string "preface" "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         H2.client_preface );
     ("preface_len", `Quick, check_int "len" 24 H2.client_preface_len);
-    ("next_proto_tls", `Quick, check_string "alpn" "h2" H2.Private.next_proto_tls);
+    ( "next_proto_tls",
+      `Quick,
+      check_string "alpn" "h2" H2.Private.next_proto_tls );
   ]
 
 (* Frame type wire values (frame.go FrameType constants). *)

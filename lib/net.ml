@@ -53,8 +53,7 @@ let ensure_rng () = Mirage_crypto_rng_unix.use_default ()
 let resolve net host port : Eio.Net.Sockaddr.stream =
   match Eio.Net.getaddrinfo_stream ~service:(string_of_int port) net host with
   | addr :: _ -> addr
-  | [] ->
-      raise (Dial_error (Printf.sprintf "cannot resolve %s:%d" host port))
+  | [] -> raise (Dial_error (Printf.sprintf "cannot resolve %s:%d" host port))
 
 let sockaddr_to_string : Eio.Net.Sockaddr.stream -> string = function
   | `Tcp (ip, port) ->

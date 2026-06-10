@@ -516,7 +516,8 @@ type meta_headers_frame = {
 let valid_wire_header_field_name =
   Httpg_internal.Httpcommon.valid_wire_header_field_name
 
-let valid_header_field_value = Httpg_internal.Httpcommon.valid_header_field_value
+let valid_header_field_value =
+  Httpg_internal.Httpcommon.valid_header_field_value
 
 let header_field_size (hf : Hpack.header_field) = Hpack_tables.size hf
 let is_pseudo (hf : Hpack.header_field) = Hpack_tables.is_pseudo hf

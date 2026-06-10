@@ -274,7 +274,6 @@ let is_zero_time t = t = 0.0
 
 (* textproto.TrimString: trim leading/trailing ' ' and '\t'. *)
 let trim_string = Httpg_base.Textproto.trim_string
-
 let has_prefix s p = String.starts_with ~prefix:p s
 
 (* Go scanETag: Some (etag, remain) if a syntactically valid ETag (W/"text" or
