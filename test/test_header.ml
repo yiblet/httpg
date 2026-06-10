@@ -127,11 +127,13 @@ let canon_tests =
 
 let get_set_add_del () =
   let h = Header.create () in
-  Alcotest.(check string) "missing -> empty" "" (Header.get h "Foo");
+  Alcotest.(check (option string)) "missing -> None" None (Header.get h "Foo");
   let h = Header.set h "foo" "bar" in
-  Alcotest.(check string) "get canonicalizes" "bar" (Header.get h "FOO");
+  Alcotest.(check (option string))
+    "get canonicalizes" (Some "bar") (Header.get h "FOO");
   let h = Header.set h "Foo" "baz" in
-  Alcotest.(check string) "set replaces" "baz" (Header.get h "foo");
+  Alcotest.(check (option string))
+    "set replaces" (Some "baz") (Header.get h "foo");
   let h = Header.add h "foo" "qux" in
   Alcotest.(check (list string))
     "add appends" [ "baz"; "qux" ] (Header.values h "Foo");
@@ -145,9 +147,10 @@ let values_and_first () =
   let h = Header.add h "X-Multi" "b" in
   let h = Header.add h "X-Multi" "c" in
   Alcotest.(check (list string))
-    "values returns all" [ "a"; "b"; "c" ]
+    "values returns all in insertion order" [ "a"; "b"; "c" ]
     (Header.values h "x-multi");
-  Alcotest.(check string) "get returns first" "a" (Header.get h "x-multi")
+  Alcotest.(check (option string))
+    "get returns first" (Some "a") (Header.get h "x-multi")
 
 (* With a persistent header, deriving from a value never affects the original
    (Go's Header.Clone independence, free from structural sharing). *)
@@ -157,10 +160,12 @@ let clone_independent () =
   let h2 = h in
   let h2 = Header.set h2 "A" "2" in
   let h2 = Header.add h2 "B" "3" in
-  Alcotest.(check string) "original unchanged value" "1" (Header.get h "A");
+  Alcotest.(check (option string))
+    "original unchanged value" (Some "1") (Header.get h "A");
   Alcotest.(check bool) "original has no B" false (Header.has h "B");
-  Alcotest.(check string) "clone has new value" "2" (Header.get h2 "A");
-  Alcotest.(check string) "clone has B" "3" (Header.get h2 "B")
+  Alcotest.(check (option string))
+    "clone has new value" (Some "2") (Header.get h2 "A");
+  Alcotest.(check (option string)) "clone has B" (Some "3") (Header.get h2 "B")
 
 let semantics_tests =
   [

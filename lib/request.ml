@@ -38,7 +38,9 @@ let proto_at_least (r : t) major minor =
    carries the [100-continue] token (case-insensitive, token-boundary aware).
    Reuses [Transfer.has_token], the faithful port of header.go's [hasToken]. *)
 let expects_continue (r : t) =
-  Transfer.has_token (Header.get r.header "Expect") "100-continue"
+  match Header.get r.header "Expect" with
+  | None -> false
+  | Some s -> Transfer.has_token s "100-continue"
 
 (* Request.UserAgent. *)
 let user_agent (r : t) = Header.get r.header "User-Agent"
@@ -65,8 +67,9 @@ let add_cookie (r : t) (c : Cookie.t) =
       (Cookie.sanitize_cookie_value c.Cookie.value ~quoted:c.Cookie.quoted)
   in
   match Header.get r.header "Cookie" with
-  | "" -> r.header <- Header.set r.header "Cookie" s
-  | existing -> r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
+  | None -> r.header <- Header.set r.header "Cookie" s
+  | Some existing ->
+      r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
 
 (* parseBasicAuth(auth). *)
 let parse_basic_auth (auth : string) : (string * string) option =
@@ -96,8 +99,8 @@ let parse_basic_auth (auth : string) : (string * string) option =
 (* Request.BasicAuth. *)
 let basic_auth (r : t) : (string * string) option =
   match Header.get r.header "Authorization" with
-  | "" -> None
-  | auth -> parse_basic_auth auth
+  | None -> None
+  | Some auth -> parse_basic_auth auth
 
 (* basicAuth(username, password) (client.go). *)
 let basic_auth_encode username password =

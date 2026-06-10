@@ -37,11 +37,13 @@ val expects_continue : t -> bool
 (** [Request.expectsContinue] (request.go:1518): true when the "Expect" header
     contains the [100-continue] token (case-insensitive). *)
 
-val user_agent : t -> string
-(** [Request.UserAgent]: the "User-Agent" header value, or "". *)
+val user_agent : t -> string option
+(** [Request.UserAgent]: the "User-Agent" header value, or [None] when absent
+    (where Go's [Request.UserAgent] returns ""). *)
 
-val referer : t -> string
-(** [Request.Referer]: the "Referer" header value, or "". *)
+val referer : t -> string option
+(** [Request.Referer]: the "Referer" header value, or [None] when absent (where
+    Go's [Request.Referer] returns ""). *)
 
 val cookies : t -> Cookie.t list
 (** [Request.Cookies]: all cookies in the "Cookie" header. *)

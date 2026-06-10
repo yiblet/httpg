@@ -219,9 +219,11 @@ let reusable t (req : Request.t) (resp : Response.t) =
 (* Set the default request headers Go's Transport/Request.write supplies. *)
 let set_default_headers (req : Request.t) ~host =
   if req.Request.host = "" then req.Request.host <- host;
-  if Header.get req.Request.header "User-Agent" = "" then
-    req.Request.header <-
-      Header.set req.Request.header "User-Agent" default_user_agent
+  match Header.get req.Request.header "User-Agent" with
+  | None ->
+      req.Request.header <-
+        Header.set req.Request.header "User-Agent" default_user_agent
+  | Some _ -> ()
 
 let or_raise = function
   | Ok v -> v

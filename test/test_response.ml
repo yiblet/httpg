@@ -50,8 +50,8 @@ let content_length () =
   let r = read raw in
   Alcotest.(check string) "content_length" "10" (i64 r.content_length);
   Alcotest.(check bool) "close" true r.close;
-  Alcotest.(check string)
-    "cl header" "10"
+  Alcotest.(check (option string))
+    "cl header" (Some "10")
     (Httpg.Header.get r.header "Content-Length");
   Alcotest.(check string) "body" "Body here\n" (body_of r)
 

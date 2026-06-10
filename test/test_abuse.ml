@@ -268,7 +268,8 @@ let chunked_small_trailer_ok () =
   Alcotest.(check string) "body" "foo" data;
   match r.Response.trailer with
   | Some t ->
-      Alcotest.(check string) "trailer Md5" "abc123" (Header.get t "Md5")
+      Alcotest.(check (option string))
+        "trailer Md5" (Some "abc123") (Header.get t "Md5")
   | None -> Alcotest.fail "expected a parsed trailer header"
 
 (* ---- server read-path header/Host validation: send raw, read status line. *)
@@ -509,16 +510,16 @@ let redirect_strip_sticky_on_bounce_back () =
   in
   Alcotest.(check int) "three hops" 3 (List.length hops);
   let _, first_header = List.nth hops 0 in
-  Alcotest.(check string)
-    "auth present on initial a.com hop" "Bearer secret"
+  Alcotest.(check (option string))
+    "auth present on initial a.com hop" (Some "Bearer secret")
     (Header.get first_header "Authorization");
   let _, second_header = List.nth hops 1 in
-  Alcotest.(check string)
-    "auth stripped crossing to b.com" ""
+  Alcotest.(check (option string))
+    "auth stripped crossing to b.com" None
     (Header.get second_header "Authorization");
   let _, final_header = List.nth hops 2 in
-  Alcotest.(check string)
-    "auth stripped on bounce-back a.com" ""
+  Alcotest.(check (option string))
+    "auth stripped on bounce-back a.com" None
     (Header.get final_header "Authorization")
 
 let redirect_keeps_header_on_subdomain () =
@@ -527,8 +528,8 @@ let redirect_keeps_header_on_subdomain () =
       ~routes:[ ("http://foo.com/", "http://sub.foo.com/") ]
       ~init_headers:[ ("Authorization", "Bearer secret") ]
   in
-  Alcotest.(check string)
-    "auth kept on subdomain hop" "Bearer secret"
+  Alcotest.(check (option string))
+    "auth kept on subdomain hop" (Some "Bearer secret")
     (header_on seen "http://sub.foo.com/" "Authorization")
 
 let redirect_referer_https_to_http () =
@@ -537,16 +538,16 @@ let redirect_referer_https_to_http () =
       ~routes:[ ("https://a.com/page", "https://b.com/") ]
       ~init_headers:[]
   in
-  Alcotest.(check string)
-    "referer set on https->https hop" "https://a.com/page"
+  Alcotest.(check (option string))
+    "referer set on https->https hop" (Some "https://a.com/page")
     (header_on seen_secure "https://b.com/" "Referer");
   let seen_downgrade =
     drive_redirects ~start:"https://a.com/page"
       ~routes:[ ("https://a.com/page", "http://b.com/") ]
       ~init_headers:[]
   in
-  Alcotest.(check string)
-    "referer omitted on https->http hop" ""
+  Alcotest.(check (option string))
+    "referer omitted on https->http hop" None
     (header_on seen_downgrade "http://b.com/" "Referer")
 
 let tests =

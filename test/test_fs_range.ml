@@ -102,7 +102,8 @@ let serve_file_range () =
         in
         let cr = Header.get h206 "Content-Range" in
         let st304, b304, _ =
-          request_with_headers ~sw c url [ ("If-Modified-Since", lm) ]
+          request_with_headers ~sw c url
+            [ ("If-Modified-Since", Option.get lm) ]
         in
         ( Httpg_base.Status.to_int r200.Response.status,
           b200,
@@ -117,14 +118,15 @@ let serve_file_range () =
   in
   Alcotest.(check int) "plain GET -> 200" 200 code200;
   Alcotest.(check string) "full body" contents b200;
-  Alcotest.(check string) "Content-Type" "text/plain; charset=utf-8" ct;
-  Alcotest.(check bool) "Last-Modified present" true (lm <> "");
-  Alcotest.(check string) "Accept-Ranges" "bytes" ar;
+  Alcotest.(check (option string))
+    "Content-Type" (Some "text/plain; charset=utf-8") ct;
+  Alcotest.(check bool) "Last-Modified present" true (Option.is_some lm);
+  Alcotest.(check (option string)) "Accept-Ranges" (Some "bytes") ar;
   Alcotest.(check int) "Range -> 206" 206 st206;
   Alcotest.(check string) "range bytes" (String.sub contents 4 4) b206;
-  Alcotest.(check string)
+  Alcotest.(check (option string))
     "Content-Range"
-    (Printf.sprintf "bytes 4-7/%d" size)
+    (Some (Printf.sprintf "bytes 4-7/%d" size))
     cr;
   Alcotest.(check int) "If-Modified-Since -> 304" 304 st304;
   Alcotest.(check string) "304 body empty" "" b304
@@ -153,18 +155,21 @@ let single_ranges () =
   in
   Alcotest.(check int) "2-5 status" 206 s1;
   Alcotest.(check string) "2-5 body" (String.sub contents 2 4) b1;
-  Alcotest.(check string) "2-5 CR" (Printf.sprintf "bytes 2-5/%d" size) cr1;
+  Alcotest.(check (option string))
+    "2-5 CR"
+    (Some (Printf.sprintf "bytes 2-5/%d" size))
+    cr1;
   Alcotest.(check int) "-4 status" 206 s2;
   Alcotest.(check string) "-4 body" (String.sub contents (size - 4) 4) b2;
-  Alcotest.(check string)
+  Alcotest.(check (option string))
     "-4 CR"
-    (Printf.sprintf "bytes %d-%d/%d" (size - 4) (size - 1) size)
+    (Some (Printf.sprintf "bytes %d-%d/%d" (size - 4) (size - 1) size))
     cr2;
   Alcotest.(check int) "3- status" 206 s3;
   Alcotest.(check string) "3- body" (String.sub contents 3 (size - 3)) b3;
-  Alcotest.(check string)
+  Alcotest.(check (option string))
     "3- CR"
-    (Printf.sprintf "bytes 3-%d/%d" (size - 1) size)
+    (Some (Printf.sprintf "bytes 3-%d/%d" (size - 1) size))
     cr3
 
 let contains haystack needle =
@@ -193,7 +198,9 @@ let multi_range () =
   Alcotest.(check int) "multi -> 206" 206 st;
   Alcotest.(check bool)
     "Content-Type multipart/byteranges" true
-    (contains ct "multipart/byteranges; boundary=");
+    (match ct with
+    | Some ct -> contains ct "multipart/byteranges; boundary="
+    | None -> false);
   Alcotest.(check bool)
     "part1 CR" true
     (contains body (Printf.sprintf "Content-Range: bytes 0-1/%d" size));
@@ -222,9 +229,9 @@ let unsatisfiable_range () =
         (st, Header.get h "Content-Range"))
   in
   Alcotest.(check int) "beyond size -> 416" 416 st;
-  Alcotest.(check string)
+  Alcotest.(check (option string))
     "Content-Range bytes */SIZE"
-    (Printf.sprintf "bytes */%d" size)
+    (Some (Printf.sprintf "bytes */%d" size))
     cr
 
 let parse_range_typed () =

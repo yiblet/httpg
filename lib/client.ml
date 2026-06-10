@@ -102,8 +102,10 @@ let referer_for_url ~last ~next ~explicit =
   let scheme u = match Uri.scheme u with Some s -> s | None -> "" in
   if String.equal (scheme last) "https" && String.equal (scheme next) "http"
   then None
-  else if explicit <> "" then Some explicit
-  else Some (Uri.to_string (Uri.with_userinfo last None))
+  else
+    match explicit with
+    | Some r -> Some r
+    | None -> Some (Uri.to_string (Uri.with_userinfo last None))
 
 (* Go's Client.do: the redirect-following loop composing Transport.round_trip.
    [round_trip] is the per-hop round-tripper (defaults to the client's transport);

@@ -553,7 +553,12 @@ let should_send_content_length (t : transfer_writer) : bool =
    on an invalid Trailer key. *)
 let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   let out = Eio.Buf_write.string w in
-  if t.tw_close && not (has_token (Header.get t.tw_header "Connection") "close")
+  if
+    t.tw_close
+    && not
+         (match Header.get t.tw_header "Connection" with
+         | Some v -> has_token v "close"
+         | None -> false)
   then out "Connection: close\r\n";
   if should_send_content_length t then
     out (Printf.sprintf "Content-Length: %Ld\r\n" t.tw_content_length)

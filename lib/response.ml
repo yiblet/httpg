@@ -71,8 +71,8 @@ let proto_at_least (r : t) major minor =
    Returns None when no Location header is present (Go's ErrNoLocation). *)
 let location (r : t) : Uri.t option =
   match Header.get r.header "Location" with
-  | "" -> None
-  | lv -> (
+  | None -> None
+  | Some lv -> (
       let loc = Uri.of_string lv in
       match r.request with
       | Some req ->

@@ -64,7 +64,7 @@ let () =
   in
 
   let all_tests =
-    if Test_harness.time_tests then all_tests
+    if not Test_harness.time_tests then all_tests
     else
       List.map
         (fun (n, s) -> (n, List.map Test_harness.add_timing_to_test s))

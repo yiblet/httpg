@@ -33,8 +33,8 @@ let baseline () =
   Alcotest.(check (list (of_pp Fmt.string)))
     "content_length" [ "7" ]
     [ Int64.to_string r.content_length ];
-  Alcotest.(check string)
-    "user-agent" "Fake"
+  Alcotest.(check (option string))
+    "user-agent" (Some "Fake")
     (Httpg.Header.get r.header "User-Agent");
   (* Host promoted out of the header map. *)
   Alcotest.(check bool) "host deleted" false (Httpg.Header.has r.header "Host");
@@ -67,8 +67,8 @@ let chunked_trailer () =
   Alcotest.(check string) "body" "foobar" (body_of r);
   match r.trailer with
   | Some t ->
-      Alcotest.(check string)
-        "trailer" "Trailer-Value"
+      Alcotest.(check (option string))
+        "trailer" (Some "Trailer-Value")
         (Httpg.Header.get t "Trailer-Key")
   | None -> Alcotest.fail "expected trailer"
 

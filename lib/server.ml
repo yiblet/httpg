@@ -190,9 +190,9 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
       body_allowed
       && (not (Header.has header "Content-Type"))
       && (not
-            (Httpg_internal.Ascii.equal_fold
-               (Header.get header "X-Content-Type-Options")
-               "nosniff"))
+            (match Header.get header "X-Content-Type-Options" with
+            | Some v -> Httpg_internal.Ascii.equal_fold v "nosniff"
+            | None -> false))
       && String.length leading > 0
     then
       let src =
@@ -209,11 +209,10 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
       | None -> header
     else header
   in
-  if
-    Transfer.has_token
-      (String.lowercase_ascii (Header.get header "Connection"))
-      "close"
-  then close_after_reply := true;
+  (match Header.get header "Connection" with
+  | Some conn when Transfer.has_token (String.lowercase_ascii conn) "close" ->
+      close_after_reply := true
+  | _ -> ());
   (* Framing. A response with a declared [content_length] (>= 0) — including a
      known-length [Stream] body, as the file server uses for byte ranges — is
      sent with an exact Content-Length and raw (unchunked) bytes; an
@@ -236,9 +235,10 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   let wants10_keep_alive =
     (not (Request.proto_at_least r 1 1))
     && Request.proto_at_least r 1 0
-    && Transfer.has_token
-         (String.lowercase_ascii (Header.get r.Request.header "Connection"))
-         "keep-alive"
+    &&
+    match Header.get r.Request.header "Connection" with
+    | Some conn -> Transfer.has_token (String.lowercase_ascii conn) "keep-alive"
+    | None -> false
   in
   let sent_known_length =
     is_head || content_length <> None || not body_allowed
@@ -566,7 +566,7 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
             then wrap_expect_continue_body w req;
             false
           end
-          else Header.get req.Request.header "Expect" <> ""
+          else Option.is_some (Header.get req.Request.header "Expect")
         in
         if unknown_expect then write_expectation_failed w
         else begin

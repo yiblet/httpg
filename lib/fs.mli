@@ -99,10 +99,10 @@ val scan_etag : string -> (string * string) option
 
 val check_preconditions :
   header:Header.t ->
-  etag:string ->
+  etag:string option ->
   Request.t ->
   modtime:float ->
-  [ `Done of Response.t | `Range of string ]
+  [ `Done of Response.t | `Range of string option ]
 (** Go's [checkPreconditions]: evaluate request preconditions per RFC 7232
     section 6 against [modtime] and [etag] (the response's [Etag]). [header] is
     the response header built so far, used to shape a short-circuit response.
@@ -111,8 +111,9 @@ val check_preconditions :
     matched If-None-Match/If-Modified-Since on GET/HEAD, or {b 412} Precondition
     Failed for a failed If-Match/If-Unmodified-Since (or a matched If-None-Match
     on a non-GET/HEAD method) — otherwise [`Range range_header], the request's
-    [Range] blanked out when an If-Range condition fails. Precedence: If-Match →
-    If-Unmodified-Since → If-None-Match → If-Modified-Since, then If-Range. *)
+    [Range] ([None] when absent, or dropped to [None] when an If-Range condition
+    fails). Precedence: If-Match → If-Unmodified-Since → If-None-Match →
+    If-Modified-Since, then If-Range. *)
 
 type http_range = { start : int64; length : int64 }
 (** Go's [httpRange]: a single requested byte range, [start] inclusive, [length]

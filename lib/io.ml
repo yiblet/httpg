@@ -353,7 +353,7 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
         let host =
           match Uri.host url with
           | Some h when h <> "" -> h
-          | _ -> Header.get header "Host"
+          | _ -> Header.get header "Host" |> Option.value ~default:""
         in
         let header = fix_pragma_cache_control header in
         let close, _ =
@@ -547,18 +547,20 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
        (Httpg_base.Method.to_string meth)
        ruri);
   out (Printf.sprintf "Host: %s\r\n" host);
-  (* User-Agent: default unless present (a present blank value suppresses it). *)
+  (* User-Agent: default unless present (a present key with no value — i.e.
+     [set_values h "User-Agent" []] — suppresses it). *)
   let user_agent =
     if Header.has r.Request.header "User-Agent" then
       Header.get r.Request.header "User-Agent"
-    else Request.default_user_agent
+    else Some Request.default_user_agent
   in
-  if user_agent <> "" then begin
-    let ua =
-      String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) user_agent
-    in
-    out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua))
-  end;
+  Option.iter
+    (fun ua ->
+      let ua =
+        String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) ua
+      in
+      out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua)))
+    user_agent;
   let tw =
     Transfer.make_transfer_writer ~is_response:false ~method_:meth
       ~at_least_http11:true ~close:r.Request.close ~header:r.Request.header

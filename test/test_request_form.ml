@@ -124,8 +124,8 @@ let multipart () =
       Alcotest.(check (option string)) "file name" (Some "file") file.name;
       Alcotest.(check (option string))
         "file filename" (Some "hello.txt") file.filename;
-      Alcotest.(check string)
-        "file Content-Type" "text/plain"
+      Alcotest.(check (option string))
+        "file Content-Type" (Some "text/plain")
         (Header.get file.header "Content-Type");
       Alcotest.(check string) "file body" "file-contents-here" file.body
   | parts -> Alcotest.failf "expected 2 parts, got %d" (List.length parts)

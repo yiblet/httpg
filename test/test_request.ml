@@ -91,8 +91,8 @@ let add_cookie () =
     { Httpg.Cookie.default with name = "a"; value = "1" };
   Httpg.Request.add_cookie r
     { Httpg.Cookie.default with name = "b"; value = "2" };
-  Alcotest.(check string)
-    "cookie header" "a=1; b=2"
+  Alcotest.(check (option string))
+    "cookie header" (Some "a=1; b=2")
     (Httpg.Header.get r.header "Cookie")
 
 let tests =

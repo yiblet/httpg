@@ -51,9 +51,10 @@ let serve_known_file () =
   in
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "body == file contents" body_contents body;
-  Alcotest.(check string) "content-type .txt" "text/plain; charset=utf-8" ct;
-  Alcotest.(check bool) "last-modified present" true (lm <> "");
-  Alcotest.(check string) "accept-ranges bytes" "bytes" ar
+  Alcotest.(check (option string))
+    "content-type .txt" (Some "text/plain; charset=utf-8") ct;
+  Alcotest.(check bool) "last-modified present" true (Option.is_some lm);
+  Alcotest.(check (option string)) "accept-ranges bytes" (Some "bytes") ar
 
 (* ---- Fs.dir_list ---- *)
 let dir_listing () =
@@ -70,7 +71,8 @@ let dir_listing () =
                   Header.get resp.Response.header "Content-Type" ))))
   in
   Alcotest.(check int) "status 200" 200 status;
-  Alcotest.(check string) "content-type html" "text/html; charset=utf-8" ct;
+  Alcotest.(check (option string))
+    "content-type html" (Some "text/html; charset=utf-8") ct;
   let contains sub =
     let re = Str.regexp_string sub in
     try
@@ -134,7 +136,7 @@ let dir_redirect () =
               ~finally:(fun () -> Ts.close s)))
   in
   Alcotest.(check int) "dir redirect 301" 301 status;
-  Alcotest.(check string) "Location is sub/" "sub/" loc
+  Alcotest.(check (option string)) "Location is sub/" (Some "sub/") loc
 
 let tests =
   [
