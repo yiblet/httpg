@@ -183,15 +183,17 @@ let actual_content_length (req : Api.client_request) =
 let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
   let url = req.creq_url in
   let host =
-    if req.creq_host <> "" then req.creq_host
-    else
-      match Uri.host url with
-      | Some h -> (
-          match Uri.port url with
-          | Some p -> Printf.sprintf "%s:%d" h p
-          | None -> h)
-      | None -> ""
+    match req.creq_host with
+    | Some h when h <> "" -> h
+    | _ -> (
+        match Uri.host url with
+        | Some h -> (
+            match Uri.port url with
+            | Some p -> Printf.sprintf "%s:%d" h p
+            | None -> h)
+        | None -> "")
   in
+   (* TODO: change HC.request host to allow for string *)
   let hc_req : HC.request =
     {
       url_scheme = (match Uri.scheme url with Some s -> s | None -> "");
@@ -199,7 +201,7 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
       request_uri = request_uri_of url;
       url_opaque = "";
       meth = req.creq_meth;
-      host = req.creq_host;
+      host = Option.value ~default:"" req.creq_host;
       header = req.creq_header;
       trailer = req.creq_trailer;
       actual_content_length = Int64.of_int acl;

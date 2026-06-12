@@ -26,7 +26,7 @@ let baseline () =
     (Httpg_base.Protocol.to_string r.proto);
   Alcotest.(check int) "major" 1 (Httpg_base.Protocol.major r.proto);
   Alcotest.(check int) "minor" 1 (Httpg_base.Protocol.minor r.proto);
-  Alcotest.(check string) "host" "www.techcrunch.com" r.host;
+  Alcotest.(check (option string)) "host" (Some "www.techcrunch.com") r.host;
   Alcotest.(check string)
     "request_uri" "http://www.techcrunch.com/" r.request_uri;
   Alcotest.(check bool) "close" false r.close;
@@ -44,7 +44,7 @@ let baseline () =
 let simple_get () =
   let r = read "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n" in
   Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
-  Alcotest.(check string) "host" "foo.com" r.host;
+  Alcotest.(check (option string)) "host" (Some "foo.com") r.host;
   Alcotest.(check string) "request_uri" "/" r.request_uri;
   Alcotest.(check string)
     "content_length" "0"

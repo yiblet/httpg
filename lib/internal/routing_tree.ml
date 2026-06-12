@@ -141,13 +141,15 @@ let match_method_and_path (n : 'h node option) method_ path =
           | Some _ as r -> r
           | None -> match_path n.empty_child path []))
 
-let match_ root ~host ~method_ ~path =
+let match_ ?host root ~method_ ~path =
   let method_ = Httpg_base.Method.to_string method_ in
-  if host <> "" then
-    match match_method_and_path (find_child root host) method_ path with
-    | Some _ as r -> r
-    | None -> match_method_and_path root.empty_child method_ path
-  else match_method_and_path root.empty_child method_ path
+  match host with
+  | Some host when host <> "" ->
+      begin match match_method_and_path (find_child root host) method_ path with
+      | Some _ as r -> r
+      | None -> match_method_and_path root.empty_child method_ path
+      end
+  | _ -> match_method_and_path root.empty_child method_ path
 
 (* matchingMethodsPath. *)
 let matching_methods_path (n : 'h node option) path set =
@@ -161,8 +163,11 @@ let matching_methods_path (n : 'h node option) path set =
           | None -> ());
           true)
 
-let matching_methods root ~host ~path set =
-  if host <> "" then matching_methods_path (find_child root host) path set;
+let matching_methods root ?host ~path set =
+  (match host with
+  | Some host when host <> "" ->
+      matching_methods_path (find_child root host) path set
+  | _ -> ());
   matching_methods_path root.empty_child path set;
   if Hashtbl.mem set Httpg_base.Method.Get then
     Hashtbl.replace set Httpg_base.Method.Head true

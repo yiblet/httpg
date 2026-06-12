@@ -15,8 +15,8 @@ let header pairs =
 
 let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
-    ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false)
-    ?(host = "") url : Httpg.Request.t =
+    ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?host url
+    : Httpg.Request.t =
   {
     Httpg.Request.meth = Httpg_base.Method.of_string meth;
     url = Uri.of_string url;

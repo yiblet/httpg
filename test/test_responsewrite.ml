@@ -17,7 +17,7 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
     content_length = 0L;
     transfer_encoding = [];
     close = false;
-    host = "";
+    host = None; 
     trailer = None;
     request_uri = "";
     remote_addr = "";

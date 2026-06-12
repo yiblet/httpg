@@ -176,7 +176,9 @@ let scheme_host_port (req : Request.t) =
     | None -> "http"
   in
   let host =
-    match Uri.host url with Some h when h <> "" -> h | _ -> req.Request.host
+    match Uri.host url with
+    | Some h when h <> "" -> Some h
+    | _ -> req.Request.host
   in
   let port =
     match Uri.port url with
@@ -218,7 +220,8 @@ let reusable t (req : Request.t) (resp : Response.t) =
 
 (* Set the default request headers Go's Transport/Request.write supplies. *)
 let set_default_headers (req : Request.t) ~host =
-  if req.Request.host = "" then req.Request.host <- host;
+  if match req.Request.host with Some "" | None -> false | Some _ -> true then
+    req.Request.host <- host;
   match Header.get req.Request.header "User-Agent" with
   | None ->
       req.Request.header <-
@@ -494,40 +497,43 @@ let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
      user input, surfaced through the typed request-validation carrier
      {!Io.Protocol_error} (shared with malformed request/header lines) so the
      caller can branch on it rather than getting a bare [Failure]. *)
-  if host = "" then raise (Io.Protocol_error "http: no Host in request URL");
-  let key = conn_key ~scheme ~host ~port in
-  set_default_headers req ~host;
-  let max_header_bytes = t.max_response_header_bytes in
-  let authority = h2_authority ~host ~port in
-  let want_h2 = force_h2 || scheme = "https" in
-  (* Reuse an idle connection or dial a fresh one, retrying once on a fresh dial
+  match host with
+  | None | Some "" -> raise (Io.Protocol_error "http: no Host in request URL")
+  | Some host -> begin
+      let key = conn_key ~scheme ~host ~port in
+      set_default_headers req ~host:(Some host);
+      let max_header_bytes = t.max_response_header_bytes in
+      let authority = h2_authority ~host ~port in
+      let want_h2 = force_h2 || scheme = "https" in
+      (* Reuse an idle connection or dial a fresh one, retrying once on a fresh dial
      if a recycled connection turns out to be dead (Go's shouldRetryRequest).
      Everything operates on the current domain's [pool]. *)
-  let rec attempt ~allow_retry =
-    (* HTTP/2 fast path: reuse a pooled multiplexed conn for this authority. A
+      let rec attempt ~allow_retry =
+        (* HTTP/2 fast path: reuse a pooled multiplexed conn for this authority. A
        pooled conn can race into closed/closing between the usability check and
        round_trip; H2_transport raises Conn_unusable iff nothing was written, so
        the request is replayable. Evict + retry once on a fresh dial, mirroring
        the h1 idle-conn branch and Go's shouldRetryRequest (transport.go:845). *)
-    match if want_h2 then get_h2_conn pool authority else None with
-    | Some cc -> (
-        t.before_h2_round_trip ();
-        match h2_round_trip t cc req with
-        | resp -> resp
-        | exception H2_transport.Conn_unusable ->
-            evict_h2_conn pool authority cc;
-            if allow_retry then attempt ~allow_retry:false
-            else raise H2_transport.Conn_unusable)
-    | None -> (
-        match get_idle_conn pool key with
-        | Some pc -> (
-            match round_trip_over pc req with
+        match if want_h2 then get_h2_conn pool authority else None with
+        | Some cc -> (
+            t.before_h2_round_trip ();
+            match h2_round_trip t cc req with
             | resp -> resp
-            | exception exn ->
-                pc.close ();
-                if allow_retry then attempt ~allow_retry:false else raise exn)
+            | exception H2_transport.Conn_unusable ->
+                evict_h2_conn pool authority cc;
+                if allow_retry then attempt ~allow_retry:false
+                else raise H2_transport.Conn_unusable)
         | None -> (
-            (* Serialize the dial per authority (Go's getStartDialLocked /
+            match get_idle_conn pool key with
+            | Some pc -> (
+                match round_trip_over pc req with
+                | resp -> resp
+                | exception exn ->
+                    pc.close ();
+                    if allow_retry then attempt ~allow_retry:false
+                    else raise exn)
+            | None -> (
+                (* Serialize the dial per authority (Go's getStartDialLocked /
                dialCall singleflight): concurrent callers that all found every
                pooled conn saturated re-check under the lock and share a single
                new conn rather than each dialing one (thundering herd). A fresh
@@ -535,30 +541,32 @@ let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
                lock, so the next lock holder's re-check sees it instead of
                dialing yet another. h1 dials don't pool a shared conn so they
                skip the lock. *)
-            let dial_now () =
-              dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2
-            in
-            let dialed =
-              if want_h2 then
-                Eio.Mutex.use_rw ~protect:true (h2_dial_lock pool authority)
-                  (fun () ->
-                    (* Re-check: a slot may have freed on an existing conn, or a
+                let dial_now () =
+                  dial t pool ~scheme ~host ~port ~key ~max_header_bytes
+                    ~force_h2
+                in
+                let dialed =
+                  if want_h2 then
+                    Eio.Mutex.use_rw ~protect:true (h2_dial_lock pool authority)
+                      (fun () ->
+                        (* Re-check: a slot may have freed on an existing conn, or a
                        concurrent dial added one. *)
-                    match get_h2_conn pool authority with
-                    | Some cc -> Dialed_h2 cc
-                    | None -> (
-                        match dial_now () with
-                        | Dialed_h2 cc ->
-                            put_h2_conn pool authority cc;
-                            Dialed_h2 cc
-                        | Dialed_h1 _ as d -> d))
-              else dial_now ()
-            in
-            match dialed with
-            | Dialed_h2 cc -> h2_round_trip t cc req
-            | Dialed_h1 pc -> round_trip_over pc req))
-  in
-  attempt ~allow_retry:true
+                        match get_h2_conn pool authority with
+                        | Some cc -> Dialed_h2 cc
+                        | None -> (
+                            match dial_now () with
+                            | Dialed_h2 cc ->
+                                put_h2_conn pool authority cc;
+                                Dialed_h2 cc
+                            | Dialed_h1 _ as d -> d))
+                  else dial_now ()
+                in
+                match dialed with
+                | Dialed_h2 cc -> h2_round_trip t cc req
+                | Dialed_h1 pc -> round_trip_over pc req))
+      in
+      attempt ~allow_retry:true
+    end
 
 let clock t = t.clock
 

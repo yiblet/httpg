@@ -21,7 +21,7 @@ let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
     creq_header = Api.Header.create ();
     creq_trailer = Api.Header.create ();
     creq_body = body;
-    creq_host = "";
+    creq_host = None;
     creq_content_length = content_length;
     creq_close = false;
   }

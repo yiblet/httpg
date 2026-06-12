@@ -352,8 +352,8 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
           header;
         let host =
           match Uri.host url with
-          | Some h when h <> "" -> h
-          | _ -> Header.get header "Host" |> Option.value ~default:""
+          | Some h when h <> "" -> Some h
+          | _ -> Header.get header "Host"
         in
         let header = fix_pragma_cache_control header in
         let close, _ =
@@ -521,17 +521,16 @@ let string_contains_ctl_byte s =
 let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
   let out = Eio.Buf_write.string w in
   let host =
-    if r.Request.host <> "" then r.Request.host
-    else match Uri.host r.Request.url with Some h -> h | None -> ""
+    if r.Request.host <> None then r.Request.host else Uri.host r.Request.url
   in
   if
-    host = ""
+    host = None
     && (match Uri.host r.Request.url with Some _ -> false | None -> true)
-    && r.Request.host = ""
+    && r.Request.host = None
   then raise missing_host_sentinel;
   let ruri =
     if r.Request.meth = Httpg_base.Method.Connect && Uri.path r.Request.url = ""
-    then host
+    then Option.value ~default:"" host
     else request_uri_of r.Request.url
   in
   if string_contains_ctl_byte ruri then
@@ -546,7 +545,7 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
     (Printf.sprintf "%s %s HTTP/1.1\r\n"
        (Httpg_base.Method.to_string meth)
        ruri);
-  out (Printf.sprintf "Host: %s\r\n" host);
+  out (Printf.sprintf "Host: %s\r\n" (Option.value ~default:"" host));
   (* User-Agent: default unless present (a present key with no value — i.e.
      [set_values h "User-Agent" []] — suppresses it). *)
   let user_agent =

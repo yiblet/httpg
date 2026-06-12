@@ -76,7 +76,7 @@ type client_request = {
   creq_header : header;
   creq_trailer : header;
   creq_body : Body.t;
-  creq_host : string;
+  creq_host : string option;
   creq_content_length : int64;
   creq_close : bool;
 }
@@ -101,7 +101,7 @@ type server_request = {
   sreq_header : header;
   sreq_trailer : header;
   mutable sreq_body : Body.t;
-  sreq_host : string;
+  sreq_host : string option;
   sreq_content_length : int64;
   sreq_remote_addr : string;
   sreq_request_uri : string;

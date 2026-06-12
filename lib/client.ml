@@ -169,7 +169,7 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) : Response.t =
               transfer_encoding =
                 (if include_body then req.Request.transfer_encoding else []);
               close = false;
-              host = "";
+              host = None;
               trailer = None;
               request_uri = "";
               remote_addr = "";
@@ -197,7 +197,6 @@ let do_ ?force_h2 ~sw c (req : Request.t) : Response.t =
 let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
   let url = Uri.of_string url_str in
   let header = Header.create () in
-  let host = match Uri.host url with Some h -> h | None -> "" in
   {
     Request.meth;
     url;
@@ -207,7 +206,7 @@ let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
     content_length;
     transfer_encoding = [];
     close = false;
-    host;
+    host = Uri.host url;
     trailer = None;
     request_uri = "";
     remote_addr = "";

@@ -818,7 +818,7 @@ let build_request sc (st : stream) (mf : H2_frame.meta_headers_frame) :
           sreq_header = header;
           sreq_body = Body.Empty;
           sreq_content_length = content_length;
-          sreq_host = authority;
+          sreq_host = Some authority;
           sreq_trailer =
             (match result.sr_trailer with
             | Some t -> t

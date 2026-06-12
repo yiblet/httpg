@@ -98,9 +98,9 @@ let exact_match (pat : Pattern.t) path =
 (* Go's matchingMethods. *)
 let matching_methods mux host path =
   let ms = Hashtbl.create 8 in
-  Routing_tree.matching_methods mux.tree ~host ~path ms;
+  Routing_tree.matching_methods mux.tree ?host ~path ms;
   if not (String.length path > 0 && path.[String.length path - 1] = '/') then
-    Routing_tree.matching_methods mux.tree ~host ~path:(path ^ "/") ms;
+    Routing_tree.matching_methods mux.tree ?host ~path:(path ^ "/") ms;
   let keys =
     Hashtbl.fold (fun k _ acc -> Httpg_base.Method.to_string k :: acc) ms []
   in
@@ -108,7 +108,7 @@ let matching_methods mux host path =
 
 (* Go's matchOrRedirect: match in the tree, with trailing-slash redirection. *)
 let match_or_redirect mux ~host ~method_ ~path ~try_redirect ~raw_query =
-  let m = Routing_tree.match_ mux.tree ~host ~method_ ~path in
+  let m = Routing_tree.match_ mux.tree ?host ~method_ ~path in
   let is_exact =
     match m with Some ((pat, _), _) -> exact_match pat path | None -> false
   in
@@ -118,7 +118,7 @@ let match_or_redirect mux ~host ~method_ ~path ~try_redirect ~raw_query =
     && path <> ""
   then begin
     let path2 = path ^ "/" in
-    let m2 = Routing_tree.match_ mux.tree ~host ~method_ ~path:path2 in
+    let m2 = Routing_tree.match_ mux.tree ?host ~method_ ~path:path2 in
     match m2 with
     | Some ((pat2, _), _) when exact_match pat2 path2 ->
         let target = clean_path path ^ "/" in
@@ -130,7 +130,7 @@ let match_or_redirect mux ~host ~method_ ~path ~try_redirect ~raw_query =
   end
   else (m, None)
 
-let find_handler_finish mux ~host ~path m =
+let find_handler_finish mux ?host ~path m =
   match m with
   | Some ((_pat, h), _captures) -> h
   | None ->
@@ -149,22 +149,21 @@ let find_handler mux (r : Request.t) =
     match Uri.verbatim_query r.url with Some q -> q | None -> ""
   in
   if r.meth = Httpg_base.Method.Connect then begin
-    let host = match Uri.host r.url with Some h -> h | None -> "" in
     let _, redir =
-      match_or_redirect mux ~host ~method_:r.meth ~path:escaped_path
-        ~try_redirect:true ~raw_query
+      match_or_redirect mux ~host:(Uri.host r.url) ~method_:r.meth
+        ~path:escaped_path ~try_redirect:true ~raw_query
     in
     match redir with
     | Some u -> Server.redirect_handler u Httpg_base.Status.TemporaryRedirect
     | None ->
         let m, _ =
-          match_or_redirect mux ~host:r.host ~method_:r.meth ~path:escaped_path
+          match_or_redirect ~host:r.host mux ~method_:r.meth ~path:escaped_path
             ~try_redirect:false ~raw_query
         in
-        find_handler_finish mux ~host:r.host ~path:escaped_path m
+        find_handler_finish mux ?host:r.host ~path:escaped_path m
   end
   else begin
-    let host = strip_host_port r.host in
+    let host = Option.map strip_host_port r.host in
     let path = clean_path escaped_path in
     let m, redir =
       match_or_redirect mux ~host ~method_:r.meth ~path ~try_redirect:true
@@ -177,7 +176,7 @@ let find_handler mux (r : Request.t) =
           let u = if raw_query <> "" then path ^ "?" ^ raw_query else path in
           Server.redirect_handler u Httpg_base.Status.TemporaryRedirect
         end
-        else find_handler_finish mux ~host ~path m
+        else find_handler_finish mux ?host ~path m
   end
 
 (* Go's ServeMux.ServeHTTP. *)

@@ -15,8 +15,8 @@ val add_pattern : 'h t -> Pattern.t -> 'h -> unit
     (Go's [routingNode.addPattern]). *)
 
 val match_ :
+  ?host:string ->
   'h t ->
-  host:string ->
   method_:Httpg_base.Method.t ->
   path:string ->
   ((Pattern.t * 'h) * string list) option
@@ -26,7 +26,7 @@ val match_ :
 
 val matching_methods :
   'h t ->
-  host:string ->
+  ?host:string ->
   path:string ->
   (Httpg_base.Method.t, bool) Hashtbl.t ->
   unit

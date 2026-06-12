@@ -16,7 +16,7 @@ let req_no_host () : Request.t =
     content_length = 0L;
     transfer_encoding = [];
     close = false;
-    host = "";
+    host = None;
     trailer = None;
     request_uri = "";
     remote_addr = "";
@@ -52,7 +52,7 @@ let read_request_malformed () =
       Alcotest.(check string)
         "method" "GET"
         (Httpg_base.Method.to_string r.Request.meth);
-      Alcotest.(check string) "host" "foo.com" r.Request.host
+      Alcotest.(check (option string)) "host" (Some "foo.com") r.Request.host
   | Error e ->
       Alcotest.failf "well-formed request -> Error %s; want Ok"
         (Io.error_to_string e));

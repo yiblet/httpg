@@ -14,10 +14,10 @@ type t = {
   mutable content_length : int64;
   mutable transfer_encoding : string list;
   mutable close : bool;
-  mutable host : string;
+  mutable host : string option;
   mutable trailer : Header.t option;
-  mutable request_uri : string;
-  mutable remote_addr : string;
+  mutable request_uri : string option;
+  mutable remote_addr : string option;
 }
 
 (* defaultUserAgent (request.go). *)
