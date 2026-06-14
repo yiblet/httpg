@@ -92,7 +92,7 @@ let error_to_string = function
 (* ParseQuery(query): build a {!t} from a query string, returning it together
    with the first decode error (if any). Semicolon separators are invalid (Go
    rejects a key containing ';'). *)
-let parse_query (query : string) : t * (unit, error) result =
+let parse_query (query : string) : t * error option =
   let err = ref None in
   let set_err e = match !err with None -> err := Some e | Some _ -> () in
   let rec loop (m : t) query =
@@ -110,11 +110,11 @@ let parse_query (query : string) : t * (unit, error) result =
         loop m rest
   in
   let m = loop (create ()) query in
-  (m, match !err with None -> Ok () | Some e -> Error e)
+  (m, !err)
 
 (* Values.Encode: "k=v&..." sorted by key. The persistent [Map] already iterates
    in sorted key order (Go's slices.Sort over keys). *)
-let encode (v : t) =
+let to_string (v : t) =
   let buf = Buffer.create 64 in
   M.iter
     (fun k values ->
@@ -137,9 +137,15 @@ let max_form_size = 10 * 1024 * 1024
    parsePostForm, minus the content-type gate — that is the caller's concern).
    [Error Too_large] if the body exceeds [max_form_size]; otherwise the first
    decode error from {!parse_query}, if any. *)
+(* Strict parse of a query/urlencoded string: the sibling of {!of_body} for a
+   raw string. [Ok m] on a clean parse, else the first decode error. *)
+let of_string (s : string) : (t, error) result =
+  let m, res = parse_query s in
+  Option.fold ~none:(Ok m) ~some:(fun e -> Error e) res
+
 let of_body (body : Body.t) : (t, error) result =
   let s, remainder = Body.read_until body max_form_size in
-  if Option.is_some remainder then Error Too_large
-  else
-    let m, res = parse_query s in
-    match res with Ok () -> Ok m | Error e -> Error e
+  if Option.is_some remainder then Error Too_large else of_string s
+
+let to_body (v : t) =
+  Body.of_lazy_string (Lazy.from_fun (fun () -> to_string v))

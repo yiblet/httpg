@@ -129,6 +129,29 @@ let row4 () =
   in
   Alcotest.(check string) "row4" want (write r)
 
+(* A forbidden Trailer key (Content-Length) makes the write path's
+   write_transfer_header raise Bad_string_error; the public Io.write_request
+   boundary must surface it as a typed [Error (Transfer (Bad_header _))], not
+   let it escape as an exception. *)
+let invalid_trailer_key_is_error () =
+  let trailer =
+    Httpg.Header.set (Httpg.Header.create ()) "Content-Length" "5"
+  in
+  (* An unknown-length Stream body forces chunked framing, so the trailer
+     section (and its key validation) is actually written. *)
+  let r =
+    Httpg.Request.make ~meth:Httpg_base.Method.Post
+      ~body:(Httpg.Body.Stream (fun () -> None))
+      ~content_length:(-1L) ~trailer:(Some trailer) "http://example.com/"
+  in
+  let w = Eio.Buf_write.create 256 in
+  match Httpg.Io.write_request w r with
+  | Ok () -> Alcotest.fail "expected Error (Transfer (Bad_header _)), got Ok"
+  | Error (Httpg.Io.Transfer (Httpg.Transfer.Bad_header _)) -> ()
+  | Error e ->
+      Alcotest.failf "expected Transfer (Bad_header _), got %s"
+        (Httpg.Io.error_to_string e)
+
 let tests =
   [
     ("row0_get_headers", `Quick, row0);
@@ -136,4 +159,5 @@ let tests =
     ("row2_post_chunked_close", `Quick, row2);
     ("row3_post_content_length", `Quick, row3);
     ("row4_content_length_header_ignored", `Quick, row4);
+    ("invalid_trailer_key_is_error", `Quick, invalid_trailer_key_is_error);
   ]

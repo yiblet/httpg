@@ -9,6 +9,12 @@
 open Httpg
 module Ts = Httptest.Server
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error (a 206/416 status is still [Ok]). *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 let with_tmpdir ~fs ~net ~clock ~sw f =
   let name =
     Printf.sprintf "httpg_fsrange_%d_%d" (Unix.getpid ())
@@ -26,10 +32,10 @@ let write_file dir name contents =
 (* Send a GET with extra headers, return (status, body, headers). 206/416 are
    not redirects, so [Client.do_] returns them directly. *)
 let request_with_headers ~sw c url headers =
-  let req = Client.make_request Httpg_base.Method.Get url in
+  let req = Request.make ~meth:Httpg_base.Method.Get url in
   req.Request.header <-
     List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
-  let resp = Client.do_ ~sw c req in
+  let resp = ok_resp (Client.do_ ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     Body.read_all resp.Response.body,
     resp.Response.header )
@@ -92,7 +98,7 @@ let serve_file_range () =
       [ ("data.txt", contents) ]
       (fun ~sw c base ->
         let url = base ^ "/data.txt" in
-        let r200 = Client.get ~sw c url in
+        let r200 = ok_resp (Client.get ~sw c url) in
         let b200 = Body.read_all r200.Response.body in
         let lm = Header.get r200.Response.header "Last-Modified" in
         let ar = Header.get r200.Response.header "Accept-Ranges" in

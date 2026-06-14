@@ -492,8 +492,8 @@ let with_deadline clock ~secs op =
   match clock with
   | Some clock when secs > 0. -> (
       match Net.with_timeout clock secs op with
-      | v -> `Done v
-      | exception Eio.Time.Timeout -> `Timeout)
+      | Ok v -> `Done v
+      | Error _ -> `Timeout)
   | _ -> `Done (op ())
 
 (* Wrap the request body so its pulls share a whole-request read deadline (Go's

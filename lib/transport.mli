@@ -110,7 +110,34 @@ val run : t -> sw:Eio.Switch.t -> (unit -> 'a) -> 'a
 val clock : t -> float Eio.Time.clock_ty Eio.Resource.t option
 (** The clock captured at {!create} (for {!Client} timeout composition). *)
 
-val round_trip : ?force_h2:bool -> t -> Request.t -> Response.t
+(** The handleable failures of {!round_trip} (Go's [RoundTrip] returning an
+    [error]), embedding the lower layers' typed errors. The internal flow still
+    raises sentinels; {!round_trip} converts them to these arms at the public
+    boundary. *)
+type error =
+  | Net of Net.error
+      (** a dial / TLS handshake failure (Go's [Dial] / [tls.Conn.Handshake]) *)
+  | Io of Io.error
+      (** an HTTP/1.x request-write / response-read failure (malformed
+          status/header line, framing, truncated message) *)
+  | H2 of Httpg_http2.H2_transport.error
+      (** an HTTP/2 round-trip failure (closed/unusable conn, GOAWAY, malformed
+          response, canceled request) *)
+  | No_host  (** the request URL has no Host (Go's [errMissingHost]) *)
+
+val error_to_string : error -> string
+(** Human-readable rendering of an {!error} (recurses into the embedded lower
+    error), for logging / test failures. *)
+
+val error_to_exn : error -> exn
+(** [error_to_exn e] is the exception that {!error} arm corresponds to, for the
+    {!Client} bridge to re-raise while the client verbs still raise:
+    [Net (Dial s)] -> {!Net.Dial_error}; [Net (Tls s)] -> {!Net.Tls_error};
+    [Io e] -> {!Io.Protocol_error}; [H2 e] ->
+    {!Httpg_http2.H2_transport.error_to_exn}; [No_host] -> {!Io.Protocol_error}
+    ["http: no Host in request URL"]. *)
+
+val round_trip : ?force_h2:bool -> t -> Request.t -> (Response.t, error) result
 (** [round_trip t req] is Go's [Transport.RoundTrip] (HTTP/1.x path): pick
     scheme/host/port from [req.url] (TLS when the scheme is ["https"]), reuse an
     idle pooled connection or dial a fresh one via {!Net.connect_alpn} (using
@@ -123,13 +150,14 @@ val round_trip : ?force_h2:bool -> t -> Request.t -> Response.t
     this may be called under a transient per-request [Eio.Switch.run]; it raises
     [Invalid_argument] if the current domain has no {!run} scope.
 
-    {b Modeled, catchable failures.} A request whose URL has no Host raises
-    {!Io.Protocol_error} ["http: no Host in request URL"] (Go's
-    [errMissingHost], transport.go; the typed request-validation carrier shared
-    with malformed request/header lines). A dial failure surfaces as
-    {!Net.Dial_error} (e.g. an unresolvable host) and a TLS
-    handshake/verification failure as {!Net.Tls_error} — both delivered to the
-    caller rather than escaping as a bare [Failure].
+    {b Modeled, catchable failures} are returned as [Error] of {!error}. A
+    request whose URL has no Host is [Error No_host] (Go's [errMissingHost],
+    transport.go). A dial failure is [Error (Net (Net.Dial _))] (e.g. an
+    unresolvable host) and a TLS handshake/verification failure is
+    [Error (Net (Net.Tls _))]; an HTTP/1.x write/read failure is [Error (Io _)]
+    and an HTTP/2 failure is [Error (H2 _)] — all delivered to the caller rather
+    than escaping as an exception. Only the unhandleable ([Eio.Cancel],
+    [Invalid_argument] for a missing {!run} scope, bugs) propagate.
 
     {b The response body streams and gates connection reuse.} The returned
     [resp.body] is a {!Body.Stream} pulling bytes lazily from the connection; it

@@ -10,6 +10,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* ~T-millisecond CPU busy loop: a real integer grind the optimizer cannot
    elide (the result is observed). Calibrated once per process against the
    monotonic clock so it spends roughly [target_s] seconds of CPU regardless of
@@ -49,7 +55,7 @@ let hammer ~net ~clock ~sw ~url n =
   let ok = Atomic.make 0 in
   Eio.Fiber.all
     (List.init n (fun _ () ->
-         let resp = Client.get ~sw client url in
+         let resp = ok_resp (Client.get ~sw client url) in
          ignore (Body.read_all resp.Response.body);
          if Httpg_base.Status.to_int resp.Response.status = 200 then
            Atomic.incr ok));
@@ -174,7 +180,7 @@ let multicore_tls () =
              (* fresh transport per fiber => fresh TLS handshake. *)
              let transport = Transport.create ~net ~clock ~insecure:true () in
              let client = Client.create ~net ~clock ~transport () in
-             let resp = Client.get ~sw client url in
+             let resp = ok_resp (Client.get ~sw client url) in
              let body = Body.read_all resp.Response.body in
              if Httpg_base.Status.to_int resp.Response.status = 200 then
                Atomic.incr ok;
@@ -244,9 +250,9 @@ let multicore_client () =
           Eio.Switch.run @@ fun dsw ->
           Transport.run transport ~sw:dsw @@ fun () ->
           (* keep-alive within this domain: two sequential h1 GETs share a conn. *)
-          let r = Client.get ~sw:dsw client url1 in
+          let r = ok_resp (Client.get ~sw:dsw client url1) in
           ignore (Body.read_all r.Response.body);
-          let r = Client.get ~sw:dsw client url1 in
+          let r = ok_resp (Client.get ~sw:dsw client url1) in
           ignore (Body.read_all r.Response.body);
           (* the second h1 GET reused the conn on this domain: after draining,
              exactly one idle h1 conn is pooled for this authority on this
@@ -268,7 +274,7 @@ let multicore_client () =
                    let url, expect =
                      if i land 1 = 0 then (url1, "h1-ok") else (url2, "h2-ok")
                    in
-                   match Client.get ~sw:dsw client url with
+                   match ok_resp (Client.get ~sw:dsw client url) with
                    | resp ->
                        let body = Body.read_all resp.Response.body in
                        if
@@ -331,7 +337,7 @@ let multicore_client_parallel_tls () =
           let tr = Transport.create ~net ~clock ~insecure:true () in
           Transport.run tr ~sw:rsw @@ fun () ->
           let c = Client.create ~net ~clock ~transport:tr () in
-          let resp = Client.get ~sw:rsw c url in
+          let resp = ok_resp (Client.get ~sw:rsw c url) in
           ignore (Body.read_all resp.Response.body);
           Httpg_base.Status.to_int resp.Response.status = 200
         in

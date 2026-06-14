@@ -21,10 +21,6 @@ exception Protocol_error of string
     {!error} below. {!Transport} also raises it to carry a round-trip failure
     message through its exception-based error flow. *)
 
-exception Missing_host
-(** Retained for the {b mid-stream} body thunk; the handleable boundary error is
-    {!error}'s {!constructor-Missing_host} arm. *)
-
 exception Trailer_too_large
 (** The trailer block following a chunked body exceeded the bounded read budget
     (Go's "suspiciously long trailer after chunked body", transfer.go:934). The

@@ -75,14 +75,11 @@ val add_cookie : t -> Cookie.t -> unit
 (** [Request.AddCookie]: append a single cookie to the "Cookie" header (RFC 6265
     5.4: one Cookie header field, semicolon-separated). *)
 
-val parse_basic_auth : string -> (string * string) option
-(** [parseBasicAuth auth]: [Some (username, password)] or [None]. *)
+val auth : t -> Authorization.t option
+(** The parsed "Authorization" header, or [None] if it is absent or malformed
+    (generalises Go's [Request.BasicAuth] over the scheme — see
+    {!Authorization}). *)
 
-val basic_auth : t -> (string * string) option
-(** [Request.BasicAuth]: parse the "Authorization" header. *)
-
-val basic_auth_encode : string -> string -> string
-(** [basicAuth username password] (client.go): the base64 credential. *)
-
-val set_basic_auth : t -> string -> string -> unit
-(** [Request.SetBasicAuth]: set the "Authorization" header. *)
+val set_auth : t -> Authorization.t -> unit
+(** Set the "Authorization" header from a typed {!Authorization.t} (generalises
+    Go's [Request.SetBasicAuth]). *)

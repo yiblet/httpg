@@ -11,10 +11,6 @@ exception Chunk_error of string
 (** A malformed-chunk or framing error, carrying Go's message text. Retained for
     the {b mid-stream} body thunk (see {!error}). *)
 
-exception Bad_string_error of string * string
-(** [badStringError(what, value)]: rendered as ["what: value"]. Retained for the
-    {b mid-stream} trailer-read raise in {!read_transfer} (see {!error}). *)
-
 (** Handleable framing error at the {b header / initial-parse} boundary
     (Result-migration Ticket 4). The exceptions above are the {b mid-stream}
     analogue: errors discovered inside a {!Body.t} [Stream] thunk {b after}
@@ -27,7 +23,9 @@ type error =
   | Bad_content_length of string
       (** invalid / conflicting Content-Length value *)
   | Unsupported_transfer_encoding of string
-  | Bad_header of string * string  (** was [Bad_string_error (what, value)] *)
+  | Bad_header of string * string
+      (** a forbidden header key in a context that rejects it (e.g. an invalid
+          Trailer key), rendered as ["what: value"] *)
   | Unexpected_eof
 
 val error_to_string : error -> string
@@ -151,10 +149,11 @@ val should_send_content_length : transfer_writer -> bool
 (** [should_send_content_length t] is [transferWriter.shouldSendContentLength].
 *)
 
-val write_transfer_header : Eio.Buf_write.t -> transfer_writer -> unit
+val write_transfer_header :
+  Eio.Buf_write.t -> transfer_writer -> (unit, error) Stdlib.result
 (** [transferWriter.writeHeader]: write the Connection / Content-Length /
     Transfer-Encoding / Trailer header lines that derive from the sanitized
-    field triple. Raises {!Bad_string_error} on an invalid Trailer key. *)
+    field triple. Returns [Error (Bad_header _)] on an invalid Trailer key. *)
 
 val has_token : string -> string -> bool
 (** [has_token v token] is Go's [hasToken] (case-insensitive token search). *)

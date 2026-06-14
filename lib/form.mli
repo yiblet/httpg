@@ -68,14 +68,24 @@ type error =
 val error_to_string : error -> string
 (** Render an {!error} as Go's faithful message. *)
 
-val parse_query : string -> t * (unit, error) result
-(** [ParseQuery query]: the parsed map plus the first decode error, if any. *)
+val parse_query : string -> t * error option
+(** [ParseQuery query] (Go's [url.ParseQuery]): the parsed map plus the first
+    decode error, if any. Lenient — the map holds whatever parsed before the
+    error; use {!of_string} for the strict, result-only form. *)
 
-val encode : t -> string
-(** [Values.Encode]: "k=v&..." sorted by key. *)
+val of_string : string -> (t, error) result
+(** Strict parse of a query / urlencoded string: [Ok m] on a clean parse, else
+    the first decode error. The string sibling of {!of_body}. *)
+
+val to_string : t -> string
+(** [Values.Encode]: "k=v&..." sorted by key. The inverse of {!of_string}. *)
 
 val of_body : Body.t -> (t, error) result
 (** [of_body body] reads [body] fully and parses it as
     application/x-www-form-urlencoded (Go's [parsePostForm], minus the
     content-type gate — that is the caller's concern). [Error Too_large] if the
     body exceeds 10 MB; otherwise the first decode error from {!parse_query}. *)
+
+val to_body : t -> Body.t
+(** Render the form as an application/x-www-form-urlencoded {!Body.t} (lazily
+    {!to_string}-encoded). The inverse of {!of_body}. *)

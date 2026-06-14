@@ -95,43 +95,13 @@ let add_cookie (r : t) (c : Cookie.t) =
   | Some existing ->
       r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
 
-(* parseBasicAuth(auth). *)
-let parse_basic_auth (auth : string) : (string * string) option =
-  let prefix = "Basic " in
-  let lp = String.length prefix in
-  let eq_fold_prefix s =
-    String.length s >= lp
-    && Httpg_internal.Ascii.equal_fold (String.sub s 0 lp) prefix
-  in
-  if String.length auth < lp || not (eq_fold_prefix auth) then None
-  else
-    match
-      match Base64.decode (String.sub auth lp (String.length auth - lp)) with
-      | Ok s -> Some s
-      | Error _ -> None
-      | exception _ -> None
-    with
-    | None -> None
-    | Some cs -> (
-        match String.index_opt cs ':' with
-        | None -> None
-        | Some i ->
-            Some
-              ( String.sub cs 0 i,
-                String.sub cs (i + 1) (String.length cs - i - 1) ))
-
-(* Request.BasicAuth. *)
-let basic_auth (r : t) : (string * string) option =
+(* The parsed Authorization header, or None if absent or malformed (subsumes
+   Go's BasicAuth/SetBasicAuth, generalised over the scheme via {!Authorization}). *)
+let auth (r : t) : Authorization.t option =
   match Header.get r.header "Authorization" with
   | None -> None
-  | Some auth -> parse_basic_auth auth
+  | Some v -> Authorization.of_string v |> Result.to_option
 
-(* basicAuth(username, password) (client.go). *)
-let basic_auth_encode username password =
-  Base64.encode_string (username ^ ":" ^ password)
-
-(* Request.SetBasicAuth. *)
-let set_basic_auth (r : t) username password =
-  r.header <-
-    Header.set r.header "Authorization"
-      ("Basic " ^ basic_auth_encode username password)
+(* Set the Authorization header from a typed {!Authorization.t}. *)
+let set_auth (r : t) (a : Authorization.t) =
+  r.header <- Header.set r.header "Authorization" (Authorization.to_string a)

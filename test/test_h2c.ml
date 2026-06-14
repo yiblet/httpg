@@ -16,6 +16,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* A handler: GET -> 200 "hello, h2c"; POST /echo echoes the request body. *)
 let test_handler =
  fun ~sw:_ (r : Request.t) ->
@@ -52,12 +58,15 @@ let test_h2c_roundtrip () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "http://127.0.0.1:%d" port in
         (* GET *)
-        let get_resp = Client.get ~force_h2:true ~sw client (base ^ "/hello") in
+        let get_resp =
+          ok_resp (Client.get ~force_h2:true ~sw client (base ^ "/hello"))
+        in
         let get_body = Body.read_all get_resp.Response.body in
         (* POST, reusing the same h2c connection from the pool. *)
         let post_resp =
-          Client.post ~force_h2:true ~sw client (base ^ "/echo")
-            ~content_type:"text/plain" (Body.String "ping-pong")
+          ok_resp
+            (Client.post ~force_h2:true ~sw client (base ^ "/echo")
+               ~content_type:"text/plain" (Body.String "ping-pong"))
         in
         let post_body = Body.read_all post_resp.Response.body in
         ( Httpg_base.Status.to_int get_resp.Response.status,

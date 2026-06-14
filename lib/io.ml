@@ -3,45 +3,19 @@
    ReadResponse / Response.Write. Multipart, trace and proxy modes are out of
    scope. *)
 
-(* Internal raise mechanism for the parse helpers (caught at the boundary and
-   mapped to {!error}) and for the mid-stream body thunk. Transport also raises
-   it to thread a round-trip failure message. *)
+(* Retained for the mid-stream body thunk (errors discovered after the read
+   boundary returned [Ok] keep raising) and for the mid-stream trailer parse
+   path. Transport also raises it to thread a round-trip failure message. The
+   linear read-HEAD path no longer raises it — it threads [Error (Protocol _)].
+*)
 exception Protocol_error of string
 
-(* write_request "no Host" (Go's errMissingHost). Declared before [type error]
-   so its constructor is the exception; aliased for raising after [error]'s
-   [Missing_host] arm shadows the name. *)
-exception Missing_host
-
-let missing_host_sentinel = Missing_host
-
-let bad_string_error what value =
-  Protocol_error (Printf.sprintf "%s %S" what value)
-
-(* errTooLarge (server.go:998): request head exceeded the bounded read budget.
-   Aliased so the deep parser can raise it; mapped to {!error} at the boundary.
-   The same sentinel backs every bounded read. *)
-exception Request_too_large
-
-let request_too_large_sentinel = Request_too_large
+let bad_string_error_string what value = Printf.sprintf "%s %S" what value
 
 (* "suspiciously long trailer after chunked body" (transfer.go:934). Read
    mid-stream inside the body [Stream] thunk, so per the mid-stream policy it
    keeps raising rather than surfacing as a boundary [Error]. *)
 exception Trailer_too_large
-
-let trailer_too_large_sentinel = Trailer_too_large
-
-(* badRequestError("malformed Host header") (server.go:1051). *)
-exception Malformed_host
-
-let malformed_host_sentinel = Malformed_host
-
-(* Client-side analogue of [Request_too_large]: response head exceeded the
-   bounded budget (Transport.MaxResponseHeaderBytes). *)
-exception Response_header_too_large
-
-let response_header_too_large_sentinel = Response_header_too_large
 
 (* Handleable boundary error (see io.mli). *)
 type error =
@@ -66,41 +40,24 @@ let error_to_string = function
       "net/http: server response headers exceeded MaxResponseHeaderBytes; \
        aborted"
 
-(* Internal sentinels carrying a typed boundary error through the raising parse
-   path; caught at the boundary and mapped to {!error}. *)
-exception Transfer_error_sentinel of Transfer.error
-exception Unexpected_eof_sentinel
-
-let read_transfer_or_raise msg r : Transfer.result =
-  match Transfer.read_transfer msg r with
-  | Ok res -> res
-  | Error e -> raise (Transfer_error_sentinel e)
-
-let error_of_exception = function
-  | Protocol_error s -> Protocol s
-  | Transfer_error_sentinel e -> Transfer e
-  | Unexpected_eof_sentinel -> Unexpected_eof
-  | End_of_file -> Unexpected_eof
-  | e when e == missing_host_sentinel -> Missing_host
-  | e when e == request_too_large_sentinel -> Request_too_large
-  | e when e == trailer_too_large_sentinel -> Trailer_too_large
-  | e when e == malformed_host_sentinel -> Malformed_host
-  | e when e == response_header_too_large_sentinel -> Response_header_too_large
-  | e -> raise e
+let ( let* ) = Result.bind
 
 (* ------------------------------------------------------------------ *)
 (* textproto-style line + MIME header reading.                         *)
 (* ------------------------------------------------------------------ *)
 
-(* Read one CRLF/LF-terminated line, eliding the terminator. Raises
-   [End_of_file] at a clean EOF before any bytes (textproto.ReadLine).
+(* Read one CRLF/LF-terminated line, eliding the terminator (textproto.ReadLine).
+   Returns [Ok None] at a clean EOF before any bytes (Go's [io.EOF] from
+   [ReadLine]); [Ok (Some line)] otherwise; [Error Request_too_large] when the
+   budget is exhausted.
 
    [limit] is a shared mutable byte budget (Go's connReader.setReadLimit,
    server.go:803-818,:1024): each byte pulled — including the terminator —
-   decrements it, raising {!Request_too_large} before buffering an unbounded
-   line. Passing the same ref to the request line and every header line bounds
-   the whole head against one cumulative limit. *)
-let read_line ?(limit : int ref option) (r : Eio.Buf_read.t) : string =
+   decrements it, failing with {!constructor-Request_too_large} before buffering
+   an unbounded line. Passing the same ref to the request line and every header
+   line bounds the whole head against one cumulative limit. *)
+let read_line ?(limit : int ref option) (r : Eio.Buf_read.t) :
+    (string option, error) result =
   let buf = Buffer.create 128 in
   let consume () =
     match limit with
@@ -113,15 +70,17 @@ let read_line ?(limit : int ref option) (r : Eio.Buf_read.t) : string =
         end
   in
   let rec loop got_any =
-    if not (consume ()) then raise request_too_large_sentinel
+    if not (consume ()) then Error Request_too_large
     else
       match Eio.Buf_read.any_char r with
       | exception End_of_file ->
-          if got_any then Buffer.contents buf else raise End_of_file
+          if got_any then Ok (Some (Buffer.contents buf)) else Ok None
       | '\n' ->
           let s = Buffer.contents buf in
           let n = String.length s in
-          if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
+          Ok
+            (Some
+               (if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s))
       | c ->
           Buffer.add_char buf c;
           loop true
@@ -148,52 +107,54 @@ let valid_host_byte c =
 let valid_host_header h = String.for_all valid_host_byte h
 
 (* ReadMIMEHeader: read a header block until the blank line, honoring obs-fold
-   continuation lines. Raises Protocol_error on a malformed line. *)
-let read_mime_header_raising ?(limit : int ref option) (r : Eio.Buf_read.t) :
-    Header.t =
+   continuation lines. A malformed line short-circuits as [Error (Protocol _)];
+   a clean EOF before the terminating blank line is [Error Unexpected_eof]. *)
+let read_mime_header_threaded ?(limit : int ref option) (r : Eio.Buf_read.t) :
+    (Header.t, error) result =
   let rec gather acc =
-    let line = read_line ?limit r in
-    if line = "" then List.rev acc
-    else if line.[0] = ' ' || line.[0] = '\t' then
-      match acc with
-      | prev :: rest -> gather ((prev ^ " " ^ trim_ws line) :: rest)
-      | [] ->
-          raise
-            (Protocol_error
-               (Printf.sprintf "malformed MIME header initial line: %S" line))
-    else gather (line :: acc)
+    let* line = read_line ?limit r in
+    match line with
+    | None -> Error Unexpected_eof
+    | Some "" -> Ok (List.rev acc)
+    | Some line ->
+        if line.[0] = ' ' || line.[0] = '\t' then
+          match acc with
+          | prev :: rest -> gather ((prev ^ " " ^ trim_ws line) :: rest)
+          | [] ->
+              Error
+                (Protocol
+                   (Printf.sprintf "malformed MIME header initial line: %S" line))
+        else gather (line :: acc)
   in
+  let* lines = gather [] in
   List.fold_left
     (fun h kv ->
+      let* h = h in
       match String.index_opt kv ':' with
       | None ->
-          raise
-            (Protocol_error (Printf.sprintf "malformed MIME header line: %S" kv))
+          Error (Protocol (Printf.sprintf "malformed MIME header line: %S" kv))
       | Some i ->
           let k = String.sub kv 0 i in
           let v = String.sub kv (i + 1) (String.length kv - i - 1) in
           let key = Header.canonical_header_key k in
           if key = "" then
-            raise
-              (Protocol_error
-                 (Printf.sprintf "malformed MIME header line: %S" kv));
-          String.iter
-            (fun c ->
-              if not (valid_header_value_byte c) then
-                raise
-                  (Protocol_error
-                     (Printf.sprintf "malformed MIME header line: %S" kv)))
-            v;
-          let value =
-            let n = String.length v in
-            let j = ref 0 in
-            while !j < n && (v.[!j] = ' ' || v.[!j] = '\t') do
-              incr j
-            done;
-            String.sub v !j (n - !j)
-          in
-          Header.add h key value)
-    (Header.create ()) (gather [])
+            Error
+              (Protocol (Printf.sprintf "malformed MIME header line: %S" kv))
+          else if not (String.for_all valid_header_value_byte v) then
+            Error
+              (Protocol (Printf.sprintf "malformed MIME header line: %S" kv))
+          else
+            let value =
+              let n = String.length v in
+              let j = ref 0 in
+              while !j < n && (v.[!j] = ' ' || v.[!j] = '\t') do
+                incr j
+              done;
+              String.sub v !j (n - !j)
+            in
+            Ok (Header.add h key value))
+    (Ok (Header.create ()))
+    lines
 
 (* fixPragmaCacheControl (response.go). Returns the (possibly updated) header. *)
 let fix_pragma_cache_control (h : Header.t) : Header.t =
@@ -222,13 +183,17 @@ let merge_trailer (declared : Header.t option) (hdr : Header.t) :
 let trailer_buffer_size = 4096
 
 (* readTrailer (transfer.go:911-951): read the trailer block after a chunked
-   body, bounded so a malicious peer cannot OOM us. Budget exhaustion raises the
-   shared {!Request_too_large} sentinel; remap to {!Trailer_too_large}. *)
+   body, bounded so a malicious peer cannot OOM us. Read {b mid-stream} inside
+   the body [Stream] thunk (a [unit -> string option] closure that cannot return
+   a result), so per the mid-stream policy a parse failure {b raises}: a budget
+   exhaustion as {!Trailer_too_large}, any other framing error as the
+   {!Protocol_error} carrying its message text. *)
 let read_trailer (r : Eio.Buf_read.t) : Header.t =
   let limit = Some (ref trailer_buffer_size) in
-  try read_mime_header_raising ?limit r
-  with e when e == request_too_large_sentinel ->
-    raise trailer_too_large_sentinel
+  match read_mime_header_threaded ?limit r with
+  | Ok h -> h
+  | Error Request_too_large -> raise Trailer_too_large
+  | Error e -> raise (Protocol_error (error_to_string e))
 
 (* Wrap [read_transfer]'s incremental reader as a [Body.Stream]. On the first
    EOF, for a chunked body, read the trailing trailer block and merge it into
@@ -290,120 +255,136 @@ let is_token (s : string) : bool =
          | _ -> true)
        s
 
-let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
-    Request.t =
+let read_request_threaded ?(max_header_bytes : int option) (r : Eio.Buf_read.t)
+    : (Request.t, error) result =
   (* Bound the head against one cumulative budget (initialReadLimitSize =
      maxHeaderBytes + 4096, server.go:929,:1024). *)
   let limit =
     match max_header_bytes with Some n -> Some (ref (n + 4096)) | None -> None
   in
-  try
-    let s = read_line ?limit r in
-    let meth, request_uri, proto =
-      match parse_request_line s with
-      | None -> raise (bad_string_error "malformed HTTP request" s)
-      | Some t -> t
-    in
-    if not (is_token meth) then raise (bad_string_error "invalid method" meth);
-    match Httpg_base.Protocol.of_string proto with
-    | None -> raise (bad_string_error "malformed HTTP version" proto)
-    | Some proto_t ->
-        let proto_major = Httpg_base.Protocol.major proto_t in
-        let proto_minor = Httpg_base.Protocol.minor proto_t in
-        let just_authority =
-          meth = "CONNECT"
-          && not (String.length request_uri > 0 && request_uri.[0] = '/')
-        in
-        let rawurl =
-          if just_authority then "http://" ^ request_uri else request_uri
-        in
-        let url = Uri.of_string rawurl in
-        let url = if just_authority then Uri.with_scheme url None else url in
-        let header = read_mime_header_raising ?limit r in
+  let bad what value = Error (Protocol (bad_string_error_string what value)) in
+  let* s = read_line ?limit r in
+  (* A clean EOF before the request line is a truncated head. *)
+  let* s = match s with None -> Error Unexpected_eof | Some s -> Ok s in
+  let* meth, request_uri, proto =
+    match parse_request_line s with
+    | None -> bad "malformed HTTP request" s
+    | Some t -> Ok t
+  in
+  let* () = if is_token meth then Ok () else bad "invalid method" meth in
+  match Httpg_base.Protocol.of_string proto with
+  | None -> bad "malformed HTTP version" proto
+  | Some proto_t ->
+      let proto_major = Httpg_base.Protocol.major proto_t in
+      let proto_minor = Httpg_base.Protocol.minor proto_t in
+      let just_authority =
+        meth = "CONNECT"
+        && not (String.length request_uri > 0 && request_uri.[0] = '/')
+      in
+      let rawurl =
+        if just_authority then "http://" ^ request_uri else request_uri
+      in
+      let url = Uri.of_string rawurl in
+      let url = if just_authority then Uri.with_scheme url None else url in
+      let* header = read_mime_header_threaded ?limit r in
+      let* () =
         if List.length (Header.values header "Host") > 1 then
-          raise (Protocol_error "too many Host headers");
-        (* Post-parse validation sweep (server.go:1045-1062). isH2Upgrade:
-           method "PRI", no headers, path "*", proto "HTTP/2.0". *)
-        let proto_at_least_11 =
-          proto_major > 1 || (proto_major = 1 && proto_minor >= 1)
-        in
-        let host_values = Header.values header "Host" in
-        let is_h2_upgrade =
-          meth = "PRI" && Header.is_empty header
-          && Uri.path url = "*"
-          && proto = "HTTP/2.0"
-        in
+          Error (Protocol "too many Host headers")
+        else Ok ()
+      in
+      (* Post-parse validation sweep (server.go:1045-1062). isH2Upgrade:
+         method "PRI", no headers, path "*", proto "HTTP/2.0". *)
+      let proto_at_least_11 =
+        proto_major > 1 || (proto_major = 1 && proto_minor >= 1)
+      in
+      let host_values = Header.values header "Host" in
+      let is_h2_upgrade =
+        meth = "PRI" && Header.is_empty header
+        && Uri.path url = "*"
+        && proto = "HTTP/2.0"
+      in
+      let* () =
         if
           proto_at_least_11 && host_values = [] && (not is_h2_upgrade)
           && meth <> "CONNECT"
-        then raise (Protocol_error "missing required Host header");
-        (match host_values with
-        | [ h ] when not (valid_host_header h) -> raise malformed_host_sentinel
-        | _ -> ());
-        Header.iter
-          (fun k vs ->
+        then Error (Protocol "missing required Host header")
+        else Ok ()
+      in
+      let* () =
+        match host_values with
+        | [ h ] when not (valid_host_header h) -> Error Malformed_host
+        | _ -> Ok ()
+      in
+      let* () =
+        Header.fold
+          (fun k vs acc ->
+            let* () = acc in
             if not (Header.valid_header_field_name k) then
-              raise (Protocol_error "invalid header name");
-            List.iter
-              (fun v ->
-                if not (String.for_all valid_header_value_byte v) then
-                  raise (Protocol_error "invalid header value"))
-              vs)
+              Error (Protocol "invalid header name")
+            else if
+              not
+                (List.for_all
+                   (fun v -> String.for_all valid_header_value_byte v)
+                   vs)
+            then Error (Protocol "invalid header value")
+            else Ok ())
+          header (Ok ())
+      in
+      let host =
+        match Uri.host url with
+        | Some h when h <> "" -> h
+        | _ -> Header.get header "Host" |> Option.value ~default:""
+      in
+      let header = fix_pragma_cache_control header in
+      let close, _ =
+        Transfer.should_close ~major:proto_major ~minor:proto_minor ~header
+          ~remove_close_header:false
+      in
+      (* The wire method token is validated above; carry it typed from here. *)
+      let meth = Httpg_base.Method.of_string meth in
+      let msg =
+        {
+          Transfer.is_response = false;
           header;
-        let host =
-          match Uri.host url with
-          | Some h when h <> "" -> h
-          | _ -> Header.get header "Host" |> Option.value ~default:""
-        in
-        let header = fix_pragma_cache_control header in
-        let close, _ =
-          Transfer.should_close ~major:proto_major ~minor:proto_minor ~header
-            ~remove_close_header:false
-        in
-        (* The wire method token is validated above; carry it typed from here. *)
-        let meth = Httpg_base.Method.of_string meth in
-        let msg =
-          {
-            Transfer.is_response = false;
-            header;
-            status_code = Httpg_base.Status.Custom 0;
-            request_method = meth;
-            proto = proto_t;
-            close;
-          }
-        in
-        let res = read_transfer_or_raise msg r in
-        (* ReadRequest deletes Host from the post-framing header. *)
-        let header = Header.del res.Transfer.header "Host" in
-        let req =
-          {
-            Request.meth;
-            url;
-            proto = proto_t;
-            header;
-            body = Body.Empty;
-            content_length =
-              (let n = res.Transfer.content_length in
-               if Int64.compare n 0L < 0 then None else Some n);
-            transfer_encoding =
-              (if res.Transfer.is_chunked then [ "chunked" ] else []);
-            close = res.Transfer.result_close;
-            host = (if host = "" then None else Some host);
-            trailer = res.Transfer.trailer;
-            request_uri;
-            remote_addr = "";
-          }
-        in
-        req.Request.body <-
-          (match res.Transfer.body with
-          | Body.Stream reader ->
-              stream_body ~is_chunked:res.Transfer.is_chunked
-                ~declared_trailer:res.Transfer.trailer
-                ~set_trailer:(fun t -> req.Request.trailer <- t)
-                r reader
-          | (Body.Empty | Body.String _) as b -> b);
-        req
-  with End_of_file -> raise Unexpected_eof_sentinel
+          status_code = Httpg_base.Status.Custom 0;
+          request_method = meth;
+          proto = proto_t;
+          close;
+        }
+      in
+      let* res =
+        Transfer.read_transfer msg r |> Result.map_error (fun e -> Transfer e)
+      in
+      (* ReadRequest deletes Host from the post-framing header. *)
+      let header = Header.del res.Transfer.header "Host" in
+      let req =
+        {
+          Request.meth;
+          url;
+          proto = proto_t;
+          header;
+          body = Body.Empty;
+          content_length =
+            (let n = res.Transfer.content_length in
+             if Int64.compare n 0L < 0 then None else Some n);
+          transfer_encoding =
+            (if res.Transfer.is_chunked then [ "chunked" ] else []);
+          close = res.Transfer.result_close;
+          host = (if host = "" then None else Some host);
+          trailer = res.Transfer.trailer;
+          request_uri;
+          remote_addr = "";
+        }
+      in
+      req.Request.body <-
+        (match res.Transfer.body with
+        | Body.Stream reader ->
+            stream_body ~is_chunked:res.Transfer.is_chunked
+              ~declared_trailer:res.Transfer.trailer
+              ~set_trailer:(fun t -> req.Request.trailer <- t)
+              r reader
+        | (Body.Empty | Body.String _) as b -> b);
+      Ok req
 
 (* ------------------------------------------------------------------ *)
 (* read_response (ReadResponse).                                       *)
@@ -412,98 +393,105 @@ let read_request_raising ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
 (* strings.TrimLeft(s, " "). *)
 let trim_left_spaces s = Httpg_base.Textproto.trim_left ~chars:" " s
 
-let read_response_raising ?(request : Request.t option)
-    ?(max_header_bytes : int option) (r : Eio.Buf_read.t) : Response.t =
+let read_response_threaded ?(request : Request.t option)
+    ?(max_header_bytes : int option) (r : Eio.Buf_read.t) :
+    (Response.t, error) result =
   (* Client-side mirror of read_request's head budget
-     (Transport.MaxResponseHeaderBytes). The shared sentinel remaps to the
+     (Transport.MaxResponseHeaderBytes). The shared budget error remaps to the
      distinct {!Response_header_too_large}. *)
   let limit =
     match max_header_bytes with Some n -> Some (ref (n + 4096)) | None -> None
   in
-  let read_head () =
-    try read_line ?limit r with
-    | End_of_file -> raise Unexpected_eof_sentinel
-    | e when e == request_too_large_sentinel ->
-        raise response_header_too_large_sentinel
+  (* The status line + header block both use the same budget; a budget
+     exhaustion surfaces as the client-side {!Response_header_too_large}. *)
+  let head_too_large = function
+    | Request_too_large -> Response_header_too_large
+    | e -> e
   in
-  let line = read_head () in
+  let bad what value = Error (Protocol (bad_string_error_string what value)) in
+  let* line = read_line ?limit r |> Result.map_error head_too_large in
+  let* line = match line with None -> Error Unexpected_eof | Some l -> Ok l in
   let proto, status =
     match String.index_opt line ' ' with
-    | None -> raise (bad_string_error "malformed HTTP response" line)
+    | None -> ("", line)
     | Some i ->
         ( String.sub line 0 i,
           trim_left_spaces
             (String.sub line (i + 1) (String.length line - i - 1)) )
+  in
+  let* () =
+    match String.index_opt line ' ' with
+    | None -> bad "malformed HTTP response" line
+    | Some _ -> Ok ()
   in
   let status_code_str =
     match String.index_opt status ' ' with
     | None -> status
     | Some j -> String.sub status 0 j
   in
-  let bad_status () =
-    raise (bad_string_error "malformed HTTP status code" status_code_str)
-  in
-  if String.length status_code_str <> 3 then bad_status ();
-  match int_of_string_opt status_code_str with
-  | None -> bad_status ()
-  | Some sc when sc < 0 -> bad_status ()
-  | Some status_code -> (
-      match Httpg_base.Protocol.of_string proto with
-      | None -> raise (bad_string_error "malformed HTTP version" proto)
-      | Some proto_t ->
-          let status_code =
+  let bad_status () = bad "malformed HTTP status code" status_code_str in
+  if String.length status_code_str <> 3 then bad_status ()
+  else
+    match int_of_string_opt status_code_str with
+    | None -> bad_status ()
+    | Some sc when sc < 0 -> bad_status ()
+    | Some status_code -> (
+        match Httpg_base.Protocol.of_string proto with
+        | None -> bad "malformed HTTP version" proto
+        | Some proto_t -> (
             match Httpg_base.Status.of_int_result status_code with
-            | Ok s -> s
             | Error _ -> bad_status ()
-          in
-          let header =
-            try read_mime_header_raising ?limit r
-            with e when e == request_too_large_sentinel ->
-              raise response_header_too_large_sentinel
-          in
-          let header = fix_pragma_cache_control header in
-          let request_method =
-            match request with
-            | Some req -> req.Request.meth
-            | None -> Httpg_base.Method.Get
-          in
-          let msg =
-            {
-              Transfer.is_response = true;
-              header;
-              status_code;
-              request_method;
-              proto = proto_t;
-              close = false;
-            }
-          in
-          let res = read_transfer_or_raise msg r in
-          let resp =
-            {
-              Response.status = status_code;
-              proto = proto_t;
-              header = res.Transfer.header;
-              body = Body.Empty;
-              content_length =
-                (let n = res.Transfer.content_length in
-                 if Int64.compare n 0L < 0 then None else Some n);
-              transfer_encoding =
-                (if res.Transfer.is_chunked then [ "chunked" ] else []);
-              close = res.Transfer.result_close;
-              uncompressed = false;
-              trailer = res.Transfer.trailer;
-              request;
-            }
-          in
-          resp.Response.body <-
-            (match res.Transfer.body with
-            | Body.Stream reader ->
-                stream_body ~is_chunked:res.Transfer.is_chunked
-                  ~declared_trailer:res.Transfer.trailer
-                  ~set_trailer:(fun t -> resp.Response.trailer <- t)
-                  r reader
-            | (Body.Empty | Body.String _) as b -> b);
-          resp)
+            | Ok status_code ->
+                let* header =
+                  read_mime_header_threaded ?limit r
+                  |> Result.map_error head_too_large
+                in
+                let header = fix_pragma_cache_control header in
+                let request_method =
+                  match request with
+                  | Some req -> req.Request.meth
+                  | None -> Httpg_base.Method.Get
+                in
+                let msg =
+                  {
+                    Transfer.is_response = true;
+                    header;
+                    status_code;
+                    request_method;
+                    proto = proto_t;
+                    close = false;
+                  }
+                in
+                let* res =
+                  Transfer.read_transfer msg r
+                  |> Result.map_error (fun e -> Transfer e)
+                in
+                let resp =
+                  {
+                    Response.status = status_code;
+                    proto = proto_t;
+                    header = res.Transfer.header;
+                    body = Body.Empty;
+                    content_length =
+                      (let n = res.Transfer.content_length in
+                       if Int64.compare n 0L < 0 then None else Some n);
+                    transfer_encoding =
+                      (if res.Transfer.is_chunked then [ "chunked" ] else []);
+                    close = res.Transfer.result_close;
+                    uncompressed = false;
+                    trailer = res.Transfer.trailer;
+                    request;
+                  }
+                in
+                resp.Response.body <-
+                  (match res.Transfer.body with
+                  | Body.Stream reader ->
+                      stream_body ~is_chunked:res.Transfer.is_chunked
+                        ~declared_trailer:res.Transfer.trailer
+                        ~set_trailer:(fun t -> resp.Response.trailer <- t)
+                        r reader
+                  | (Body.Empty | Body.String _) as b -> b);
+                Ok resp))
 
 (* ------------------------------------------------------------------ *)
 (* write_request (Request.Write / write).                              *)
@@ -522,7 +510,12 @@ let string_contains_ctl_byte s =
       b < 0x20 || b = 0x7f)
     s
 
-let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
+(* The read path threads [result] directly; the write path threads it too:
+   "no Host", a control byte in the request URI, and an invalid Trailer key
+   (from {!Transfer.write_transfer_header}) all surface as [Error] returns.
+   Mid-stream body-write raises (chunked writer / length mismatch in
+   {!Transfer.write_body}) stay raising, per Resolution #1. *)
+let write_request (w : Eio.Buf_write.t) (r : Request.t) : (unit, error) result =
   let out = Eio.Buf_write.string w in
   let host =
     match r.Request.host with
@@ -533,75 +526,76 @@ let write_request_raising (w : Eio.Buf_write.t) (r : Request.t) : unit =
     host = ""
     && (match Uri.host r.Request.url with Some _ -> false | None -> true)
     && r.Request.host = None
-  then raise missing_host_sentinel;
-  let ruri =
-    if r.Request.meth = Httpg_base.Method.Connect && Uri.path r.Request.url = ""
-    then host
-    else request_uri_of r.Request.url
-  in
-  if string_contains_ctl_byte ruri then
-    raise
-      (Protocol_error "net/http: can't write control character in Request.URL");
-  let meth =
-    match r.Request.meth with
-    | Httpg_base.Method.Custom "" -> Httpg_base.Method.Get
-    | m -> m
-  in
-  out
-    (Printf.sprintf "%s %s HTTP/1.1\r\n"
-       (Httpg_base.Method.to_string meth)
-       ruri);
-  out (Printf.sprintf "Host: %s\r\n" host);
-  (* User-Agent: default unless present (a present key with no value — i.e.
-     [set_values h "User-Agent" []] — suppresses it). *)
-  let user_agent =
-    if Header.has r.Request.header "User-Agent" then
-      Header.get r.Request.header "User-Agent"
-    else Some Request.default_user_agent
-  in
-  Option.iter
-    (fun ua ->
-      let ua =
-        String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) ua
+  then Error Missing_host
+  else
+    let ruri =
+      if
+        r.Request.meth = Httpg_base.Method.Connect
+        && Uri.path r.Request.url = ""
+      then host
+      else request_uri_of r.Request.url
+    in
+    if string_contains_ctl_byte ruri then
+      Error (Protocol "net/http: can't write control character in Request.URL")
+    else begin
+      let meth =
+        match r.Request.meth with
+        | Httpg_base.Method.Custom "" -> Httpg_base.Method.Get
+        | m -> m
       in
-      out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua)))
-    user_agent;
-  let tw =
-    Transfer.make_transfer_writer ~is_response:false ~method_:meth
-      ~at_least_http11:true ~close:r.Request.close ~header:r.Request.header
-      ~trailer:r.Request.trailer ~body:r.Request.body
-      ~content_length:(Option.value ~default:(-1L) r.Request.content_length)
-      ~transfer_encoding:r.Request.transfer_encoding ()
-  in
-  Transfer.write_transfer_header w tw;
-  let buf = Buffer.create 256 in
-  Header.write_subset r.Request.header buf
-    ~exclude:
-      [ "Host"; "User-Agent"; "Content-Length"; "Transfer-Encoding"; "Trailer" ];
-  out (Buffer.contents buf);
-  out "\r\n";
-  Transfer.write_body w tw
+      out
+        (Printf.sprintf "%s %s HTTP/1.1\r\n"
+           (Httpg_base.Method.to_string meth)
+           ruri);
+      out (Printf.sprintf "Host: %s\r\n" host);
+      (* User-Agent: default unless present (a present key with no value — i.e.
+         [set_values h "User-Agent" []] — suppresses it). *)
+      let user_agent =
+        if Header.has r.Request.header "User-Agent" then
+          Header.get r.Request.header "User-Agent"
+        else Some Request.default_user_agent
+      in
+      Option.iter
+        (fun ua ->
+          let ua =
+            String.map (fun c -> if c = '\n' || c = '\r' then ' ' else c) ua
+          in
+          out (Printf.sprintf "User-Agent: %s\r\n" (trim_ws ua)))
+        user_agent;
+      let tw =
+        Transfer.make_transfer_writer ~is_response:false ~method_:meth
+          ~at_least_http11:true ~close:r.Request.close ~header:r.Request.header
+          ~trailer:r.Request.trailer ~body:r.Request.body
+          ~content_length:(Option.value ~default:(-1L) r.Request.content_length)
+          ~transfer_encoding:r.Request.transfer_encoding ()
+      in
+      let* () =
+        Transfer.write_transfer_header w tw
+        |> Result.map_error (fun e -> Transfer e)
+      in
+      let buf = Buffer.create 256 in
+      Header.write_subset r.Request.header buf
+        ~exclude:
+          [
+            "Host";
+            "User-Agent";
+            "Content-Length";
+            "Transfer-Encoding";
+            "Trailer";
+          ];
+      out (Buffer.contents buf);
+      out "\r\n";
+      Transfer.write_body w tw;
+      Ok ()
+    end
 
-(* ------------------------------------------------------------------ *)
-(* Result boundary wrappers.                                           *)
-(* ------------------------------------------------------------------ *)
-
-(* Catch the internal raising sentinels and map them to a boundary [error];
-   non-boundary exceptions (IO errors, programmer bugs) escape. *)
-let to_result (f : unit -> 'a) : ('a, error) result =
-  try Ok (f ()) with e -> Error (error_of_exception e)
-
-let read_mime_header r : (Header.t, error) result =
-  to_result (fun () -> read_mime_header_raising r)
+let read_mime_header r : (Header.t, error) result = read_mime_header_threaded r
 
 let read_request ?max_header_bytes r : (Request.t, error) result =
-  to_result (fun () -> read_request_raising ?max_header_bytes r)
+  read_request_threaded ?max_header_bytes r
 
 let read_response ?request ?max_header_bytes r : (Response.t, error) result =
-  to_result (fun () -> read_response_raising ?request ?max_header_bytes r)
-
-let write_request w r : (unit, error) result =
-  to_result (fun () -> write_request_raising w r)
+  read_response_threaded ?request ?max_header_bytes r
 
 (* ------------------------------------------------------------------ *)
 (* write_response (Response.Write).                                    *)
@@ -656,7 +650,11 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
       ~content_length:(Option.value ~default:(-1L) !content_length)
       ~transfer_encoding:r.Response.transfer_encoding ()
   in
-  Transfer.write_transfer_header w tw;
+  (* White-box test-only: a forbidden Trailer key surfaces as a local raise of
+     the boundary [error] (no result thread out of this test helper). *)
+  (match Transfer.write_transfer_header w tw with
+  | Ok () -> ()
+  | Error e -> raise (Protocol_error (error_to_string (Transfer e))));
   let buf = Buffer.create 256 in
   Header.write_subset r.Response.header buf
     ~exclude:[ "Content-Length"; "Transfer-Encoding"; "Trailer" ];

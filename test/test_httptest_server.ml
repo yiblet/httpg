@@ -8,6 +8,12 @@
 open Httpg
 module Ts = Httptest.Server
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* ---- HttptestServer.server_get ---- *)
 let server_get () =
   let handler =
@@ -21,7 +27,7 @@ let server_get () =
           ~finally:(fun () -> Ts.close s)
           (fun () ->
             let c = Ts.client s in
-            let resp = Client.get ~sw c (Ts.url s ^ "/foo") in
+            let resp = ok_resp (Client.get ~sw c (Ts.url s ^ "/foo")) in
             ( Httpg_base.Status.to_int resp.Response.status,
               Body.read_all resp.Response.body )))
   in
@@ -40,7 +46,7 @@ let server_tls () =
           ~finally:(fun () -> Ts.close s)
           (fun () ->
             let c = Ts.client s in
-            let resp = Client.get ~sw c (Ts.url s) in
+            let resp = ok_resp (Client.get ~sw c (Ts.url s)) in
             ( Httpg_base.Status.to_int resp.Response.status,
               Body.read_all resp.Response.body,
               Ts.url s )))
@@ -63,7 +69,7 @@ let server_close () =
         let s = Ts.new_server ~net ~clock ~sw handler in
         let port = Ts.port s in
         let c = Ts.client s in
-        let resp = Client.get ~sw c (Ts.url s) in
+        let resp = ok_resp (Client.get ~sw c (Ts.url s)) in
         ignore (Body.drain resp.Response.body);
         Ts.close s;
         (* a fresh connect to the closed port must fail (refused). *)

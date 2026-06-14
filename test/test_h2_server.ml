@@ -308,7 +308,11 @@ let with_serve ?clock ?idle_timeout ?read_timeout ?graceful ~handler client =
              S.serve ?clock ?idle_timeout ?read_timeout ?graceful r w ~handler)
        with _ -> ());
       Eio.Promise.resolve server_done_u ());
-  let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+  let flow =
+    match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+    | Ok x -> x
+    | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+  in
   let result = Net.with_connection flow (fun r w -> client ~server_done r w) in
   result
 
@@ -324,7 +328,9 @@ let test_graceful_drains_inflight () =
   (* Handler blocks until the test releases it, so the stream is genuinely
      in-flight when graceful shutdown is triggered. *)
   let release, release_u = Eio.Promise.create () in
+  let started, started_u = Eio.Promise.create () in
   let handler (rw : S.response_writer) (_req : Api.server_request) =
+    Eio.Promise.resolve started_u ();
     Eio.Promise.await release;
     rw.rw_write "done";
     rw.rw_flush ()
@@ -340,6 +346,11 @@ let test_graceful_drains_inflight () =
         (":authority", "x");
       ];
     Eio.Buf_write.flush oc;
+    (* Wait until the server has actually started processing stream 1 (the
+       handler is running, blocked on [release]) before triggering graceful, so
+       the GOAWAY's last-stream-id covers stream 1 and it is genuinely in-flight
+       rather than racing the shutdown and being refused. *)
+    Eio.Promise.await started;
     (* Trigger graceful shutdown while the handler is still blocked. *)
     Eio.Promise.resolve graceful_u ();
     let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
@@ -432,7 +443,11 @@ let test_read_timeout_closes_idle_peer () =
                S.serve ~clock ~read_timeout:0.3 r w ~handler)
          with _ -> ());
         Eio.Promise.resolve server_done_u ());
-    let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+    let flow =
+      match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+      | Ok x -> x
+      | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+    in
     Net.with_connection flow (fun _r w ->
         Eio.Buf_write.string w H2.client_preface;
         F.write_settings w [];
@@ -486,7 +501,11 @@ let test_idle_timeout_goaway () =
          with _ -> ());
         closed := true;
         Eio.Promise.resolve server_done_u ());
-    let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+    let flow =
+      match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+      | Ok x -> x
+      | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+    in
     Net.with_connection flow (fun r w -> client ~server_done r w)
   in
   Alcotest.(check bool)

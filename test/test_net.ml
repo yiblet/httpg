@@ -28,7 +28,11 @@ let loopback_roundtrip () =
         in
         (* Client: connect, send a line, read the echo. *)
         let client () =
-          let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+          let flow =
+            match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+            | Ok x -> x
+            | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+          in
           Net.with_connection flow (fun r w ->
               Eio.Buf_write.string w "PING\n";
               (* flush so the server sees the line. *)
@@ -105,48 +109,59 @@ let tls_spin_guard () =
           with _ -> ()
         in
         let client () =
-          try
-            Net.connect_tls ~sw net ~host:"127.0.0.1" ~port ~tls:true
-              ~insecure:true (fun r _w ->
-                (* Try to read a line; the server never sends app data, only
-                   KeyUpdates, so the spin guard must trip. *)
-                ignore (Eio.Buf_read.line r))
+          (* The spin guard trips inside the TLS read while [fn] runs, so the
+             handleable [Net.Tls_error] is converted at the public boundary into
+             [Error (Net.Tls _)]. A stray [End_of_file] (no guard) is captured
+             separately so the failure mode is distinguishable. *)
+          match
+            try
+              `Res
+                (Net.connect_tls ~sw net ~host:"127.0.0.1" ~port ~tls:true
+                   ~insecure:true (fun r _w ->
+                     (* Try to read a line; the server never sends app data,
+                        only KeyUpdates, so the spin guard must trip. *)
+                     ignore (Eio.Buf_read.line r)))
+            with End_of_file -> `Eof
           with
-          | Net.Tls_error _ as e -> caught := Some e
-          | End_of_file -> caught := Some End_of_file
+          | `Res (Ok ()) -> caught := Some `Ok
+          | `Res (Error (Net.Tls msg)) -> caught := Some (`Tls msg)
+          | `Res (Error (Net.Dial msg)) -> caught := Some (`Dial msg)
+          | `Eof -> caught := Some `Eof
         in
         Eio.Fiber.both server client;
         !caught)
   in
   match result with
-  | Some (Net.Tls_error msg) ->
+  | Some (`Tls msg) ->
       Alcotest.(check string) "spin guard error" "too many ignored records" msg
-  | Some End_of_file ->
-      Alcotest.fail "got End_of_file, expected Net.Tls_error spin guard"
-  | Some _ -> Alcotest.fail "unexpected exception"
+  | Some `Eof ->
+      Alcotest.fail "got End_of_file, expected Error (Net.Tls _) spin guard"
+  | Some (`Dial _) -> Alcotest.fail "unexpected Net.Dial error"
+  | Some `Ok ->
+      Alcotest.fail "expected the spin guard to trip, but read succeeded"
   | None -> Alcotest.fail "expected the spin guard to trip, but read succeeded"
 
-(* A dial to an unresolvable host surfaces the typed, catchable {!Net.Dial_error}
-   (the analogue of Go's [Dial] returning a [*net.DNSError] "no such host") --
-   not a bare [Failure]. We use a [.invalid] TLD (RFC 6761 §6.4: guaranteed never
-   to resolve) so the resolver returns no address and {!Net.resolve} raises. *)
+(* A dial to an unresolvable host surfaces the typed, handleable [Error (Net.Dial
+   _)] (the analogue of Go's [Dial] returning a [*net.DNSError] "no such host") --
+   not a raise. We use a [.invalid] TLD (RFC 6761 §6.4: guaranteed never to
+   resolve) so the resolver returns no address and the boundary converts the
+   internal sentinel to the typed result. *)
 let dial_failure_is_typed () =
   let caught =
     Test_harness.with_env ~secs:5. (fun ~net ~clock:_ ~sw ->
         match Net.connect ~sw net ~host:"no-such-host.invalid" ~port:80 with
-        | _flow -> None
-        | exception (Net.Dial_error _ as e) -> Some (`Typed e)
-        | exception e -> Some (`Other e))
+        | Ok _flow -> `Ok
+        | Error (Net.Dial _) -> `Dial
+        | Error (Net.Tls _) -> `Tls
+        | exception e -> `Raised e)
   in
   match caught with
-  | Some (`Typed (Net.Dial_error _)) -> ()
-  | Some (`Typed _) -> Alcotest.fail "unreachable"
-  | Some (`Other (Failure _)) ->
-      Alcotest.fail
-        "dial failure escaped as a bare Failure, expected Net.Dial_error"
-  | Some (`Other e) ->
-      Alcotest.failf "expected Net.Dial_error, got %s" (Printexc.to_string e)
-  | None -> Alcotest.fail "expected Net.Dial_error, but the dial succeeded"
+  | `Dial -> ()
+  | `Tls -> Alcotest.fail "expected Error (Net.Dial _), got Error (Net.Tls _)"
+  | `Raised e ->
+      Alcotest.failf "expected Error (Net.Dial _), got raise %s"
+        (Printexc.to_string e)
+  | `Ok -> Alcotest.fail "expected Error (Net.Dial _), but the dial succeeded"
 
 let tests =
   [

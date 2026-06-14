@@ -28,29 +28,6 @@ let parse_http_version () =
       Alcotest.(check (option (pair int int))) vers want got)
     cases
 
-let b64 s = Base64.encode_string s
-
-let parse_basic_auth () =
-  let cases =
-    [
-      ("Basic " ^ b64 "Aladdin:open sesame", Some ("Aladdin", "open sesame"));
-      ("BASIC " ^ b64 "Aladdin:open sesame", Some ("Aladdin", "open sesame"));
-      ("basic " ^ b64 "Aladdin:open sesame", Some ("Aladdin", "open sesame"));
-      ("Basic " ^ b64 "Aladdin:open:sesame", Some ("Aladdin", "open:sesame"));
-      ("Basic " ^ b64 ":", Some ("", ""));
-      ("Basic" ^ b64 "Aladdin:open sesame", None);
-      (b64 "Aladdin:open sesame", None);
-      ("Basic ", None);
-      ("Basic Aladdin:open sesame", None);
-      ({|Digest username="Aladdin"|}, None);
-    ]
-  in
-  List.iter
-    (fun (header, want) ->
-      let got = Httpg.Request.parse_basic_auth header in
-      Alcotest.(check (option (pair string string))) header want got)
-    cases
-
 let dummy_req () : Httpg.Request.t =
   {
     Httpg.Request.meth = Httpg_base.Method.Get;
@@ -67,23 +44,31 @@ let dummy_req () : Httpg.Request.t =
     remote_addr = "";
   }
 
-let basic_auth_roundtrip () =
+let auth_roundtrip () =
   let cases =
     [ ("Aladdin", "open sesame"); ("Aladdin", "open:sesame"); ("", "") ]
   in
   List.iter
     (fun (u, p) ->
       let r = dummy_req () in
-      Httpg.Request.set_basic_auth r u p;
-      match Httpg.Request.basic_auth r with
-      | Some (gu, gp) ->
-          Alcotest.(check string) "user" u gu;
-          Alcotest.(check string) "pass" p gp
-      | None -> Alcotest.fail "expected basic auth")
+      Httpg.Request.set_auth r
+        (Httpg.Authorization.Basic { username = u; password = p });
+      match Httpg.Request.auth r with
+      | Some (Httpg.Authorization.Basic { username; password }) ->
+          Alcotest.(check string) "user" u username;
+          Alcotest.(check string) "pass" p password
+      | _ -> Alcotest.fail "expected Basic auth")
     cases;
+  (* Bearer round-trips through set_auth/auth too. *)
+  let r = dummy_req () in
+  Httpg.Request.set_auth r (Httpg.Authorization.Bearer "tok123");
+  (match Httpg.Request.auth r with
+  | Some (Httpg.Authorization.Bearer t) ->
+      Alcotest.(check string) "token" "tok123" t
+  | _ -> Alcotest.fail "expected Bearer");
   (* Unauthenticated request. *)
   let r = dummy_req () in
-  Alcotest.(check bool) "unauth" true (Httpg.Request.basic_auth r = None)
+  Alcotest.(check bool) "unauth" true (Httpg.Request.auth r = None)
 
 let add_cookie () =
   let r = dummy_req () in
@@ -120,8 +105,7 @@ let make () =
 let tests =
   [
     ("parse_http_version", `Quick, parse_http_version);
-    ("parse_basic_auth", `Quick, parse_basic_auth);
-    ("basic_auth_roundtrip", `Quick, basic_auth_roundtrip);
+    ("auth_roundtrip", `Quick, auth_roundtrip);
     ("add_cookie", `Quick, add_cookie);
     ("make", `Quick, make);
   ]

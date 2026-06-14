@@ -560,7 +560,14 @@ let test_chunked_auto_select_post () =
   Alcotest.(check (list string))
     "POST cl<0 no-TE -> chunked auto-selected" [ "chunked" ]
     tw.Transfer.tw_transfer_encoding;
-  let hdr = with_output_string (fun w -> Transfer.write_transfer_header w tw) in
+  let hdr =
+    with_output_string (fun w ->
+        match Transfer.write_transfer_header w tw with
+        | Ok () -> ()
+        | Error e ->
+            Alcotest.failf "write_transfer_header: %s"
+              (Transfer.error_to_string e))
+  in
   Alcotest.(check string)
     "header advertises chunked" "Transfer-Encoding: chunked\r\n" hdr;
   let wire = with_output_string (fun w -> Transfer.write_body w tw) in

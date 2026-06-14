@@ -70,7 +70,11 @@ let with_raw_client handler fn =
       Fun.protect
         ~finally:(fun () -> Server.close srv)
         (fun () ->
-          let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+          let flow =
+            match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+            | Ok x -> x
+            | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+          in
           Net.with_connection flow (fun r w -> fn r w)))
 
 let send_get w =

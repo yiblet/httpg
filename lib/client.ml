@@ -9,15 +9,18 @@
 (* Go's defaultCheckRedirect: error out after 10 redirects. *)
 type check_redirect = Request.t list -> (unit, string) result
 
-(* Handleable client error: the redirect policy aborted the request (Go's Do
-   returning the CheckRedirect error). Surfaced by raising [Aborted], keeping
-   Go's [(resp, err)] split as an exception at the [Response.t] boundary
-   (the convenience verbs and the test suite consume that shape). *)
-type error = Redirect of string
+(* Handleable client errors (Go's [Client.Do] returning an error): the redirect
+   policy aborted the request ([Redirect], Go's CheckRedirect error), a per-hop
+   [Transport.round_trip] failed ([Round_trip], embedding the lower layer's
+   typed error), or the whole exchange exceeded [Client.timeout] ([Timeout],
+   Go's Client.Timeout). Returned as [Error _] from the result-typed public API
+   ([do_]/[get]/[head]/[post]); no exception boundary. *)
+type error = Redirect of string | Round_trip of Transport.error | Timeout
 
-let error_to_string = function Redirect s -> "http: " ^ s
-
-exception Aborted of error
+let error_to_string = function
+  | Redirect s -> "http: " ^ s
+  | Round_trip e -> Transport.error_to_string e
+  | Timeout -> "http: timeout"
 
 let default_check_redirect : check_redirect =
  fun via ->
@@ -110,7 +113,8 @@ let referer_for_url ~last ~next ~explicit =
 (* Go's Client.do: the redirect-following loop composing Transport.round_trip.
    [round_trip] is the per-hop round-tripper (defaults to the client's transport);
    it is a parameter so tests can drive the loop against a stub. *)
-let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) : Response.t =
+let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
+    (Response.t, error) result =
   let round_trip =
     match round_trip with
     | Some f -> f
@@ -123,85 +127,88 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) : Response.t =
   let strip_sensitive = ref false in
   let rec loop req via include_body =
     let via = via @ [ req ] in
-    let resp = round_trip req in
-    let redirect_method, should_redirect, include_body_on_hop =
-      redirect_behavior ~req_method:req.Request.meth resp
-    in
-    if not should_redirect then resp
-    else
-      match Response.location resp with
-      | None -> resp (* 3xx without Location: hand the response back. *)
-      | Some loc_url -> (
-          (* Drain the previous response body so its connection returns to the
+    match round_trip req with
+    | Error e -> Error (Round_trip e)
+    | Ok resp -> (
+        let redirect_method, should_redirect, include_body_on_hop =
+          redirect_behavior ~req_method:req.Request.meth resp
+        in
+        if not should_redirect then Ok resp
+        else
+          match Response.location resp with
+          | None -> Ok resp (* 3xx without Location: hand the response back. *)
+          | Some loc_url -> (
+              (* Drain the previous response body so its connection returns to the
              pool before the next hop (Go reads up to maxBodySlurpSize then
              closes). *)
-          ignore (Body.drain resp.Response.body);
-          let include_body = include_body && include_body_on_hop in
-          let initial_req = List.hd via in
-          if
-            (not !strip_sensitive)
-            && url_host initial_req.Request.url <> url_host loc_url
-            && not
-                 (should_copy_header_on_redirect
-                    ~initial:initial_req.Request.url ~dest:loc_url)
-          then strip_sensitive := true;
-          let new_header =
-            copy_headers ~from:initial_header ~into:(Header.create ())
-              ~strip_sensitive:!strip_sensitive ~strip_body:(not include_body)
-          in
-          let new_header =
-            match
-              referer_for_url ~last:req.Request.url ~next:loc_url
-                ~explicit:explicit_referer
-            with
-            | Some ref_ -> Header.set new_header "Referer" ref_
-            | None -> new_header
-          in
-          let new_req =
-            {
-              Request.meth = redirect_method;
-              url = loc_url;
-              proto = Httpg_base.Protocol.Http11;
-              header = new_header;
-              body = (if include_body then req.Request.body else Body.Empty);
-              content_length =
-                (if include_body then req.Request.content_length else Some 0L);
-              transfer_encoding =
-                (if include_body then req.Request.transfer_encoding else []);
-              close = false;
-              host = None;
-              trailer = None;
-              request_uri = "";
-              remote_addr = "";
-            }
-          in
-          match c.check_redirect via with
-          | Ok () -> loop new_req via include_body
-          | Error msg -> raise (Aborted (Redirect msg)))
+              ignore (Body.drain resp.Response.body);
+              let include_body = include_body && include_body_on_hop in
+              let initial_req = List.hd via in
+              if
+                (not !strip_sensitive)
+                && url_host initial_req.Request.url <> url_host loc_url
+                && not
+                     (should_copy_header_on_redirect
+                        ~initial:initial_req.Request.url ~dest:loc_url)
+              then strip_sensitive := true;
+              let new_header =
+                copy_headers ~from:initial_header ~into:(Header.create ())
+                  ~strip_sensitive:!strip_sensitive
+                  ~strip_body:(not include_body)
+              in
+              let new_header =
+                match
+                  referer_for_url ~last:req.Request.url ~next:loc_url
+                    ~explicit:explicit_referer
+                with
+                | Some ref_ -> Header.set new_header "Referer" ref_
+                | None -> new_header
+              in
+              let new_req =
+                {
+                  Request.meth = redirect_method;
+                  url = loc_url;
+                  proto = Httpg_base.Protocol.Http11;
+                  header = new_header;
+                  body = (if include_body then req.Request.body else Body.Empty);
+                  content_length =
+                    (if include_body then req.Request.content_length
+                     else Some 0L);
+                  transfer_encoding =
+                    (if include_body then req.Request.transfer_encoding else []);
+                  close = false;
+                  host = None;
+                  trailer = None;
+                  request_uri = "";
+                  remote_addr = "";
+                }
+              in
+              match c.check_redirect via with
+              | Ok () -> loop new_req via include_body
+              | Error msg -> Error (Redirect msg)))
   in
   loop req [] true
 
-let do_ ?force_h2 ~sw c (req : Request.t) : Response.t =
+let do_ ?force_h2 ~sw c (req : Request.t) : (Response.t, error) result =
   (* The client's [sw] (the session lifetime) owns the transport's pool, so
      pooled conns outlive each round trip but are reclaimed when the client
      session ends. *)
   Transport.run c.transport ~sw @@ fun () ->
   match (c.timeout, Transport.clock c.transport) with
-  | Some secs, Some clock ->
+  | Some secs, Some clock -> (
       (* Go's Client.Timeout bounds the whole exchange via Eio.Time. *)
-      Net.with_timeout clock secs (fun () -> do_one ?force_h2 c req)
+      match Net.with_timeout clock secs (fun () -> do_one ?force_h2 c req) with
+      | Ok v -> v
+      | Error _ -> Error Timeout)
   | _ -> do_one ?force_h2 c req
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
-let make_request ?(body = Body.Empty) ?(content_length = 0L) meth url_str =
-  Request.make ~meth ~body ~content_length url_str
-
 let get ?force_h2 ~sw c url =
-  do_ ?force_h2 ~sw c (make_request Httpg_base.Method.get url)
+  do_ ?force_h2 ~sw c (Request.make ~meth:Httpg_base.Method.get url)
 
 let head ?force_h2 ~sw c url =
-  do_ ?force_h2 ~sw c (make_request Httpg_base.Method.head url)
+  do_ ?force_h2 ~sw c (Request.make ~meth:Httpg_base.Method.head url)
 
 let post ?force_h2 ~sw c url ~content_type body =
   let len =
@@ -210,7 +217,13 @@ let post ?force_h2 ~sw c url ~content_type body =
     | Body.Empty -> 0L
     | Body.Stream _ -> -1L
   in
-  let req = make_request ~body ~content_length:len Httpg_base.Method.post url in
+  let req =
+    Request.make ~meth:Httpg_base.Method.post ~body ~content_length:len url
+  in
   req.Request.header <-
     Header.set req.Request.header "Content-Type" content_type;
   do_ ?force_h2 ~sw c req
+
+module Private = struct
+  let do_one = do_one
+end

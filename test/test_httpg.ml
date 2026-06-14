@@ -27,6 +27,7 @@ let () =
       ("Io", Test_io.tests);
       ("ReadRequest", Test_readrequest.tests);
       ("Request", Test_request.tests);
+      ("Authorization", Test_authorization.tests);
       ("RequestWrite", Test_requestwrite.tests);
       ("Response", Test_response.tests);
       ("ResponseWrite", Test_responsewrite.tests);

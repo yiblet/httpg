@@ -9,6 +9,12 @@
 open Httpg
 module Ts = Httptest.Server
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error (a 304/412 status is still [Ok]). *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* ---- temp-dir + file helpers ---- *)
 
 let with_tmpdir ~fs ~net ~clock ~sw f =
@@ -67,10 +73,10 @@ let etag_file_handler ~dir ~name ~etag =
 (* Build a GET to [url] with extra headers, send via [Client.do_] (304/412 are
    not redirects, so do_ returns them directly), read its body. *)
 let request_with_headers ~sw c url headers =
-  let req = Client.make_request Httpg_base.Method.Get url in
+  let req = Request.make ~meth:Httpg_base.Method.Get url in
   req.Request.header <-
     List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
-  let resp = Client.do_ ~sw c req in
+  let resp = ok_resp (Client.do_ ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     Body.read_all resp.Response.body,
     resp.Response.header )
@@ -90,7 +96,7 @@ let if_modified_since_304 () =
             write_file dir "x.txt" contents;
             let handler = Fs.file_server (Fs.dir dir) in
             serve ~net ~sw ~clock handler (fun ~sw c url ->
-                let r0 = Client.get ~sw c (url ^ "/x.txt") in
+                let r0 = ok_resp (Client.get ~sw c (url ^ "/x.txt")) in
                 ignore (Body.drain r0.Response.body);
                 let last_mod = Header.get r0.Response.header "Last-Modified" in
                 let status, body, _ =
@@ -192,7 +198,7 @@ let if_unmodified_since_412 () =
                   request_with_headers ~sw c (url ^ "/u.txt")
                     [ ("If-Unmodified-Since", "Mon, 02 Jan 2006 15:04:05 GMT") ]
                 in
-                let r0 = Client.get ~sw c (url ^ "/u.txt") in
+                let r0 = ok_resp (Client.get ~sw c (url ^ "/u.txt")) in
                 ignore (Body.drain r0.Response.body);
                 let last_mod =
                   Option.get (Header.get r0.Response.header "Last-Modified")

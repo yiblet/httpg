@@ -27,7 +27,11 @@ let with_h2_raw ?max_concurrent_streams ?max_header_bytes ?(timeout = 15.)
      [Fiber.first] cancels the still-blocked server fiber. *)
   Eio.Fiber.first
     (fun () ->
-      let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+      let flow =
+        match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+        | Ok x -> x
+        | Error e -> failwith ("net: " ^ Net.error_to_string e)
+      in
       Net.with_connection flow (fun r w -> client r w))
     (fun () ->
       (* Accept and serve inline (not via accept_fork) so the serve runs in this

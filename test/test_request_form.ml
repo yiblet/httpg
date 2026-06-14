@@ -177,25 +177,85 @@ let values_encode () =
   let v = Form.create () in
   let v = Form.add v "foo" "quux" in
   let v = Form.add v "bar" "baz" in
-  Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Form.encode v);
+  Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Form.to_string v);
   let v = Form.set v "foo" "x y" in
   (* deviation from Go: space encodes as "%20", not '+'. *)
   Alcotest.(check string)
-    "encode space->%20" "bar=baz&foo=x%20y" (Form.encode v)
+    "encode space->%20" "bar=baz&foo=x%20y" (Form.to_string v)
 
 (* Round-trip: a space and a literal '+' survive encode -> parse_query. The space
    encodes as "%20" and the '+' as "%2B"; decode accepts both '+' and "%2B". *)
 let encode_roundtrip () =
   let v = Form.set (Form.create ()) "k" "a b+c" in
-  let encoded = Form.encode v in
+  let encoded = Form.to_string v in
   Alcotest.(check string) "encoded" "k=a%20b%2Bc" encoded;
   let parsed, res = Form.parse_query encoded in
-  Alcotest.(check bool) "no parse error" true (res = Ok ());
+  Alcotest.(check bool) "no parse error" true (res = None);
   Alcotest.(check string) "value round-trips" "a b+c" (Form.get parsed "k")
+
+(* Form.of_string: strict parse — Ok on a clean query, the typed error otherwise. *)
+let form_of_string () =
+  (match Form.of_string "a=1&b=2" with
+  | Ok v ->
+      Alcotest.(check string) "a" "1" (Form.get v "a");
+      Alcotest.(check string) "b" "2" (Form.get v "b")
+  | Error e -> Alcotest.failf "of_string: %s" (Form.error_to_string e));
+  match Form.of_string "a;b=c" with
+  | Error Form.Invalid_semicolon_separator -> ()
+  | Error e -> Alcotest.failf "wrong arm: %s" (Form.error_to_string e)
+  | Ok _ -> Alcotest.fail "expected Error, got Ok"
+
+(* Form.to_body |> of_body round-trips the values (multi-value key + space). *)
+let form_to_body_roundtrip () =
+  let v = Form.add (Form.set (Form.create ()) "k" "a b") "k" "second" in
+  let v = Form.set v "n" "x" in
+  match Form.of_body (Form.to_body v) with
+  | Error e -> Alcotest.failf "of_body: %s" (Form.error_to_string e)
+  | Ok v' ->
+      Alcotest.(check (list string)) "k" [ "a b"; "second" ] (Form.find v' "k");
+      Alcotest.(check string) "n" "x" (Form.get v' "n")
+
+(* Multipart.to_body (streaming part Seq) |> of_body round-trips the parts. *)
+let multipart_to_body_roundtrip () =
+  let parts =
+    List.to_seq
+      [
+        {
+          Multipart.name = Some "field1";
+          filename = None;
+          header = Header.create ();
+          body = "value1";
+        };
+        {
+          Multipart.name = Some "file";
+          filename = Some "hello.txt";
+          header = Header.set (Header.create ()) "Content-Type" "text/plain";
+          body = "file-contents";
+        };
+      ]
+  in
+  let wire = Body.read_all (Multipart.to_body ~boundary:"bnd" parts) in
+  match collect ~boundary:"bnd" wire with
+  | [ f1; f2 ] ->
+      Alcotest.(check (option string)) "f1 name" (Some "field1") f1.name;
+      Alcotest.(check (option string)) "f1 not a file" None f1.filename;
+      Alcotest.(check string) "f1 body" "value1" f1.body;
+      Alcotest.(check (option string)) "f2 name" (Some "file") f2.name;
+      Alcotest.(check (option string))
+        "f2 filename" (Some "hello.txt") f2.filename;
+      Alcotest.(check (option string))
+        "f2 content-type" (Some "text/plain")
+        (Header.get f2.header "Content-Type");
+      Alcotest.(check string) "f2 body" "file-contents" f2.body
+  | parts -> Alcotest.failf "expected 2 parts, got %d" (List.length parts)
 
 let tests =
   [
     Alcotest.test_case "form_of_body" `Quick form_of_body;
+    Alcotest.test_case "form_of_string" `Quick form_of_string;
+    Alcotest.test_case "form_to_body_roundtrip" `Quick form_to_body_roundtrip;
+    Alcotest.test_case "multipart_to_body_roundtrip" `Quick
+      multipart_to_body_roundtrip;
     Alcotest.test_case "form_query_body_merge" `Quick form_query_body_merge;
     Alcotest.test_case "form_semicolon_error" `Quick form_semicolon_error;
     Alcotest.test_case "form_too_large" `Quick form_too_large;

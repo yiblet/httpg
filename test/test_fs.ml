@@ -9,6 +9,12 @@
 open Httpg
 module Ts = Httptest.Server
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error (a non-2xx status is still [Ok]). *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* Run [f ~net ~sw ~clock dir_path] with a fresh temp dir (an [Eio.Path] under
    the fs capability), cleaning up afterwards. *)
 let with_tmpdir ~fs ~net ~clock ~sw f =
@@ -41,7 +47,7 @@ let serve_known_file () =
         with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
             write_file dir "hello.txt" body_contents;
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
-                let resp = Client.get ~sw c (url ^ "/hello.txt") in
+                let resp = ok_resp (Client.get ~sw c (url ^ "/hello.txt")) in
                 let body = Body.read_all resp.Response.body in
                 ( Httpg_base.Status.to_int resp.Response.status,
                   body,
@@ -64,7 +70,7 @@ let dir_listing () =
             write_file dir "alpha.txt" "a";
             write_file dir "beta.txt" "b";
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
-                let resp = Client.get ~sw c (url ^ "/") in
+                let resp = ok_resp (Client.get ~sw c (url ^ "/")) in
                 let body = Body.read_all resp.Response.body in
                 ( Httpg_base.Status.to_int resp.Response.status,
                   body,
@@ -90,7 +96,9 @@ let traversal_blocked () =
         with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
             write_file dir "ok.txt" "ok";
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
-                let resp = Client.get ~sw c (url ^ "/../../../../etc/passwd") in
+                let resp =
+                  ok_resp (Client.get ~sw c (url ^ "/../../../../etc/passwd"))
+                in
                 ignore (Body.drain resp.Response.body);
                 Httpg_base.Status.to_int resp.Response.status)))
   in
@@ -104,7 +112,7 @@ let missing_file () =
     Test_harness.with_fs (fun ~net ~clock ~sw ~fs ->
         with_tmpdir ~fs ~net ~clock ~sw (fun ~net ~sw ~clock dir ->
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
-                let resp = Client.get ~sw c (url ^ "/nope.txt") in
+                let resp = ok_resp (Client.get ~sw c (url ^ "/nope.txt")) in
                 ignore (Body.drain resp.Response.body);
                 Httpg_base.Status.to_int resp.Response.status)))
   in
@@ -126,10 +134,16 @@ let dir_redirect () =
                 let tr = Transport.create ~net ~clock () in
                 Transport.run tr ~sw (fun () ->
                     let req =
-                      Client.make_request Httpg_base.Method.Get
+                      Request.make ~meth:Httpg_base.Method.Get
                         (Ts.url s ^ "/sub")
                     in
-                    let resp = Transport.round_trip tr req in
+                    let resp =
+                      match Transport.round_trip tr req with
+                      | Ok resp -> resp
+                      | Error e ->
+                          Alcotest.failf "round_trip: %s"
+                            (Transport.error_to_string e)
+                    in
                     ignore (Body.drain resp.Response.body);
                     ( Httpg_base.Status.to_int resp.Response.status,
                       Header.get resp.Response.header "Location" )))

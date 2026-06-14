@@ -10,6 +10,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 let hello_handler =
  fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
 
@@ -22,7 +28,11 @@ let with_started ~secs mk_server fn =
       Fun.protect
         ~finally:(fun () -> Server.close srv)
         (fun () ->
-          let flow = Net.connect ~sw net ~host:"127.0.0.1" ~port in
+          let flow =
+            match Net.connect ~sw net ~host:"127.0.0.1" ~port with
+            | Ok x -> x
+            | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+          in
           (* A hardening server may reset the connection while the client is
              still writing (Slowloris / oversized-header cases); the writer's
              flush fiber then raises a broken-pipe/reset [Eio.Io]. Tolerate it
@@ -132,10 +142,14 @@ let slowloris_header_timeout_tls () =
         Fun.protect
           ~finally:(fun () -> Server.close srv)
           (fun () ->
-            Net.connect_tls ~sw net ~host:"127.0.0.1" ~port ~tls:true
-              ~insecure:true (fun r w ->
-                (try send w "GET / HTTP/1.1\r\n" with Eio.Io _ -> ());
-                wait_for_eof ~clock r)))
+            match
+              Net.connect_tls ~sw net ~host:"127.0.0.1" ~port ~tls:true
+                ~insecure:true (fun r w ->
+                  (try send w "GET / HTTP/1.1\r\n" with Eio.Io _ -> ());
+                  wait_for_eof ~clock r)
+            with
+            | Ok elapsed -> elapsed
+            | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)))
   in
   Alcotest.(check bool)
     (Printf.sprintf "TLS connection closed by header timeout (%.3fs)" elapsed)
@@ -403,10 +417,9 @@ let response_header_too_large () =
     in
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    try
-      let _ = Client.get ~sw c url in
-      Error "no error"
-    with exn -> Ok (Printexc.to_string exn)
+    match Client.get ~sw c url with
+    | Ok _ -> Error "no error"
+    | Error e -> Ok (Client.error_to_string e)
   in
   match with_raw_server ~secs:5. ~serve client with
   | Error msg -> Alcotest.fail (Printf.sprintf "expected failure, got %s" msg)
@@ -430,7 +443,7 @@ let response_header_under_limit_ok () =
     in
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    let resp = Client.get ~sw c url in
+    let resp = ok_resp (Client.get ~sw c url) in
     ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
   in
@@ -466,19 +479,19 @@ let stub_response req ?location () : Response.t =
 let drive_redirects ~start:start_url ~routes ~init_headers =
   Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
       let seen = ref [] in
-      let round_trip (req : Request.t) : Response.t =
+      let round_trip (req : Request.t) : (Response.t, Transport.error) result =
         seen := !seen @ [ (Uri.to_string req.Request.url, req.Request.header) ];
         match List.assoc_opt (Uri.to_string req.Request.url) routes with
-        | Some next -> stub_response req ~location:next ()
-        | None -> stub_response req ()
+        | Some next -> Ok (stub_response req ~location:next ())
+        | None -> Ok (stub_response req ())
       in
       let c = Client.create ~net () in
-      let req = Client.make_request Httpg_base.Method.Get start_url in
+      let req = Request.make ~meth:Httpg_base.Method.Get start_url in
       req.Request.header <-
         List.fold_left
           (fun h (k, v) -> Header.set h k v)
           req.Request.header init_headers;
-      let resp = Client.do_one ~round_trip c req in
+      let resp = ok_resp (Client.Private.do_one ~round_trip c req) in
       ignore (Body.drain resp.Response.body);
       !seen)
 
@@ -491,20 +504,21 @@ let redirect_strip_sticky_on_bounce_back () =
   let hops =
     Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
         let seen2 = ref [] in
-        let round_trip (req : Request.t) : Response.t =
+        let round_trip (req : Request.t) : (Response.t, Transport.error) result
+            =
           let host = Option.value ~default:"" (Uri.host req.Request.url) in
           seen2 := !seen2 @ [ (host, req.Request.header) ];
           match host with
           | "a.com" when List.length !seen2 = 1 ->
-              stub_response req ~location:"http://b.com/" ()
-          | "b.com" -> stub_response req ~location:"http://a.com/" ()
-          | _ -> stub_response req ()
+              Ok (stub_response req ~location:"http://b.com/" ())
+          | "b.com" -> Ok (stub_response req ~location:"http://a.com/" ())
+          | _ -> Ok (stub_response req ())
         in
         let c = Client.create ~net () in
-        let req = Client.make_request Httpg_base.Method.Get "http://a.com/" in
+        let req = Request.make ~meth:Httpg_base.Method.Get "http://a.com/" in
         req.Request.header <-
           Header.set req.Request.header "Authorization" "Bearer secret";
-        let resp = Client.do_one ~round_trip c req in
+        let resp = ok_resp (Client.Private.do_one ~round_trip c req) in
         ignore (Body.drain resp.Response.body);
         !seen2)
   in
@@ -550,6 +564,53 @@ let redirect_referer_https_to_http () =
     "referer omitted on https->http hop" None
     (header_on seen_downgrade "http://b.com/" "Referer")
 
+(* CheckRedirect cap exceeded: a stub that redirects forever drives the default
+   policy past 10 hops, so [do_one] returns [Error (Client.Redirect _)] (the
+   retired [exception Aborted] arm). Asserts the [Redirect] error arm. *)
+let redirect_cap_is_error () =
+  Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
+      (* Always-redirect stub: each hop points at the next path. *)
+      let round_trip (req : Request.t) : (Response.t, Transport.error) result =
+        let path = Uri.path req.Request.url in
+        let n =
+          try int_of_string (String.sub path 1 (String.length path - 1))
+          with _ -> 0
+        in
+        Ok
+          (stub_response req
+             ~location:(Printf.sprintf "http://loop.com/%d" (n + 1))
+             ())
+      in
+      let c = Client.create ~net () in
+      let req = Request.make ~meth:Httpg_base.Method.Get "http://loop.com/0" in
+      match Client.Private.do_one ~round_trip c req with
+      | Error (Client.Redirect msg) ->
+          Alcotest.(check bool)
+            (Printf.sprintf "redirect-cap message (%S)" msg)
+            true
+            (status_contains msg "stopped after 10 redirects")
+      | Error e ->
+          Alcotest.failf "expected Error (Redirect _), got Error %s"
+            (Client.error_to_string e)
+      | Ok _ -> Alcotest.fail "expected Error (Redirect _), got Ok")
+
+(* A round-trip failure threaded through the redirect loop surfaces as
+   [Error (Client.Round_trip _)]. Asserts the [Round_trip] error arm via the
+   stub (no real network). *)
+let redirect_round_trip_error_is_error () =
+  Test_harness.with_env (fun ~net ~clock:_ ~sw:_ ->
+      let round_trip (_ : Request.t) : (Response.t, Transport.error) result =
+        Error Transport.No_host
+      in
+      let c = Client.create ~net () in
+      let req = Request.make ~meth:Httpg_base.Method.Get "http://x.com/" in
+      match Client.Private.do_one ~round_trip c req with
+      | Error (Client.Round_trip Transport.No_host) -> ()
+      | Error e ->
+          Alcotest.failf "expected Error (Round_trip No_host), got Error %s"
+            (Client.error_to_string e)
+      | Ok _ -> Alcotest.fail "expected Error (Round_trip No_host), got Ok")
+
 let tests =
   [
     Alcotest.test_case "slowloris_header_timeout" `Slow slowloris_header_timeout;
@@ -585,4 +646,7 @@ let tests =
       redirect_keeps_header_on_subdomain;
     Alcotest.test_case "redirect_referer_https_to_http" `Quick
       redirect_referer_https_to_http;
+    Alcotest.test_case "redirect_cap_is_error" `Quick redirect_cap_is_error;
+    Alcotest.test_case "redirect_round_trip_error_is_error" `Quick
+      redirect_round_trip_error_is_error;
   ]

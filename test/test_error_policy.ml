@@ -144,18 +144,28 @@ let unhandleable_allowlist =
     (* internal conn-loop control-flow exceptions (boundary-only conv) *)
     "h2_server";
     (* internal conn-loop control-flow (boundary-only conv) *)
-    "client";
-    (* exception Aborted of error: typed redirect-abort carrier *)
+    (* [client] is intentionally NOT here: its public API is fully resulty
+       ([do_]/[get]/[head]/[post] return [(Response.t, Client.error) result]);
+       the former [exception Aborted] was retired in favour of the
+       [Error (Redirect _)] arm. *)
   ]
 
 (* ----------------------------------------------------------------------- *)
 
 let test_no_handleable_raise_escapes () =
   let lib = find_lib_dir () in
-  (* (a) No [*_exn] shim identifier survives in any swept [.mli]. *)
+  (* (a) No [*_exn] shim identifier survives in any swept [.mli]. The sole
+     sanctioned [_exn] occurrence is [error_to_exn] — the inverse of
+     [error_of_exn], the supported boundary bridge that re-raises a typed
+     [error] as the exception it was mapped from (per the plan; same shape as
+     [H2_transport.error_to_exn]). Strip it before the substring check so the
+     guard still catches real [*_exn] result-bypassing shims. *)
+  let strip_sanctioned src =
+    Str.global_replace (Str.regexp_string "error_to_exn") "" src
+  in
   List.iter
     (fun m ->
-      let src = read_mli lib m in
+      let src = strip_sanctioned (read_mli lib m) in
       Alcotest.(check bool)
         (Printf.sprintf "%s.mli has no _exn identifier" m)
         false

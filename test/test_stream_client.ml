@@ -17,6 +17,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 let with_server ?(secs = 10.0) handler client =
   Test_harness.with_env ~secs (fun ~net ~clock ~sw ->
       let srv, port, serve_loop =
@@ -63,7 +69,7 @@ let client_body_streamed () =
   in
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    let resp = Client.get ~sw (Client.create ~net ~clock ()) url in
+    let resp = ok_resp (Client.get ~sw (Client.create ~net ~clock ()) url) in
     (* Read the first chunk BEFORE releasing the still-suspended handler. *)
     let first = next_chunk resp.Response.body in
     let handler_done_early = Eio.Promise.is_resolved released in
@@ -95,14 +101,14 @@ let reuse_after_drain () =
     let transport = Transport.create ~net ~clock () in
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    let resp1 = Client.get ~sw c url in
+    let resp1 = ok_resp (Client.get ~sw c url) in
     ignore (Body.drain resp1.Response.body);
     let dials_after_1 = Transport.dial_count transport in
     let idle_after_1 =
       Transport.idle_count transport
         (Transport.conn_key ~scheme:"http" ~host:"127.0.0.1" ~port)
     in
-    let resp2 = Client.get ~sw c url in
+    let resp2 = ok_resp (Client.get ~sw c url) in
     let b2 = Body.read_all resp2.Response.body in
     let dials_after_2 = Transport.dial_count transport in
     (dials_after_1, idle_after_1, b2, dials_after_2)
@@ -148,7 +154,9 @@ let cancel_mid_body () =
           ~finally:(fun () -> Server.close srv)
           (fun () ->
             let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-            let resp = Client.get ~sw (Client.create ~net ~clock ()) url in
+            let resp =
+              ok_resp (Client.get ~sw (Client.create ~net ~clock ()) url)
+            in
             let first = next_chunk resp.Response.body in
             let outcome =
               try

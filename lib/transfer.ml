@@ -10,10 +10,6 @@
    [Transfer.*] identity the codec raises. *)
 exception Err_line_too_long = Httpg_internal.Chunked.Err_line_too_long
 exception Chunk_error = Httpg_internal.Chunked.Chunk_error
-exception Bad_string_error of string * string
-(* badStringError(what, value) -> "what: value" *)
-
-let bad_string_error what value = Bad_string_error (what, value)
 
 (* Handleable framing error variant for the header / initial-parse boundary.
    The legacy exceptions above stay for the mid-stream Body.Stream thunks,
@@ -549,9 +545,10 @@ let should_send_content_length (t : transfer_writer) : bool =
   else false
 
 (* transferWriter.writeHeader: write Connection/Content-Length/Transfer-Encoding/
-   Trailer header lines derived from the sanitized triple. Raises Bad_string_error
-   on an invalid Trailer key. *)
-let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
+   Trailer header lines derived from the sanitized triple. Returns
+   [Error (Bad_header _)] on an invalid Trailer key. *)
+let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) :
+    (unit, error) Stdlib.result =
   let out = Eio.Buf_write.string w in
   if
     t.tw_close
@@ -565,24 +562,30 @@ let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   else if chunked t.tw_transfer_encoding then
     out "Transfer-Encoding: chunked\r\n";
   match t.tw_trailer with
-  | None -> ()
-  | Some tr ->
+  | None -> Ok ()
+  | Some tr -> (
+      let err = ref None in
       let keys =
         Header.fold
           (fun k _ acc ->
             let k = Header.canonical_header_key k in
             (match k with
             | "Transfer-Encoding" | "Trailer" | "Content-Length" ->
-                raise (bad_string_error "invalid Trailer key" k)
+                if !err = None then
+                  err := Some (Bad_header ("invalid Trailer key", k))
             | _ -> ());
             k :: acc)
           tr []
       in
-      if keys <> [] then
-        out
-          ("Trailer: "
-          ^ String.concat "," (List.sort String.compare keys)
-          ^ "\r\n")
+      match !err with
+      | Some e -> Error e
+      | None ->
+          if keys <> [] then
+            out
+              ("Trailer: "
+              ^ String.concat "," (List.sort String.compare keys)
+              ^ "\r\n");
+          Ok ())
 
 (* writeBody: write the body (and trailers) to [w] in wire format. Raises
    Chunk_error on a ContentLength/body-length mismatch. *)

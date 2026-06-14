@@ -31,6 +31,12 @@ let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
 let run ?(timeout = 15.) ~handler client =
   H2_test_util.with_h2_server ~timeout ~handler client
 
+(* round_trip returns a typed result; unwrap, failing on any Error arm. *)
+let rt ?sw cc req =
+  match H2_transport.round_trip ?sw cc req with
+  | Ok r -> r
+  | Error e -> Alcotest.failf "h2: %s" (H2_transport.error_to_string e)
+
 (* ---- server frames multiple DATA frames as the handler writes+flushes ---- *)
 (* The handler writes "alpha", flushes, then blocks on a promise the test
    resolves only after the client has read that first chunk — proving the chunk
@@ -49,7 +55,7 @@ let test_server_streams_multiple_data () =
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/" () in
-    let resp = H2_transport.round_trip cc req in
+    let resp = rt cc req in
     (* Read the first chunk from the streaming response body. The server is
        suspended on [released] until we wake it, so receiving "alpha" here proves
        the first DATA frame arrived before the handler finished. *)
@@ -87,7 +93,7 @@ let test_large_body () =
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/big" () in
-    let resp = H2_transport.round_trip cc req in
+    let resp = rt cc req in
     let body = Api.Body.read_all resp.cres_body in
     (Httpg_base.Status.to_int resp.cres_status_code, body)
   in
@@ -110,7 +116,7 @@ let test_incremental_client_read () =
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/stream" () in
-    let resp = H2_transport.round_trip cc req in
+    let resp = rt cc req in
     let first =
       match resp.cres_body with Api.Body.Stream next -> next () | _ -> None
     in

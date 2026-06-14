@@ -12,26 +12,39 @@
    [Eio.Net.with_tcp_connect] / [Buf_write.with_flow]). *)
 
 exception Tls_error of string
-(** A TLS handshake / authentication / protocol failure (untrusted or expired
-    certificate, protocol violation, connection closed mid-handshake), carrying
-    the underlying [Tls.Engine.string_of_failure] text. Handleable: it mirrors
-    Go's [tls.Conn.Handshake] returning an [error] propagated through [dialConn]
-    -> [RoundTrip] (transport.go:1803-1819) rather than a panic, so a caller of
-    the TLS client entry points / {!Transport.round_trip} can branch on it (e.g.
-    an untrusted self-signed server without [?insecure]). Distinct from the bare
-    [Failure] kept for genuine usage bugs (write-before-handshake, bad config).
-*)
+(** Retained ONLY for the transport.ml re-raise bridge (pending Step 4): [Net]
+    no longer raises this from its client entry points — they thread
+    [(_, error) result] (see {!error}). It still carries the underlying
+    [Tls.Engine.string_of_failure] text of a TLS handshake / authentication /
+    protocol failure (untrusted or expired certificate, protocol violation,
+    connection closed mid-handshake). The [result]-free contracts ({!listen},
+    {!accept_tls}) and the mid-stream Flow.SOURCE read re-raise it internally to
+    honor their non-[result] signatures. Distinct from the bare [Failure] kept
+    for genuine usage bugs (write-before-handshake, bad config). *)
 
 exception Dial_error of string
-(** A dial failure -- DNS resolution turning up no address for the host (the
-    common case), carrying the offending [host:port]. Handleable: it mirrors
-    Go's [Dial] returning an [error] (a [*net.DNSError] "no such host" for the
-    resolver case) that [Transport.dialConn] propagates through [RoundTrip],
-    rather than a panic, so a caller of the client entry points below /
-    {!Transport.round_trip} can branch on it (e.g. a request to a nonexistent
-    host). Raised by {!connect}/{!connect_tls}/{!connect_alpn} (and {!listen})
-    when the address cannot be resolved. Distinct from the bare [Failure] kept
-    for genuine usage/config bugs. *)
+(** Retained ONLY for the transport.ml re-raise bridge (pending Step 4): [Net]
+    no longer raises this from its client entry points — they thread
+    [(_, error) result] (see {!error}). It still carries the offending
+    [host:port] of a dial failure (DNS resolution turning up no address). The
+    [result]-free {!listen} contract re-raises it internally when the bind
+    address cannot be resolved. Distinct from the bare [Failure] kept for
+    genuine usage/config bugs. *)
+
+type error =
+  | Dial of string
+  | Tls of string
+      (** A handleable failure of the client connect entry points below,
+          mirroring Go's [Dial]/[tls.Conn.Handshake] returning an [error].
+          [Dial] is a resolve/connect failure (Go's [*net.DNSError]); [Tls] is a
+          TLS handshake/verification failure (Go's [tls.Conn.Handshake]). The
+          inner resolve/handshake helpers thread this [result] directly; the
+          public entry points return it without any boundary catch. Each variant
+          carries Go's message text. *)
+
+val error_to_string : error -> string
+(** [error_to_string e] is the message text carried by [e] ([Dial s]/[Tls s] ->
+    [s]). *)
 
 val ensure_rng : unit -> unit
 (** [ensure_rng ()] seeds the [mirage-crypto] RNG (idempotently). It MUST run
@@ -80,11 +93,11 @@ val connect :
   [> ([> `Generic ] as 'tag) Eio.Net.ty ] Eio.Resource.t ->
   host:string ->
   port:int ->
-  'tag Eio.Net.stream_socket_ty Eio.Resource.t
+  ('tag Eio.Net.stream_socket_ty Eio.Resource.t, error) result
 (** [connect ~sw net ~host ~port] resolves and connects a client TCP socket
     (closed when [sw] finishes). Use {!with_connection} to obtain buffered
     channels, or {!connect_tls}/{!connect_alpn} which dial and wrap in one step.
-    Raises {!Dial_error} if [host]/[port] cannot be resolved. *)
+    Returns [Error (Dial _)] if [host]/[port] cannot be resolved. *)
 
 val with_connection :
   _ Eio.Net.stream_socket -> (Eio.Buf_read.t -> Eio.Buf_write.t -> 'a) -> 'a
@@ -104,7 +117,7 @@ val connect_tls :
   ?authenticator:X509.Authenticator.t ->
   ?insecure:bool ->
   (Eio.Buf_read.t -> Eio.Buf_write.t -> 'a) ->
-  'a
+  ('a, error) result
 (** [connect_tls ~sw net ~host ~port ?tls ?authenticator ?insecure fn] dials
     [host]/[port] and runs [fn r w] with buffered channels. When [tls] is [true]
     (default [false]) the connection is upgraded by hand-driving [Tls.Engine].
@@ -118,9 +131,10 @@ val connect_tls :
       {!default_authenticator} is used. Verifying against an IP literal [host]
       legitimately fails name matching; such callers opt out via [?insecure].
 
-    Raises {!Dial_error} if [host]/[port] cannot be resolved, {!Tls_error} on a
-    TLS handshake/verification failure, and [Failure] only for a setup bug (an
-    invalid TLS config, or the OS trust store failing to load). *)
+    Returns [Error (Dial _)] if [host]/[port] cannot be resolved,
+    [Error (Tls _)] on a TLS handshake/verification failure, and raises
+    [Failure] only for a setup bug (an invalid TLS config, or the OS trust store
+    failing to load). *)
 
 val connect_alpn :
   sw:Eio.Switch.t ->
@@ -132,7 +146,7 @@ val connect_alpn :
   ?authenticator:X509.Authenticator.t ->
   ?insecure:bool ->
   (proto:string option -> Eio.Buf_read.t -> Eio.Buf_write.t -> 'a) ->
-  'a
+  ('a, error) result
 (** [connect_alpn] is like {!connect_tls} but additionally advertises the ALPN
     protocols [alpn] (descending preference, e.g. [["h2"; "http/1.1"]]) when
     [tls] is [true], and passes the negotiated protocol as [~proto] to [fn]
@@ -203,10 +217,11 @@ val sockaddr_to_string : Eio.Net.Sockaddr.stream -> string
 
 (** {1 Timeout} *)
 
-val with_timeout : _ Eio.Time.clock -> float -> (unit -> 'a) -> 'a
-(** [with_timeout clock secs fn] runs [fn ()] but raises [Eio.Time.Timeout] if
-    it has not completed within [secs] seconds (wraps
-    [Eio.Time.with_timeout_exn]). *)
+val with_timeout :
+  _ Eio.Time.clock -> float -> (unit -> 'a) -> ('a, [> `Timeout ]) result
+(** [with_timeout clock secs fn] runs [fn ()] and returns [Ok] its result, or
+    [Error `Timeout] if it has not completed within [secs] seconds (wraps
+    [Eio.Time.with_timeout]). *)
 
 (** {1 TLS verification authenticators} *)
 

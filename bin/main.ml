@@ -15,6 +15,12 @@
 
 open Httpg
 
+(* Demo helper: unwrap a client result, failing loudly on a transport/redirect
+   error (the demo has no error-path branches to exercise). *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> failwith ("client: " ^ Client.error_to_string e)
+
 let handler =
  fun ~sw:_ r ->
   Response.create ()
@@ -61,7 +67,7 @@ let demo_stream ~net ~clock ~sw =
   with_server ~net ~clock ~sw ~tls:false "/stream" streaming_handler
   @@ fun url ->
   Printf.printf "Streaming GET %s\n" url;
-  let resp = Client.get ~sw client url in
+  let resp = ok_resp (Client.get ~sw client url) in
   Printf.printf "-> %d %s (consuming body incrementally)\n"
     (Httpg_base.Status.to_int resp.Response.status)
     (Httpg_base.Status.to_string resp.Response.status);
@@ -83,7 +89,7 @@ let demo_stream ~net ~clock ~sw =
 let demo_http ~net ~clock ~sw =
   let client = Client.create ~net ~clock () in
   with_server ~net ~clock ~sw ~tls:false "/demo" handler @@ fun url ->
-  let resp = Client.get ~sw client url in
+  let resp = ok_resp (Client.get ~sw client url) in
   let body = Body.read_all resp.Response.body in
   Printf.printf "GET %s\n-> %d %s\n%s" url
     (Httpg_base.Status.to_int resp.Response.status)
@@ -96,7 +102,7 @@ let demo_h2 ~net ~clock ~sw =
   let transport = Transport.create ~net ~clock ~insecure:true () in
   let client = Client.create ~net ~clock ~transport () in
   with_server ~net ~clock ~sw ~tls:true "/h2-demo" handler @@ fun url ->
-  let resp = Client.get ~sw client url in
+  let resp = ok_resp (Client.get ~sw client url) in
   let body = Body.read_all resp.Response.body in
   Printf.printf "GET %s (h2 round trips: %d)\n-> %d %s\n%s" url
     (Transport.h2_round_trip_count transport)
@@ -107,7 +113,7 @@ let demo_h2 ~net ~clock ~sw =
 let demo_google ~net ~clock ~sw =
   let client = Client.create ~net ~clock () in
   let url = "https://www.example.com/" in
-  let resp = Client.get ~sw client url in
+  let resp = ok_resp (Client.get ~sw client url) in
   let buf = Buffer.create 1024 in
   let add_buf = Buffer.add_string buf in
   Printf.ksprintf add_buf "GET %s\n" url;

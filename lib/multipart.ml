@@ -25,6 +25,7 @@ type part = {
   body : string;
 }
 
+type t = part Seq.t
 type error = Not_multipart | Parse of string
 
 let error_to_string = function
@@ -182,3 +183,48 @@ let of_body ~boundary (body : Body.t) : (part, error) result Seq.t =
       | Ok (Some p) -> Some (Ok p, ())
       | Error e -> Some (Error e, ()))
     ()
+
+(* escapeQuotes (mime/multipart/writer.go): backslash and double-quote in a
+   Content-Disposition parameter value are backslash-escaped. *)
+let escape_quotes s =
+  let b = Buffer.create (String.length s) in
+  String.iter
+    (function
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '"' -> Buffer.add_string b "\\\""
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.contents b
+
+(* Encode one part to its own buffer: the boundary delimiter, the part header
+   (Content-Disposition synthesized from name/filename — Go's
+   CreateFormField/CreateFormFile — replacing any carried one, then the
+   remaining fields), the blank line, the body, and a trailing CRLF. *)
+let encode_part ~boundary (p : part) : string =
+  let buf = Buffer.create 256 in
+  Buffer.add_string buf ("--" ^ boundary ^ "\r\n");
+  let header =
+    match p.name with
+    | Some name ->
+        let cd =
+          "form-data; name=\"" ^ escape_quotes name ^ "\""
+          ^
+          match p.filename with
+          | Some fn -> "; filename=\"" ^ escape_quotes fn ^ "\""
+          | None -> ""
+        in
+        Header.set
+          (Header.del p.header "Content-Disposition")
+          "Content-Disposition" cd
+    | None -> p.header
+  in
+  Header.write header buf;
+  Buffer.add_string buf "\r\n";
+  Buffer.add_string buf p.body;
+  Buffer.add_string buf "\r\n";
+  Buffer.contents buf
+
+let to_body ~boundary (parts : part Seq.t) : Body.t =
+  (* Stream a chunk per part, then the closing delimiter. *)
+  let closing = Seq.return ("--" ^ boundary ^ "--\r\n") in
+  Body.of_seq (Seq.append (Seq.map (encode_part ~boundary) parts) closing)

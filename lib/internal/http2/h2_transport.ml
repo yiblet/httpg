@@ -781,7 +781,7 @@ let reserve_new_request cc =
 let decr_stream_reservations cc =
   if cc.streams_reserved > 0 then cc.streams_reserved <- cc.streams_reserved - 1
 
-let round_trip ?sw cc (req : Api.client_request) : Api.client_response =
+let round_trip_exn ?sw cc (req : Api.client_request) : Api.client_response =
   (* errClientConnUnusable (transport.go:530): conn dead before we wrote
      anything, so the request is untouched and replayable on a fresh dial. *)
   if cc.closed || cc.closing then raise Conn_unusable
@@ -831,6 +831,82 @@ let round_trip ?sw cc (req : Api.client_request) : Api.client_response =
           | e -> abort_stream cc cs (Stream_aborted e));
     await_response cc cs
   end
+
+(* Pre-[type error] matchers for the exceptions whose names the [error] variants
+   shadow ([Conn_unusable]/[Malformed_response]/[Request_canceled]): once [type
+   error] is in scope those unqualified constructor names resolve to the variant,
+   so a [with] clause can no longer pattern-match the exception by name. Captured
+   here while the constructors still mean the exceptions. *)
+let match_conn_unusable = function Conn_unusable -> true | _ -> false
+let match_request_canceled = function Request_canceled -> true | _ -> false
+let match_malformed = function Malformed_response s -> Some s | _ -> None
+
+(* Builders for the same shadowed exceptions, captured for [error_to_exn] below
+   (which re-raises an [error] as its internal exception for the transport
+   bridge). *)
+let exn_conn_unusable = Conn_unusable
+let exn_request_canceled = Request_canceled
+let exn_malformed s = Malformed_response s
+
+(* Handleable failures surfaced by [round_trip] as an Error arm (the external
+   boundary of the decoupled h2 client). Internal fiber control-flow / event-loop
+   protocol transitions ([Stream_aborted], [H2_error.Connection_error]/
+   [Stream_error], [Eio.Cancel], asserts, pipe/databuffer guards) stay
+   exceptional and propagate unchanged. *)
+type error =
+  | Conn_closed
+  | Conn_unusable
+  | Got_goaway of H2_error.err_code
+  | Malformed_response of string
+  | Request_canceled
+
+let error_to_string = function
+  | Conn_closed -> "h2: client connection closed"
+  | Conn_unusable -> "h2: client connection unusable"
+  | Got_goaway c ->
+      Printf.sprintf "h2: server sent GOAWAY (%s)"
+        (H2_error.Private.err_code_string c)
+  | Malformed_response s -> Printf.sprintf "h2: malformed response: %s" s
+  | Request_canceled -> "h2: request canceled"
+
+(* Map a handleable internal exception to an [error]; [None] for anything that
+   is NOT a modeled boundary failure (a bug / fiber-control unwind) and must be
+   re-raised. *)
+let rec error_of_exn (e : exn) : error option =
+  match e with
+  | Client_conn_closed -> Some Conn_closed
+  | Conn_got_goaway c -> Some (Got_goaway c)
+  | Stream_aborted inner ->
+      (* [Stream_aborted] is the fiber-unwind wrapper; the real handleable cause
+         (a GOAWAY / cancel / etc.) rides [inner]. Unwrap and re-map; if [inner]
+         is itself not handleable, the caller re-raises it. *)
+      error_of_exn inner
+  | e when match_conn_unusable e -> Some Conn_unusable
+  | e when match_request_canceled e -> Some Request_canceled
+  | e -> (
+      match match_malformed e with
+      | Some s -> Some (Malformed_response s)
+      | None -> None)
+
+let round_trip ?sw cc (req : Api.client_request) :
+    (Api.client_response, error) result =
+  match round_trip_exn ?sw cc req with
+  | resp -> Ok resp
+  | exception e -> (
+      match error_of_exn e with Some err -> Error err | None -> raise e)
+
+(* Re-build the internal exception an [error] was mapped from. Used by the
+   transport bridge (lib/transport.ml) to re-raise while [Transport.round_trip]
+   still raises, so behavior is identical to before the result conversion. The
+   [error] variants shadow the same-named exceptions in this module's signature,
+   so callers cannot name those exceptions directly — this is the supported
+   re-raise path. *)
+let error_to_exn = function
+  | Conn_closed -> Client_conn_closed
+  | Conn_unusable -> exn_conn_unusable
+  | Got_goaway c -> Conn_got_goaway c
+  | Malformed_response s -> exn_malformed s
+  | Request_canceled -> exn_request_canceled
 
 let close cc : unit =
   cc.closing <- true;

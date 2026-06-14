@@ -5,6 +5,7 @@
    concurrent streams). Bounded by a timeout so a hang fails. *)
 
 open Httpg_http2
+module F = H2_frame
 
 let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
   let content_length =
@@ -27,6 +28,13 @@ let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
    bounded. The server runs [handler]. *)
 let run ~handler client = H2_test_util.with_h2_server ~handler client
 
+(* round_trip now returns a typed result; for the happy-path tests unwrap it,
+   failing the test on any Error arm. *)
+let rt ?sw cc req =
+  match H2_transport.round_trip ?sw cc req with
+  | Ok r -> r
+  | Error e -> Alcotest.failf "h2: %s" (H2_transport.error_to_string e)
+
 (* ---- TestTransport: simple GET, 200 + "hello" body ---- *)
 let test_get () =
   let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
@@ -35,7 +43,7 @@ let test_get () =
   in
   let client cc =
     let req = mk_request ~meth:"GET" ~path:"/" () in
-    let resp = H2_transport.round_trip cc req in
+    let resp = rt cc req in
     let body = Api.Body.read_all resp.cres_body in
     (Httpg_base.Status.to_int resp.cres_status_code, body)
   in
@@ -54,7 +62,7 @@ let test_post_echo () =
     let req =
       mk_request ~meth:"POST" ~path:"/echo" ~body:(Api.Body.String "ping") ()
     in
-    let resp = H2_transport.round_trip cc req in
+    let resp = rt cc req in
     let body = Api.Body.read_all resp.cres_body in
     (Httpg_base.Status.to_int resp.cres_status_code, body)
   in
@@ -72,7 +80,7 @@ let test_concurrent () =
   let client cc =
     let do_rt path =
       let req = mk_request ~meth:"GET" ~path () in
-      let resp = H2_transport.round_trip cc req in
+      let resp = rt cc req in
       let body = Api.Body.read_all resp.cres_body in
       (Httpg_base.Status.to_int resp.cres_status_code, body)
     in
@@ -101,9 +109,7 @@ let test_many_concurrent_respects_max () =
     let client cc =
       let do_rt i =
         let path = Printf.sprintf "/p%d" i in
-        let resp =
-          H2_transport.round_trip cc (mk_request ~meth:"GET" ~path ())
-        in
+        let resp = rt cc (mk_request ~meth:"GET" ~path ()) in
         ( Httpg_base.Status.to_int resp.cres_status_code,
           Api.Body.read_all resp.cres_body )
       in
@@ -156,7 +162,7 @@ let test_early_return_undrained_no_leak () =
           creq_content_length = Int64.of_int (1 lsl 30);
         }
       in
-      let resp = H2_transport.round_trip ~sw cc req in
+      let resp = rt ~sw cc req in
       Alcotest.(check int)
         "status 200" 200
         (Httpg_base.Status.to_int resp.cres_status_code);
@@ -229,9 +235,7 @@ let test_slot_accounting_free_after_body () =
       (H2_transport.reserve_new_request cc);
     (* (b) round_trip 1 consumes the reservation, opens the stream, returns a
        streaming response we deliberately leave UNDRAINED. *)
-    let resp1 =
-      H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/a" ())
-    in
+    let resp1 = rt cc (mk_request ~meth:"GET" ~path:"/a" ()) in
     Alcotest.(check int)
       "status1 200" 200
       (Httpg_base.Status.to_int resp1.cres_status_code);
@@ -267,9 +271,7 @@ let test_slot_accounting_free_after_body () =
     Eio.Fiber.both
       (fun () ->
         started2 := true;
-        let resp2 =
-          H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/b" ())
-        in
+        let resp2 = rt cc (mk_request ~meth:"GET" ~path:"/b" ()) in
         c2 := Httpg_base.Status.to_int resp2.cres_status_code;
         b2 := Api.Body.read_all resp2.cres_body;
         done2 := true)
@@ -300,40 +302,118 @@ let test_slot_accounting_free_after_body () =
   in
   H2_test_util.with_h2_server ~max_concurrent_streams:1 ~handler client
 
-(* ---- F027: a closed/closing conn raises the distinguishable Conn_unusable
+(* ---- F027: a closed/closing conn yields the distinguishable Conn_unusable
    (Go's errClientConnUnusable), since round_trip wrote nothing — the signal the
-   transport pool uses to evict + retry on a fresh dial. *)
-let test_closed_conn_raises_unusable () =
+   transport pool uses to evict + retry on a fresh dial. Now surfaced as the
+   [Error Conn_unusable] arm of the typed result. *)
+let test_closed_conn_unusable () =
   let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
     rw.rw_write "ok";
     rw.rw_flush ()
   in
   let client cc =
     H2_transport.close cc;
-    (* closed before any write -> Conn_unusable, not Client_conn_closed/other. *)
-    let raised =
-      try
-        let _ =
-          H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/" ())
-        in
-        `None
+    (* closed before any write -> Error Conn_unusable, not Conn_closed/other. *)
+    let outcome =
+      match
+        H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/" ())
       with
-      | H2_transport.Conn_unusable -> `Unusable
-      | _ -> `Other
+      | Ok _ -> `Ok
+      | Error H2_transport.Conn_unusable -> `Unusable
+      | Error _ -> `Other
     in
-    (raised, H2_transport.live_stream_count cc)
+    (outcome, H2_transport.live_stream_count cc)
   in
-  let raised, live = run ~handler client in
+  let outcome, live = run ~handler client in
   Alcotest.(check bool)
-    "round_trip on closed conn raises Conn_unusable" true (raised = `Unusable);
+    "round_trip on closed conn -> Error Conn_unusable" true (outcome = `Unusable);
   (* nothing was written, so no stream entry was ever created. *)
   Alcotest.(check int) "no stream created" 0 live
+
+(* ---- A response missing the [:status] pseudo-header is a framing violation:
+   round_trip surfaces it as the [Error (Malformed_response _)] arm rather than
+   an exception. Driven by a hand-rolled raw H2 server (self-contained loopback,
+   not the shared S.serve harness) that completes the handshake and then replies
+   to the request HEADERS with a HEADERS frame carrying NO [:status]. *)
+let encode_block (fields : (string * string) list) =
+  let enc = Hpack.new_encoder () in
+  let buf = Buffer.create 64 in
+  Hpack.set_writer enc (fun s -> Buffer.add_string buf s);
+  List.iter
+    (fun (name, value) ->
+      Hpack.write_field enc { name; value; sensitive = false })
+    fields;
+  Buffer.contents buf
+
+(* Minimal raw server: read the client preface + initial SETTINGS, send our
+   SETTINGS (so new_client_conn returns) + an ACK, then for the first request
+   HEADERS reply with a malformed (no :status) HEADERS frame and park. *)
+let malformed_raw_server r w =
+  let preface = Eio.Buf_read.take H2.client_preface_len r in
+  if preface <> H2.client_preface then failwith "bad preface";
+  F.write_settings w [];
+  Eio.Buf_write.flush w;
+  let stream_id = ref 0 in
+  (try
+     while !stream_id = 0 do
+       match F.read_frame r with
+       | Ok (F.Settings (fh, _)) ->
+           if fh.flags land 0x1 = 0 then (
+             F.write_settings_ack w;
+             Eio.Buf_write.flush w)
+       | Ok (F.Headers (fh, _)) -> stream_id := fh.stream_id
+       | Ok _ -> ()
+       | Error _ -> failwith "frame error"
+     done
+   with End_of_file -> ());
+  if !stream_id <> 0 then (
+    (* HEADERS with END_HEADERS|END_STREAM but no :status pseudo-header. *)
+    let block = encode_block [ ("content-type", "text/plain") ] in
+    F.write_headers w ~stream_id:!stream_id ~end_stream:true ~end_headers:true
+      block;
+    Eio.Buf_write.flush w);
+  Eio.Fiber.await_cancel ()
+
+let test_malformed_response_missing_status () =
+  Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Eio.Time.with_timeout_exn clock 15. @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
+  let lsock = Httpg.Net.listen ~sw net "127.0.0.1" 0 in
+  let port = Httpg.Net.bound_port lsock in
+  Eio.Fiber.first
+    (fun () ->
+      let flow =
+        match Httpg.Net.connect ~sw net ~host:"127.0.0.1" ~port with
+        | Ok x -> x
+        | Error e -> failwith ("net: " ^ Httpg.Net.error_to_string e)
+      in
+      Httpg.Net.with_connection flow (fun r w ->
+          Eio.Switch.run @@ fun cc_sw ->
+          let cc = H2_transport.new_client_conn ~sw:cc_sw r w in
+          (match
+             H2_transport.round_trip cc (mk_request ~meth:"GET" ~path:"/" ())
+           with
+          | Ok _ -> Alcotest.fail "expected Error Malformed_response"
+          | Error (H2_transport.Malformed_response _) -> ()
+          | Error e ->
+              Alcotest.failf "expected Malformed_response, got %s"
+                (H2_transport.error_to_string e));
+          try H2_transport.close cc with _ -> ()))
+    (fun () ->
+      (try
+         let flow, _peer = Httpg.Net.accept ~sw lsock in
+         Httpg.Net.with_connection flow malformed_raw_server
+       with _ -> ());
+      Eio.Fiber.await_cancel ())
 
 let tests =
   [
     Alcotest.test_case "get" `Quick test_get;
-    Alcotest.test_case "closed_conn_raises_unusable" `Quick
-      test_closed_conn_raises_unusable;
+    Alcotest.test_case "closed_conn_unusable" `Quick test_closed_conn_unusable;
+    Alcotest.test_case "malformed_response_missing_status" `Quick
+      test_malformed_response_missing_status;
     Alcotest.test_case "post_echo" `Quick test_post_echo;
     Alcotest.test_case "concurrent" `Quick test_concurrent;
     (* Stress/leak tests with high iteration counts: slow, gated by HTTPG_SLOW. *)

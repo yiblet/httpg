@@ -6,6 +6,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* A handler: GET -> 200 "hello, h2"; POST /echo echoes the request body. Works
    identically over h2 and http/1.1. *)
 let test_handler =
@@ -44,12 +50,13 @@ let test_clientserver_roundtrip () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         (* GET *)
-        let get_resp = Client.get ~sw client (base ^ "/hello") in
+        let get_resp = ok_resp (Client.get ~sw client (base ^ "/hello")) in
         let get_body = Body.read_all get_resp.Response.body in
         (* POST, reusing the same h2 connection from the pool. *)
         let post_resp =
-          Client.post ~sw client (base ^ "/echo") ~content_type:"text/plain"
-            (Body.String "ping-pong")
+          ok_resp
+            (Client.post ~sw client (base ^ "/echo") ~content_type:"text/plain"
+               (Body.String "ping-pong"))
         in
         let post_body = Body.read_all post_resp.Response.body in
         ( Httpg_base.Status.to_int get_resp.Response.status,
@@ -73,7 +80,7 @@ let test_http11_fallback () =
         let transport = Transport.create ~net ~clock ~insecure:true () in
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
-        let resp = Client.get ~sw client (base ^ "/hello") in
+        let resp = ok_resp (Client.get ~sw client (base ^ "/hello")) in
         let body = Body.read_all resp.Response.body in
         ( Httpg_base.Status.to_int resp.Response.status,
           body,
@@ -107,10 +114,11 @@ let test_concurrent_multiplexing_one_conn () =
         let do_rt i =
           let path = Printf.sprintf "/p%d" i in
           let resp =
-            if i mod 3 = 0 then
-              Client.post ~sw client (base ^ path) ~content_type:"text/plain"
-                (Body.String "ping")
-            else Client.get ~sw client (base ^ path)
+            ok_resp
+              (if i mod 3 = 0 then
+                 Client.post ~sw client (base ^ path) ~content_type:"text/plain"
+                   (Body.String "ping")
+               else Client.get ~sw client (base ^ path))
           in
           ( Httpg_base.Status.to_int resp.Response.status,
             Body.read_all resp.Response.body,
@@ -146,7 +154,7 @@ let test_h2_dead_pooled_conn_redials_and_retries () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         (* 1) prime the pool with a live h2 conn. *)
-        let r1 = Client.get ~sw client (base ^ "/a") in
+        let r1 = ok_resp (Client.get ~sw client (base ^ "/a")) in
         let _ = Body.read_all r1.Response.body in
         let d1 = Transport.dial_count transport in
         (* 2) one-shot: close the pooled conn in place right before reuse, so
@@ -156,7 +164,7 @@ let test_h2_dead_pooled_conn_redials_and_retries () =
             incr fired;
             Transport.set_before_h2_round_trip transport (fun () -> ());
             Transport.close_pooled_h2_conn transport ~host:"127.0.0.1" ~port);
-        let r2 = Client.get ~sw client (base ^ "/b") in
+        let r2 = ok_resp (Client.get ~sw client (base ^ "/b")) in
         let b2 = Body.read_all r2.Response.body in
         ( Httpg_base.Status.to_int r2.Response.status,
           b2,
@@ -252,7 +260,9 @@ let test_h2_pool_scales_out_when_saturated () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let do_rt i =
-          let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
+          let resp =
+            ok_resp (Client.get ~sw client (Printf.sprintf "%s/p%d" base i))
+          in
           ( Httpg_base.Status.to_int resp.Response.status,
             Body.read_all resp.Response.body )
         in
@@ -281,7 +291,9 @@ let test_h2_pool_single_conn_below_saturation () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let do_rt i =
-          let resp = Client.get ~sw client (Printf.sprintf "%s/p%d" base i) in
+          let resp =
+            ok_resp (Client.get ~sw client (Printf.sprintf "%s/p%d" base i))
+          in
           let _ = Body.read_all resp.Response.body in
           Httpg_base.Status.to_int resp.Response.status
         in

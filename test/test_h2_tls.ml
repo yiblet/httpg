@@ -35,8 +35,13 @@ let with_tls_pair ~server_alpn ~client_alpn ~server ~client () =
     (* Self-signed loopback cert reached via an IP literal: verification would
        legitimately fail (untrusted chain + no hostname match), so the client
        opts out, the analogue of Go's tls.Config.InsecureSkipVerify. *)
-    Net.connect_alpn ~sw net ~host:"127.0.0.1" ~port ~tls:true ~alpn:client_alpn
-      ~insecure:true (fun ~proto r w -> cres := Some (client ~proto r w))
+    match
+      Net.connect_alpn ~sw net ~host:"127.0.0.1" ~port ~tls:true
+        ~alpn:client_alpn ~insecure:true (fun ~proto r w ->
+          cres := Some (client ~proto r w))
+    with
+    | Ok () -> ()
+    | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
   in
   Eio.Fiber.both client_fiber server_fiber;
   (Option.get !cres, Option.get !sres)

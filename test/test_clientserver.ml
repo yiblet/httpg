@@ -8,6 +8,12 @@
 
 open Httpg
 
+(* Unwrap a happy-path client result, failing the test on a transport/redirect
+   error. *)
+let ok_resp = function
+  | Ok resp -> resp
+  | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
+
 (* Start a server with [handler], run [client ~net ~sw ~clock ~port] against it,
    stop it. The accept loop runs in a fiber under the env switch. *)
 let with_server handler client =
@@ -36,7 +42,7 @@ let echo_handler =
 let get_roundtrip () =
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    let resp = Client.get ~sw (Client.create ~net ~clock ()) url in
+    let resp = ok_resp (Client.get ~sw (Client.create ~net ~clock ()) url) in
     ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
   in
@@ -50,9 +56,10 @@ let post_body () =
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/echo" port in
     let resp =
-      Client.post ~sw
-        (Client.create ~net ~clock ())
-        url ~content_type:"text/plain" (Body.of_string payload)
+      ok_resp
+        (Client.post ~sw
+           (Client.create ~net ~clock ())
+           url ~content_type:"text/plain" (Body.of_string payload))
     in
     ( Httpg_base.Status.to_int resp.Response.status,
       Body.read_all resp.Response.body )
@@ -69,10 +76,10 @@ let keepalive_reuse () =
     let transport = Transport.create ~net ~clock () in
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
-    let resp1 = Client.get ~sw c url in
+    let resp1 = ok_resp (Client.get ~sw c url) in
     let b1 = Body.read_all resp1.Response.body in
     let dials_after_1 = Transport.dial_count transport in
-    let resp2 = Client.get ~sw c url in
+    let resp2 = ok_resp (Client.get ~sw c url) in
     let b2 = Body.read_all resp2.Response.body in
     let dials_after_2 = Transport.dial_count transport in
     (b1, b2, dials_after_1, dials_after_2)
@@ -86,10 +93,11 @@ let keepalive_reuse () =
 
 (* ---- F006: TLS handshake failure is a typed, handleable boundary error ---- *)
 (* A TLS server with the self-signed [test_server_certificate], reached by a
-   Client WITHOUT [~insecure], must surface {!Net.Tls_error} (the analogue of Go's
-   tls.Conn.Handshake error propagated through RoundTrip) at the Client boundary
-   -- a catchable typed value, not a raw [Failure]. The [~insecure] client to the
-   same server still succeeds (secure-default rejects, opt-out accepts). *)
+   Client WITHOUT [~insecure], must surface the TLS failure as the typed result
+   [Error (Client.Round_trip (Transport.Net (Net.Tls _)))] (the analogue of Go's
+   tls.Conn.Handshake error propagated through RoundTrip and Client.Do) -- a
+   catchable typed value, not a raise. The [~insecure] client to the same server
+   still succeeds (secure-default rejects, opt-out accepts). *)
 let tls_handshake_failure_is_typed () =
   Test_harness.with_env (fun ~net ~clock ~sw ->
       let srv = Httptest.Server.new_tls_server ~net ~clock ~sw hello_handler in
@@ -97,28 +105,72 @@ let tls_handshake_failure_is_typed () =
       Fun.protect
         ~finally:(fun () -> Httptest.Server.close srv)
         (fun () ->
-          (* Secure default: untrusted self-signed cert -> typed Net.Tls_error. *)
+          (* Secure default: untrusted self-signed cert -> typed Round_trip Tls
+             error (asserts the Client.Round_trip arm). *)
           let secure = Client.create ~net ~clock () in
           (match Client.get ~sw secure url with
-          | _ -> Alcotest.fail "expected Net.Tls_error, got a response"
-          | exception Net.Tls_error _ -> ()
-          | exception exn ->
-              Alcotest.failf "expected Net.Tls_error, got %s"
-                (Printexc.to_string exn));
+          | Error (Client.Round_trip (Transport.Net (Net.Tls _))) -> ()
+          | Error e ->
+              Alcotest.failf
+                "expected Error (Round_trip (Net (Tls _))), got Error %s"
+                (Client.error_to_string e)
+          | Ok _ ->
+              Alcotest.fail
+                "expected Error (Round_trip (Net (Tls _))), got a response");
           (* Opt-out: ~insecure still completes the handshake and round trips. *)
           let insecure = Client.create ~net ~clock ~insecure:true () in
-          let resp = Client.get ~sw insecure url in
+          let resp = ok_resp (Client.get ~sw insecure url) in
           ( Httpg_base.Status.to_int resp.Response.status,
             Body.read_all resp.Response.body )))
   |> fun (code, body) ->
   Alcotest.(check int) "insecure status" 200 code;
   Alcotest.(check string) "insecure body" "hello" body
 
+(* ---- Phase 3: Transport.round_trip returns a typed result at the boundary ---- *)
+
+(* A request whose URL carries no Host is [Error No_host] (Go's errMissingHost),
+   asserted directly at the Transport boundary (not via the raising Client). *)
+let round_trip_no_host_is_error () =
+  Test_harness.with_env (fun ~net ~clock ~sw ->
+      let transport = Transport.create ~net ~clock () in
+      Transport.run transport ~sw (fun () ->
+          let req = Request.make "/path-only-no-host" in
+          match Transport.round_trip transport req with
+          | Error Transport.No_host -> ()
+          | Error e ->
+              Alcotest.failf "expected Error No_host, got Error %s"
+                (Transport.error_to_string e)
+          | Ok _ -> Alcotest.fail "expected Error No_host, got Ok"))
+
+(* A TLS server with a self-signed cert, dialed WITHOUT [~insecure], is
+   [Error (Net (Net.Tls _))] at the Transport boundary (Go's tls.Conn.Handshake
+   error propagated through RoundTrip). *)
+let round_trip_tls_failure_is_error () =
+  Test_harness.with_env (fun ~net ~clock ~sw ->
+      let srv = Httptest.Server.new_tls_server ~net ~clock ~sw hello_handler in
+      let url = Httptest.Server.url srv ^ "/" in
+      Fun.protect
+        ~finally:(fun () -> Httptest.Server.close srv)
+        (fun () ->
+          let transport = Transport.create ~net ~clock () in
+          Transport.run transport ~sw (fun () ->
+              let req = Request.make url in
+              match Transport.round_trip transport req with
+              | Error (Transport.Net (Net.Tls _)) -> ()
+              | Error e ->
+                  Alcotest.failf "expected Error (Net (Tls _)), got Error %s"
+                    (Transport.error_to_string e)
+              | Ok _ -> Alcotest.fail "expected Error (Net (Tls _)), got Ok")))
+
 let tests =
   [
     Alcotest.test_case "get_roundtrip" `Quick get_roundtrip;
     Alcotest.test_case "post_body" `Quick post_body;
     Alcotest.test_case "keepalive_reuse" `Quick keepalive_reuse;
+    Alcotest.test_case "round_trip_no_host_is_error" `Quick
+      round_trip_no_host_is_error;
+    Alcotest.test_case "round_trip_tls_failure_is_error" `Slow
+      round_trip_tls_failure_is_error;
     Alcotest.test_case "tls_handshake_failure_is_typed" `Slow
       tls_handshake_failure_is_typed;
   ]

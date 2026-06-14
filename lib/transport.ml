@@ -22,12 +22,34 @@
 
 let default_user_agent = "httpg-client/1.1"
 
+module H2_transport = Httpg_http2.H2_transport
+module Api = Httpg_http2.Api
+
+(* The handleable failures of {!round_trip}, embedding the lower layers' typed
+   errors (Go's RoundTrip returning an [error]). [No_host] is Go's
+   [errMissingHost]. The whole flow threads typed [result]s: {!Net.connect_alpn},
+   {!Io.write_request}/{!Io.read_response} and {!H2_transport.round_trip} all
+   return [result], so {!round_trip} maps their [error] arms into these without a
+   raise-and-catch boundary. *)
+type error =
+  | Net of Net.error
+  | Io of Io.error
+  | H2 of H2_transport.error
+  | No_host
+
 (* A pooled connection backed by a dedicated fiber. [submit] hands the fiber a
    request plus a one-shot [reply] stream; the fiber writes the request, reads
    the response head, replies, then parks until the response body is released
    (EOF/drained) before returning itself to the idle pool. [close] tears the
    connection down (cancels its switch). *)
-type reply = (Response.t, exn) result
+
+(* The conn fiber replies with a typed transport [result] for handleable
+   outcomes (Ok response / [Error (Io _)] from the framing). A genuinely
+   unhandleable exception (Eio.Cancel, a programming bug, fiber teardown) is
+   NOT swallowed into a result: it is carried verbatim as [Crashed] and
+   re-raised by the awaiting fiber, preserving today's cancellation/teardown
+   behavior. *)
+type reply = Replied of (Response.t, error) result | Crashed of exn
 
 type persist_conn = {
   submit : (Request.t * reply Eio.Stream.t) Eio.Stream.t;
@@ -37,8 +59,18 @@ type persist_conn = {
   close : unit -> unit;
 }
 
-module H2_transport = Httpg_http2.H2_transport
-module Api = Httpg_http2.Api
+let error_to_string = function
+  | Net e -> Net.error_to_string e
+  | Io e -> Io.error_to_string e
+  | H2 e -> H2_transport.error_to_string e
+  | No_host -> "http: no Host in request URL"
+
+let error_to_exn = function
+  | Net (Net.Dial s) -> Net.Dial_error s
+  | Net (Net.Tls s) -> Net.Tls_error s
+  | Io e -> Io.Protocol_error (Io.error_to_string e)
+  | H2 e -> H2_transport.error_to_exn e
+  | No_host -> Io.Protocol_error "http: no Host in request URL"
 
 (* Per-domain pool (Go's Transport connection pool, replicated per OS thread): a
    connection is only ever dialed, reused, and torn down on its OWNING domain,
@@ -227,10 +259,6 @@ let set_default_headers (req : Request.t) ~host =
         Header.set req.Request.header "User-Agent" default_user_agent
   | Some _ -> ()
 
-let or_raise = function
-  | Ok v -> v
-  | Error e -> raise (Io.Protocol_error (Io.error_to_string e))
-
 (* Run one request/response exchange over the buffered channels [r]/[w]. The
    response body is wrapped so that reaching EOF (in the caller's fiber)
    {b synchronously} returns the connection to the idle pool when [reusable]
@@ -238,29 +266,37 @@ let or_raise = function
    connection fiber loops to its next request (or exits, closing the conn, when
    not reusable). Pooling synchronously at EOF — rather than handing off to the
    fiber — closes the timing gap where a follow-up round trip would miss the
-   just-freed connection. *)
+   just-freed connection.
+
+   Threads the framing layer's typed [result]: an {!Io.error} from the request
+   write or response read maps to [Error (Io _)] (Go's persistConn write/read
+   loop surfacing an [error]). *)
 let exchange t pool key ~max_header_bytes ~released r w pc (req : Request.t) :
-    Response.t =
-  Io.write_request w req |> or_raise;
-  Eio.Buf_write.flush w;
-  let resp = Io.read_response ~request:req ~max_header_bytes r |> or_raise in
-  let reuse = reusable t req resp in
-  let on_eof () =
-    if reuse && not pc.broken then put_idle_conn pool key pc;
-    Eio.Stream.add released reuse
-  in
-  (match resp.Response.body with
-  | Body.Empty | Body.String _ -> on_eof ()
-  | Body.Stream inner ->
-      let next () =
-        match inner () with
-        | Some _ as c -> c
-        | None ->
-            on_eof ();
-            None
-      in
-      resp.Response.body <- Body.Stream next);
-  resp
+    (Response.t, error) result =
+  match Io.write_request w req with
+  | Error e -> Error (Io e)
+  | Ok () -> (
+      Eio.Buf_write.flush w;
+      match Io.read_response ~request:req ~max_header_bytes r with
+      | Error e -> Error (Io e)
+      | Ok resp ->
+          let reuse = reusable t req resp in
+          let on_eof () =
+            if reuse && not pc.broken then put_idle_conn pool key pc;
+            Eio.Stream.add released reuse
+          in
+          (match resp.Response.body with
+          | Body.Empty | Body.String _ -> on_eof ()
+          | Body.Stream inner ->
+              let next () =
+                match inner () with
+                | Some _ as c -> c
+                | None ->
+                    on_eof ();
+                    None
+              in
+              resp.Response.body <- Body.Stream next);
+          Ok resp)
 
 (* The per-connection fiber (Go's persistConn loops). Holds the channels open,
    serves submitted requests, parks until the body is released, then loops if
@@ -272,16 +308,24 @@ let conn_loop t pool key ~max_header_bytes pc r w =
     match
       exchange t pool key ~max_header_bytes ~released:pc.released r w pc req
     with
-    | resp -> (
-        Eio.Stream.add reply (Ok resp);
+    | Ok resp -> (
+        Eio.Stream.add reply (Replied (Ok resp));
         (* Wait for the caller to drain the body (Go's waitForBodyRead); the
            reuse verdict is decided in [exchange]'s on-EOF action. *)
         match Eio.Stream.take pc.released with
         | true -> loop ()
         | false -> () (* not reusable -> callback returns, conn closes *))
-    | exception exn ->
+    | Error e ->
+        (* Handleable framing failure: the conn wrote/read partially, so it is
+           no longer reusable. Surface the typed error; don't loop. *)
         pc.broken <- true;
-        Eio.Stream.add reply (Error exn)
+        Eio.Stream.add reply (Replied (Error e))
+    | exception exn ->
+        (* Unhandleable (Eio.Cancel, a programming bug, fiber teardown): carry
+           it verbatim to the awaiting fiber, which re-raises it. Not swallowed
+           into a result. *)
+        pc.broken <- true;
+        Eio.Stream.add reply (Crashed exn)
   in
   loop ()
 
@@ -291,13 +335,21 @@ type dialed =
   | Dialed_h1 of persist_conn
   | Dialed_h2 of H2_transport.client_conn
 
+(* What the dial daemon posts to the waiting round trip: a typed transport
+   [result] (Ok dialed / [Error (Net _)] from {!Net.connect_alpn}) for handleable
+   outcomes, or a verbatim unhandleable exception ([Dial_crashed]) the awaiting
+   fiber re-raises. *)
+type dial_outcome = Dialed of (dialed, error) result | Dial_crashed of exn
+
 (* Dial a fresh connection and fork its serve fiber under the transport's owning
    switch (NOT the caller's per-request switch), so a pooled conn survives across
    independent round trips. Advertises ALPN for https; [force_h2] advertises only
    ["h2"]. If the peer negotiates "h2" an {!H2_transport.client_conn} is built
    over the channels; otherwise an HTTP/1.x persist_conn serve loop runs. Returns
-   the dialed connection once the channels are live. *)
-let dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2 : dialed =
+   the dialed connection once the channels are live, or a typed [Error (Net _)]
+   for a dial/handshake failure. *)
+let dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2 :
+    (dialed, error) result =
   let sw = pool.sw in
   let net = t.net in
   Atomic.incr t.dials;
@@ -325,41 +377,54 @@ let dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2 : dialed =
       (try
          Eio.Switch.run @@ fun csw ->
          conn_sw := Some (fun () -> Eio.Switch.fail csw Exit);
-         Net.connect_alpn ~sw:csw net ~host ~port ~tls ~alpn
-           ~insecure:t.insecure ?authenticator:t.authenticator
-           (fun ~proto r w ->
-             (* Over cleartext there is no TLS handshake, so ALPN never runs and
+         (* {!Net.connect_alpn} returns a typed result; thread it straight into
+            [result_box]. A dial/handshake failure (Go's addTLS handshake error,
+            transport.go:1803-1819) becomes [Error (Net _)] — modeled, no
+            raise-and-catch bridge. *)
+         match
+           Net.connect_alpn ~sw:csw net ~host ~port ~tls ~alpn
+             ~insecure:t.insecure ?authenticator:t.authenticator
+             (fun ~proto r w ->
+               (* Over cleartext there is no TLS handshake, so ALPN never runs and
                 [proto] is [None]; [force_h2] then means h2c via prior knowledge
                 (RFC 9113 §3.3) — speak HTTP/2 directly. Over TLS, ALPN decides. *)
-             let want_h2 = proto = Some "h2" || (force_h2 && not tls) in
-             if want_h2 then begin
-               let cc = H2_transport.new_client_conn ~sw:csw r w in
-               Eio.Stream.add result_box (Ok (Dialed_h2 cc));
-               (* Park: keep the channels/read-loop alive until the conn switch
+               let want_h2 = proto = Some "h2" || (force_h2 && not tls) in
+               if want_h2 then begin
+                 let cc = H2_transport.new_client_conn ~sw:csw r w in
+                 Eio.Stream.add result_box (Dialed (Ok (Dialed_h2 cc)));
+                 (* Park: keep the channels/read-loop alive until the conn switch
                   is cancelled (close / pool teardown). *)
-               Eio.Fiber.await_cancel ()
-             end
-             else begin
-               Eio.Stream.add result_box (Ok (Dialed_h1 pc));
-               conn_loop t pool key ~max_header_bytes pc r w
-             end)
+                 Eio.Fiber.await_cancel ()
+               end
+               else begin
+                 Eio.Stream.add result_box (Dialed (Ok (Dialed_h1 pc)));
+                 conn_loop t pool key ~max_header_bytes pc r w
+               end)
+         with
+         | Ok () -> ()
+         | Error (Net.Dial _ as e) | Error (Net.Tls _ as e) ->
+             if Eio.Stream.length result_box = 0 then
+               Eio.Stream.add result_box (Dialed (Error (Net e)))
        with exn -> (
-         (* A dial/handshake failure (incl. {!Net.Tls_error}, the analogue of Go's
-           addTLS handshake error, transport.go:1803-1819) is delivered to the
-           waiting round-trip via [result_box] and re-raised below, surfacing as a
-           modeled, catchable boundary error rather than escaping unmodeled.
-           Tolerate a failing stream op during cancellation, where it re-raises. *)
+         (* An unhandleable failure (Eio.Cancel, a bug, fiber teardown) is carried
+           verbatim to the waiting round trip via [result_box] and re-raised
+           below — not swallowed into a result. Tolerate a failing stream op
+           during cancellation, where it re-raises. *)
          pc.broken <- true;
          if Eio.Stream.length result_box = 0 then
-           try Eio.Stream.add result_box (Error exn) with _ -> ()));
+           try Eio.Stream.add result_box (Dial_crashed exn) with _ -> ()));
       `Stop_daemon);
-  match Eio.Stream.take result_box with Ok d -> d | Error exn -> raise exn
+  match Eio.Stream.take result_box with
+  | Dialed d -> d
+  | Dial_crashed exn -> raise exn
 
-(* Submit [req] to a pooled connection fiber and await its response. *)
-let round_trip_over pc (req : Request.t) : Response.t =
+(* Submit [req] to a pooled connection fiber and await its response. Returns the
+   conn fiber's typed [result]; an unhandleable [Crashed] exception is re-raised
+   (Eio.Cancel / a bug / fiber teardown), never folded into a result. *)
+let round_trip_over pc (req : Request.t) : (Response.t, error) result =
   let reply = Eio.Stream.create 1 in
   Eio.Stream.add pc.submit (req, reply);
-  match Eio.Stream.take reply with Ok resp -> resp | Error exn -> raise exn
+  match Eio.Stream.take reply with Replied r -> r | Crashed exn -> raise exn
 
 (* ---- net/http <-> http2 translation shim (Go's http2.go: http2RoundTrip) ----
    The HTTP/2 stack works in its own decoupled {!Api} types so it never names the
@@ -478,11 +543,16 @@ let h2_dial_lock pool authority =
 
 (* The h2 request/response exchange over [cc], counted for the test hook. A
    Conn_unusable failure wrote nothing and is retried on a fresh dial, so it
-   isn't counted as an exchange (the increment follows a started round trip). *)
-let h2_round_trip t cc req =
-  let cr = H2_transport.round_trip cc (client_request_of_request req) in
-  Atomic.incr t.h2_round_trips;
-  response_of_client_response cr
+   isn't counted as an exchange (the increment follows a started round trip).
+   Threads {!H2_transport.round_trip}'s typed [result]; the [H2_transport.error]
+   is kept as-is so the caller can branch on [Conn_unusable] before mapping the
+   rest into [Error (H2 _)]. *)
+let h2_round_trip t cc req : (Response.t, H2_transport.error) result =
+  match H2_transport.round_trip cc (client_request_of_request req) with
+  | Ok cr ->
+      Atomic.incr t.h2_round_trips;
+      Ok (response_of_client_response cr)
+  | Error _ as e -> e
 
 (* Go's Transport.RoundTrip. The [net] capability is captured in [t]; pooled
    connection fibers run under the transport's own switch ({!run}), not the
@@ -491,47 +561,59 @@ let h2_round_trip t cc req =
    ["h2";"http/1.1"]; if "h2" is negotiated the request is multiplexed over a
    pooled {!H2_transport.client_conn} keyed by authority, otherwise the HTTP/1.x
    path runs over the dialed channels. Plaintext http always uses HTTP/1.x. *)
-let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
+let round_trip ?(force_h2 = false) t (req : Request.t) :
+    (Response.t, error) result =
   let pool = current_pool t in
   let scheme, host, port = scheme_host_port req in
   (* Go's [errMissingHost] (transport.go): a request with no Host is invalid
-     user input, surfaced through the typed request-validation carrier
-     {!Io.Protocol_error} (shared with malformed request/header lines) so the
-     caller can branch on it rather than getting a bare [Failure]. *)
-  if host = "" then raise (Io.Protocol_error "http: no Host in request URL");
-  let key = conn_key ~scheme ~host ~port in
-  set_default_headers req ~host;
-  let max_header_bytes = t.max_response_header_bytes in
-  let authority = h2_authority ~host ~port in
-  let want_h2 = force_h2 || scheme = "https" in
-  (* Reuse an idle connection or dial a fresh one, retrying once on a fresh dial
+     user input, surfaced as the typed [No_host] arm rather than a bare
+     [Failure], so the caller can branch on it. *)
+  if host = "" then Error No_host
+  else
+    let key = conn_key ~scheme ~host ~port in
+    set_default_headers req ~host;
+    let max_header_bytes = t.max_response_header_bytes in
+    let authority = h2_authority ~host ~port in
+    let want_h2 = force_h2 || scheme = "https" in
+    (* Reuse an idle connection or dial a fresh one, retrying once on a fresh dial
      if a recycled connection turns out to be dead (Go's shouldRetryRequest).
      Everything operates on the current domain's [pool]. *)
-  let rec attempt ~allow_retry =
-    (* HTTP/2 fast path: reuse a pooled multiplexed conn for this authority. A
+    (* Every branch threads a typed [(Response.t, error) result]; the lower
+       layers ({!dial}/{!round_trip_over}/{!h2_round_trip}) already return their
+       own typed result, so there is no exception boundary to unwind. The
+       [Conn_unusable] evict+retry-once and the dead-idle-conn retry stay inside
+       [attempt]; a finally-failed retry returns its [Error] arm directly.
+       Anything unhandleable (Eio.Cancel, bugs, fiber teardown) is re-raised by
+       {!round_trip_over}/{!dial}, never folded into a result. *)
+    let rec attempt ~allow_retry : (Response.t, error) result =
+      (* HTTP/2 fast path: reuse a pooled multiplexed conn for this authority. A
        pooled conn can race into closed/closing between the usability check and
-       round_trip; H2_transport raises Conn_unusable iff nothing was written, so
+       round_trip; H2_transport returns Conn_unusable iff nothing was written, so
        the request is replayable. Evict + retry once on a fresh dial, mirroring
        the h1 idle-conn branch and Go's shouldRetryRequest (transport.go:845). *)
-    match if want_h2 then get_h2_conn pool authority else None with
-    | Some cc -> (
-        t.before_h2_round_trip ();
-        match h2_round_trip t cc req with
-        | resp -> resp
-        | exception H2_transport.Conn_unusable ->
-            evict_h2_conn pool authority cc;
-            if allow_retry then attempt ~allow_retry:false
-            else raise H2_transport.Conn_unusable)
-    | None -> (
-        match get_idle_conn pool key with
-        | Some pc -> (
-            match round_trip_over pc req with
-            | resp -> resp
-            | exception exn ->
-                pc.close ();
-                if allow_retry then attempt ~allow_retry:false else raise exn)
-        | None -> (
-            (* Serialize the dial per authority (Go's getStartDialLocked /
+      match if want_h2 then get_h2_conn pool authority else None with
+      | Some cc -> (
+          t.before_h2_round_trip ();
+          match h2_round_trip t cc req with
+          | Ok resp -> Ok resp
+          | Error H2_transport.Conn_unusable ->
+              evict_h2_conn pool authority cc;
+              if allow_retry then attempt ~allow_retry:false
+              else Error (H2 H2_transport.Conn_unusable)
+          | Error e -> Error (H2 e))
+      | None -> (
+          match get_idle_conn pool key with
+          | Some pc -> (
+              match round_trip_over pc req with
+              | Ok resp -> Ok resp
+              | Error e ->
+                  (* A recycled connection that turned out to be dead/partial:
+                   close it and retry once on a fresh dial (Go's
+                   shouldRetryRequest); otherwise surface the typed error. *)
+                  pc.close ();
+                  if allow_retry then attempt ~allow_retry:false else Error e)
+          | None -> (
+              (* Serialize the dial per authority (Go's getStartDialLocked /
                dialCall singleflight): concurrent callers that all found every
                pooled conn saturated re-check under the lock and share a single
                new conn rather than each dialing one (thundering herd). A fresh
@@ -539,30 +621,35 @@ let round_trip ?(force_h2 = false) t (req : Request.t) : Response.t =
                lock, so the next lock holder's re-check sees it instead of
                dialing yet another. h1 dials don't pool a shared conn so they
                skip the lock. *)
-            let dial_now () =
-              dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2
-            in
-            let dialed =
-              if want_h2 then
-                Eio.Mutex.use_rw ~protect:true (h2_dial_lock pool authority)
-                  (fun () ->
-                    (* Re-check: a slot may have freed on an existing conn, or a
+              let dial_now () =
+                dial t pool ~scheme ~host ~port ~key ~max_header_bytes ~force_h2
+              in
+              let dialed : (dialed, error) result =
+                if want_h2 then
+                  Eio.Mutex.use_rw ~protect:true (h2_dial_lock pool authority)
+                    (fun () ->
+                      (* Re-check: a slot may have freed on an existing conn, or a
                        concurrent dial added one. *)
-                    match get_h2_conn pool authority with
-                    | Some cc -> Dialed_h2 cc
-                    | None -> (
-                        match dial_now () with
-                        | Dialed_h2 cc ->
-                            put_h2_conn pool authority cc;
-                            Dialed_h2 cc
-                        | Dialed_h1 _ as d -> d))
-              else dial_now ()
-            in
-            match dialed with
-            | Dialed_h2 cc -> h2_round_trip t cc req
-            | Dialed_h1 pc -> round_trip_over pc req))
-  in
-  attempt ~allow_retry:true
+                      match get_h2_conn pool authority with
+                      | Some cc -> Ok (Dialed_h2 cc)
+                      | None -> (
+                          match dial_now () with
+                          | Ok (Dialed_h2 cc) ->
+                              put_h2_conn pool authority cc;
+                              Ok (Dialed_h2 cc)
+                          | Ok (Dialed_h1 _) as d -> d
+                          | Error _ as e -> e))
+                else dial_now ()
+              in
+              match dialed with
+              | Error e -> Error e
+              | Ok (Dialed_h2 cc) -> (
+                  match h2_round_trip t cc req with
+                  | Ok resp -> Ok resp
+                  | Error e -> Error (H2 e))
+              | Ok (Dialed_h1 pc) -> round_trip_over pc req))
+    in
+    attempt ~allow_retry:true
 
 let clock t = t.clock
 

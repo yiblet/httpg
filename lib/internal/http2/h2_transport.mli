@@ -27,12 +27,51 @@
      request fibers via the abort condition; the daemon reader is cancelled. *)
 
 exception Conn_unusable
-(** Go's [errClientConnUnusable] (transport.go:530): {!round_trip} raises this
-    when the connection was already closed/closing before the request wrote
-    anything to the wire. Because the request is untouched, the transport pool
-    may evict the dead conn and replay it on a fresh dial (Go's
+(** Go's [errClientConnUnusable] (transport.go:530): the connection was already
+    closed/closing before the request wrote anything to the wire. {!round_trip}
+    now surfaces this as [Error Conn_unusable] (see {!error}); the exception is
+    retained for the transport bridge, which re-raises it after deciding not to
+    evict + replay. Because the request is untouched, the transport pool may
+    evict the dead conn and replay it on a fresh dial (Go's
     [shouldRetryRequest]); any other failure means bytes may have been sent and
     must surface to the caller. *)
+
+(** Handleable failures surfaced by {!round_trip} as an [Error] arm — the
+    external boundary of the decoupled h2 client. They mirror Go's [(T, error)]
+    for the round-trip path. Internal fiber control-flow and event-loop protocol
+    transitions stay exceptional (see {!round_trip}). *)
+type error =
+  | Conn_closed  (** Go's [errClientConnClosed]: the conn closed under us. *)
+  | Conn_unusable
+      (** Go's [errClientConnUnusable]: conn closed/closing before anything was
+          written; the request is untouched and replayable on a fresh dial. *)
+  | Got_goaway of H2_error.err_code
+      (** Go's [errClientConnGotGoAway]: the server sent GOAWAY. *)
+  | Malformed_response of string
+      (** The response violated HTTP/2 framing (e.g. a missing/invalid [:status]
+          pseudo-header). *)
+  | Request_canceled
+      (** Go's [errRequestCanceled]: the caller abandoned the request (early
+          return / undrained response / cancelled scope) before a clean close.
+      *)
+
+val error_to_string : error -> string
+(** Human-readable rendering of an {!error}, for logging / test failures. *)
+
+val error_to_exn : error -> exn
+(** [error_to_exn e] is the internal exception [e] was mapped from. The {!error}
+    variants shadow the same-named exceptions in this signature, so a caller
+    cannot name those exceptions directly; this is the supported way for the
+    transport bridge to re-raise an {!error} (preserving the pre-result raising
+    behavior of [Transport.round_trip] until it too converts). *)
+
+val error_of_exn : exn -> error option
+(** [error_of_exn e] is [Some] of the modeled boundary {!error} that the
+    internal exception [e] represents, or [None] for anything that is NOT a
+    modeled boundary failure (a bug / fiber-control unwind) and must be
+    re-raised. The inverse of {!error_to_exn}; the {!error} variants shadow the
+    same-named exceptions, so this is the supported way for the transport
+    boundary to convert a re-raised h2 exception back into a typed {!error}. *)
 
 type client_conn
 (** One HTTP/2 client connection, multiplexing concurrent streams. Mirrors Go's
@@ -49,7 +88,10 @@ val new_client_conn :
     live under [sw]; cancelling it tears down the connection. *)
 
 val round_trip :
-  ?sw:Eio.Switch.t -> client_conn -> Api.client_request -> Api.client_response
+  ?sw:Eio.Switch.t ->
+  client_conn ->
+  Api.client_request ->
+  (Api.client_response, error) result
 (** [round_trip ?sw cc req] performs one HTTP/2 request/response exchange on
     [cc], multiplexed with any other concurrent {!round_trip} calls on the same
     connection. It allocates the next odd stream id, encodes the request
@@ -67,7 +109,18 @@ val round_trip :
     a [cleanupWriteRequest]-equivalent aborts a still-open stream and
     [forgetStreamID]-removes it, so no writer fiber or stream entry lingers past
     the caller's interest. Omitting [?sw] keeps the writer on the conn switch
-    (teardown then only on stream close / conn close). *)
+    (teardown then only on stream close / conn close).
+
+    Returns [Error] for the handleable failures of {!error}: a dead/unusable
+    connection ([Conn_closed]/[Conn_unusable]), a server GOAWAY ([Got_goaway]),
+    a framing violation in the response ([Malformed_response]), or an abandoned
+    request ([Request_canceled]). When the failure arrives wrapped in the
+    internal [Stream_aborted] fiber-unwind, the real cause it carries is
+    unwrapped and mapped through the same arms. Everything else propagates as an
+    exception unchanged — that is the residual floor of bugs and fiber-control:
+    [H2_error.Connection_error]/[Stream_error] (event-loop protocol transitions
+    driving on-wire GOAWAY/RST), [Eio.Cancel], asserts, [invalid_arg], and the
+    {!H2_pipe}/{!H2_databuffer} guards. *)
 
 val reserve_new_request : client_conn -> bool
 (** [reserve_new_request cc] reserves a concurrency slot on [cc] (incrementing
