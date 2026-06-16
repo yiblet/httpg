@@ -14,7 +14,7 @@ let header pairs =
     (Httpg.Header.create ()) pairs
 
 let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
+    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false)
     ?(host = "") url : Httpg.Request.t =
   {
@@ -137,11 +137,18 @@ let invalid_trailer_key_is_error () =
   let trailer =
     Httpg.Header.set (Httpg.Header.create ()) "Content-Length" "5"
   in
-  (* An unknown-length Stream body forces chunked framing, so the trailer
-     section (and its key validation) is actually written. *)
+  (* An unknown-length, non-empty streaming body forces chunked framing, so the
+     trailer section (and its key validation) is actually written. *)
+  let sent = ref false in
   let r =
     Httpg.Request.make ~meth:Httpg_base.Method.Post
-      ~body:(Httpg.Body.Stream (fun () -> None))
+      ~body:
+        (Httpg.Body.of_stream (fun () ->
+             if !sent then None
+             else begin
+               sent := true;
+               Some "x"
+             end))
       ~content_length:(-1L) ~trailer:(Some trailer) "http://example.com/"
   in
   let w = Eio.Buf_write.create 256 in

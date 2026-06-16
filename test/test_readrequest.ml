@@ -5,7 +5,10 @@ let read s =
   | Ok r -> r
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let body_of (r : Httpg.Request.t) = Httpg.Body.read_all r.body
+let body_of (r : Httpg.Request.t) =
+  match Httpg.Body.read_all r.body with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Httpg.Body.error_to_string e)
 
 (* content_length is [int64 option]: [None] = unknown (Go's -1). Render it the
    Go way for the ported assertions. *)

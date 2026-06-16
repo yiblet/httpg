@@ -25,12 +25,6 @@ type error =
 val error_to_string : error -> string
 (** Renders {!error} as a human-readable string. *)
 
-exception Need_more
-(** Internal control-flow sentinel: the buffer is truncated and more data is
-    needed. Mirrors Go's [errNeedMore]. {b Unhandleable / internal only} — used
-    by the decoder's incremental {!write} loop to save partial input; it is
-    never a caller-visible error and is not part of {!error}. *)
-
 (* ===================== Encoder ===================== *)
 
 type encoder
@@ -111,16 +105,6 @@ val close_result : decoder -> (unit, error) result
     reuse, returning [Error (Decoding _)] on truncated headers. Mirrors Go's
     [Decoder.Close]. *)
 
-val write : decoder -> string -> int
-(** [write d p] is {!write_result} but {b raises} on a fatal decoding error (the
-    internal decode exceptions). The incremental, raise-based contract is
-    retained for the incremental decoder API (Go's [Decoder.Write]) where a
-    caller drives assembly directly. Mirrors Go's [Decoder.Write]. *)
-
-val close : decoder -> unit
-(** [close d] is {!close_result} but {b raises} on truncated headers. Mirrors
-    Go's [Decoder.Close]. *)
-
 module Private : sig
   (** Helpers exposed only for the ported white-box tests; not part of the
       public API. *)
@@ -130,12 +114,19 @@ module Private : sig
       representation to [buf]. Mirrors Go's [appendVarInt]. The high bits of the
       first byte are left zero (the caller ORs in any flag). *)
 
-  val read_var_int : int -> string -> int -> (int * int, error) result
+  val read_var_int :
+    int ->
+    string ->
+    int ->
+    [ `Ok of int * int | `Error of error | `Need_more ]
   (** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos]
-      of [s]. Returns [Ok (value, next_pos)] or [Error Var_int_overflow].
-      Mirrors Go's [readVarInt]. [n] must be 1..8 (raises [Invalid_argument]
-      otherwise — a programmer error). Raises the internal {!Need_more} sentinel
-      when [s] is truncated. *)
+      of [s]. Returns [`Ok (value, next_pos)], [`Error Var_int_overflow], or
+      [`Need_more] when [s] is truncated. [`Need_more] is an internal
+      control-flow signal (mirrors Go's [errNeedMore]): the buffer is truncated
+      and more data is needed; it is threaded as a variant arm rather than
+      raised, and is never a caller-visible {!error}. Mirrors Go's [readVarInt].
+      [n] must be 1..8 (raises [Invalid_argument] otherwise — a programmer
+      error). *)
 
   val encode_to_string : encoder -> header_field list -> string
   (** [encode_to_string e fs] is a convenience: encodes the list [fs] into a

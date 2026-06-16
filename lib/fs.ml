@@ -41,15 +41,16 @@ type file_system = { open_ : sw:Eio.Switch.t -> string -> (file, error) result }
    chunked/close), but byte-range responses pass an explicit length so the
    stream is sent with an exact Content-Length. proto is left HTTP/1.1; the
    serve loop derives the wire proto from the request. *)
-let respond ~header ?(body = Body.Empty) ?content_length status : Response.t =
+let respond ~header ?(body = Body.empty) ?content_length status : Response.t =
+  (* When no explicit length is given, derive it: an empty body is 0L, anything
+     else is unknown (-1L → None). The flat [Body.t] no longer carries the
+     length in its shape, so non-empty bodies pass [~content_length]. *)
   let content_length =
     match content_length with
     | Some n -> n
-    | None -> (
-        match body with
-        | Body.String s -> Int64.of_int (String.length s)
-        | Body.Empty -> 0L
-        | Body.Stream _ -> -1L)
+    | None ->
+        let empty, _ = Body.is_empty body in
+        if empty then 0L else -1L
   in
   {
     Response.status;
@@ -64,10 +65,6 @@ let respond ~header ?(body = Body.Empty) ?content_length status : Response.t =
     trailer = None;
     request = None;
   }
-
-(* Internal sentinel: [parse_range] raises this on a malformed Range header and
-   [parse_range] maps it back to [Error (Invalid_range _)] at the boundary. *)
-exception Invalid_range_sentinel of string
 
 (* ---- containsDotDot / isSlashRune ---- *)
 
@@ -263,8 +260,10 @@ let dir_list (_r : Request.t) (f : file) : Response.t =
       let h =
         Header.set (Header.create ()) "Content-Type" "text/html; charset=utf-8"
       in
+      let body = Buffer.contents buf in
       respond ~header:h
-        ~body:(Body.String (Buffer.contents buf))
+        ~body:(Body.of_string body)
+        ~content_length:(Int64.of_int (String.length body))
         Httpg_base.Status.Ok
 
 (* ---- preconditions (Go fs.go: checkPreconditions + helpers) ---- *)
@@ -498,71 +497,84 @@ let parse_range s size =
     let b = "bytes=" in
     if not (has_prefix s b) then Error (Invalid_range "")
     else begin
-      try
-        let body =
-          String.sub s (String.length b) (String.length s - String.length b)
-        in
-        let parts = String.split_on_char ',' body in
-        let no_overlap = ref false in
-        let ranges =
-          List.fold_left
-            (fun acc ra ->
-              let ra = trim_string ra in
-              if ra = "" then acc
+      let body =
+        String.sub s (String.length b) (String.length s - String.length b)
+      in
+      let parts = String.split_on_char ',' body in
+      (* Thread (accumulated ranges, no_overlap flag) through a [result],
+         short-circuiting on the first malformed entry. Mirrors Go's loop with a
+         [return nil, errors.New("invalid range")] early-out and a [continue]
+         (no_overlap) that keeps scanning. *)
+      let parse_one acc no_overlap ra =
+        let ra = trim_string ra in
+        if ra = "" then Ok (acc, no_overlap)
+        else begin
+          match String.index_opt ra '-' with
+          | None -> Error (Invalid_range "")
+          | Some dash ->
+              let start = trim_string (String.sub ra 0 dash) in
+              let end_ =
+                trim_string
+                  (String.sub ra (dash + 1) (String.length ra - dash - 1))
+              in
+              if start = "" then begin
+                (* suffix-length: last N bytes *)
+                if end_ = "" || end_.[0] = '-' then Error (Invalid_range "")
+                else
+                  match parse_int64 end_ with
+                  | None -> Error (Invalid_range "")
+                  | Some i ->
+                      let i = if i > size then size else i in
+                      let st = Int64.sub size i in
+                      Ok
+                        ( { start = st; length = Int64.sub size st } :: acc,
+                          no_overlap )
+              end
               else begin
-                match String.index_opt ra '-' with
-                | None -> raise (Invalid_range_sentinel "")
-                | Some dash ->
-                    let start = trim_string (String.sub ra 0 dash) in
-                    let end_ =
-                      trim_string
-                        (String.sub ra (dash + 1) (String.length ra - dash - 1))
-                    in
-                    if start = "" then begin
-                      (* suffix-length: last N bytes *)
-                      if end_ = "" || end_.[0] = '-' then
-                        raise (Invalid_range_sentinel "");
-                      match parse_int64 end_ with
-                      | None -> raise (Invalid_range_sentinel "")
-                      | Some i ->
-                          let i = if i > size then size else i in
-                          let st = Int64.sub size i in
-                          { start = st; length = Int64.sub size st } :: acc
-                    end
+                match parse_int64 start with
+                | None -> Error (Invalid_range "")
+                | Some i ->
+                    if i >= size then Ok (acc, true)
                     else begin
-                      match parse_int64 start with
-                      | None -> raise (Invalid_range_sentinel "")
-                      | Some i ->
-                          if i >= size then begin
-                            no_overlap := true;
-                            acc
-                          end
-                          else begin
-                            let st = i in
-                            if end_ = "" then
-                              { start = st; length = Int64.sub size st } :: acc
+                      let st = i in
+                      if end_ = "" then
+                        Ok
+                          ( { start = st; length = Int64.sub size st } :: acc,
+                            no_overlap )
+                      else
+                        match parse_int64 end_ with
+                        | None -> Error (Invalid_range "")
+                        | Some j ->
+                            if st > j then Error (Invalid_range "")
                             else
-                              match parse_int64 end_ with
-                              | None -> raise (Invalid_range_sentinel "")
-                              | Some j ->
-                                  if st > j then
-                                    raise (Invalid_range_sentinel "");
-                                  let j =
-                                    if j >= size then Int64.sub size 1L else j
-                                  in
-                                  {
+                              let j =
+                                if j >= size then Int64.sub size 1L else j
+                              in
+                              Ok
+                                ( {
                                     start = st;
                                     length = Int64.add (Int64.sub j st) 1L;
                                   }
-                                  :: acc
-                          end
+                                  :: acc,
+                                  no_overlap )
                     end
-              end)
-            [] parts
-        in
-        let ranges = List.rev ranges in
-        if !no_overlap && ranges = [] then Error No_overlap else Ok ranges
-      with Invalid_range_sentinel m -> Error (Invalid_range m)
+              end
+        end
+      in
+      let folded =
+        List.fold_left
+          (fun acc ra ->
+            match acc with
+            | Error _ -> acc
+            | Ok (ranges, no_overlap) -> parse_one ranges no_overlap ra)
+          (Ok ([], false))
+          parts
+      in
+      match folded with
+      | Error _ as e -> e
+      | Ok (ranges, no_overlap) ->
+          let ranges = List.rev ranges in
+          if no_overlap && ranges = [] then Error No_overlap else Ok ranges
     end
 
 let sum_ranges_size ranges =
@@ -663,7 +675,7 @@ let serve_full (r : Request.t) ~h ~size ~read_window : Response.t =
     match Header.get h "Content-Encoding" with None -> size | Some _ -> -1L
   in
   let body =
-    if r.Request.meth = Httpg_base.Method.Head then Body.Empty
+    if r.Request.meth = Httpg_base.Method.Head then Body.empty
     else window_body ~read_window ~start:0L ~length:size
   in
   respond ~header:h ~body ~content_length Httpg_base.Status.Ok
@@ -726,7 +738,7 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
               (* single range → 206 + Content-Range *)
               h := Header.set !h "Content-Range" (content_range ra size);
               let body =
-                if is_head then Body.Empty
+                if is_head then Body.empty
                 else window_body ~read_window ~start:ra.start ~length:ra.length
               in
               respond ~header:!h ~body ~content_length:ra.length
@@ -740,7 +752,7 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
                 Header.set !h "Content-Type"
                   ("multipart/byteranges; boundary=" ^ multipart_boundary);
               let body =
-                if is_head then Body.Empty
+                if is_head then Body.empty
                 else
                   let parts =
                     List.concat
@@ -760,7 +772,7 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
                                (mime_header ra ~content_type:ctype ~size)
                            in
                            [
-                             Body.String (prefix ^ hdrs ^ "\r\n");
+                             Body.of_string (prefix ^ hdrs ^ "\r\n");
                              window_body ~read_window ~start:ra.start
                                ~length:ra.length;
                            ])
@@ -769,7 +781,7 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
                   Body.concat
                     (parts
                     @ [
-                        Body.String
+                        Body.of_string
                           (Printf.sprintf "\r\n--%s--\r\n" multipart_boundary);
                       ])
               in

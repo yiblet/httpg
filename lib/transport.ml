@@ -65,13 +65,6 @@ let error_to_string = function
   | H2 e -> H2_transport.error_to_string e
   | No_host -> "http: no Host in request URL"
 
-let error_to_exn = function
-  | Net (Net.Dial s) -> Net.Dial_error s
-  | Net (Net.Tls s) -> Net.Tls_error s
-  | Io e -> Io.Protocol_error (Io.error_to_string e)
-  | H2 e -> H2_transport.error_to_exn e
-  | No_host -> Io.Protocol_error "http: no Host in request URL"
-
 (* Per-domain pool (Go's Transport connection pool, replicated per OS thread): a
    connection is only ever dialed, reused, and torn down on its OWNING domain,
    so its Buf_read/Buf_write never crosses a domain boundary. Eio switches and
@@ -281,21 +274,30 @@ let exchange t pool key ~max_header_bytes ~released r w pc (req : Request.t) :
       | Error e -> Error (Io e)
       | Ok resp ->
           let reuse = reusable t req resp in
+          (* Release the connection back to the pool exactly once: immediately
+             when there is no body to drain ([content_length = Some 0L]), else
+             when the streaming body reaches EOF. The flat [Body.t] no longer
+             encodes "empty vs streaming" in its shape, so we decide from the
+             framing-derived [content_length] (set by {!Io.read_response}). *)
+          let released_once = ref false in
           let on_eof () =
-            if reuse && not pc.broken then put_idle_conn pool key pc;
-            Eio.Stream.add released reuse
+            if not !released_once then begin
+              released_once := true;
+              if reuse && not pc.broken then put_idle_conn pool key pc;
+              Eio.Stream.add released reuse
+            end
           in
-          (match resp.Response.body with
-          | Body.Empty | Body.String _ -> on_eof ()
-          | Body.Stream inner ->
-              let next () =
-                match inner () with
-                | Some _ as c -> c
-                | None ->
+          (match resp.Response.content_length with
+          | Some 0L -> on_eof ()
+          | _ ->
+              let rec wrap seq () =
+                match seq () with
+                | Seq.Nil ->
                     on_eof ();
-                    None
+                    Seq.Nil
+                | Seq.Cons (x, rest) -> Seq.Cons (x, wrap rest)
               in
-              resp.Response.body <- Body.Stream next);
+              resp.Response.body <- wrap resp.Response.body);
           Ok resp)
 
 (* The per-connection fiber (Go's persistConn loops). Holds the channels open,
@@ -432,16 +434,22 @@ let round_trip_over pc (req : Request.t) : (Response.t, error) result =
    [Httpg_base.Status.to_string] is applied client-side (as Go does). *)
 
 let api_body_of_body (b : Body.t) : Api.Body.t =
-  match b with
-  | Body.Empty -> Api.Body.Empty
-  | Body.String s -> Api.Body.String s
-  | Body.Stream f -> Api.Body.Stream f
+  (* [is_empty] forces one element but returns a re-readable body, so a stateful
+     stream is not double-pulled. Outgoing request bodies are app-provided and do
+     not carry mid-stream framing errors; a defensive [Error] is treated as EOF
+     (the decoupled Api pull is [unit -> string option] and cannot carry one). *)
+  let empty, b = Body.is_empty b in
+  if empty then Api.Body.Empty
+  else
+    let pull = Body.to_stream b in
+    Api.Body.Stream
+      (fun () -> match pull () with Some (Ok s) -> Some s | Some (Error _) | None -> None)
 
 let body_of_api_body (b : Api.Body.t) : Body.t =
   match b with
-  | Api.Body.Empty -> Body.Empty
-  | Api.Body.String s -> Body.String s
-  | Api.Body.Stream f -> Body.Stream f
+  | Api.Body.Empty -> Body.empty
+  | Api.Body.String s -> Body.of_string s
+  | Api.Body.Stream f -> Body.of_stream f
 
 (* The public Header is a persistent Map; the decoupled Api.header is a mutable
    Hashtbl. Convert at the shim boundary. *)

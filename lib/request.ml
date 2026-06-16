@@ -27,7 +27,7 @@ let default_user_agent = "Go-http-client/1.1"
    optional field. [host] defaults to the URL's host (Go sets [req.Host] from the
    parsed URL); pass [~host] to override. No zero-value record to start from. *)
 let make ?(meth = Httpg_base.Method.Get) ?(proto = Httpg_base.Protocol.Http11)
-    ?(header = Header.create ()) ?(body = Body.Empty) ?(content_length = 0L)
+    ?(header = Header.create ()) ?(body = Body.empty) ?(content_length = 0L)
     ?(transfer_encoding = []) ?(close = false) ?host ?(trailer = None)
     ?(request_uri = "") ?(remote_addr = "") url =
   let url = Uri.of_string url in

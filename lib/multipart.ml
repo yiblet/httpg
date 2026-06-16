@@ -158,16 +158,26 @@ let of_body ~boundary (body : Body.t) : (part, error) result Seq.t =
       if not (Queue.is_empty queue) then Ok (Some (Queue.pop queue))
       else if !finished then Ok None
       else
-        let input = match stream () with Some s -> `String s | None -> `Eof in
-        match step input with
-        | `Continue -> drive ()
-        | `Done _tree ->
+        match stream () with
+        | Some (Error e) ->
             finished := true;
-            if Queue.is_empty queue then Ok None
-            else Ok (Some (Queue.pop queue))
-        | `Fail m ->
-            finished := true;
-            Error (Parse m)
+            Error (Parse (Body.error_to_string e))
+        | input -> (
+            let input =
+              match input with
+              | Some (Ok s) -> `String s
+              | Some (Error _) -> assert false (* handled above *)
+              | None -> `Eof
+            in
+            match step input with
+            | `Continue -> drive ()
+            | `Done _tree ->
+                finished := true;
+                if Queue.is_empty queue then Ok None
+                else Ok (Some (Queue.pop queue))
+            | `Fail m ->
+                finished := true;
+                Error (Parse m))
     in
     try drive ()
     with e ->

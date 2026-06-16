@@ -15,6 +15,11 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* Run [f ~net ~sw ~clock dir_path] with a fresh temp dir (an [Eio.Path] under
    the fs capability), cleaning up afterwards. *)
 let with_tmpdir ~fs ~net ~clock ~sw f =
@@ -48,7 +53,7 @@ let serve_known_file () =
             write_file dir "hello.txt" body_contents;
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = ok_resp (Client.get ~sw c (url ^ "/hello.txt")) in
-                let body = Body.read_all resp.Response.body in
+                let body = read_body resp.Response.body in
                 ( Httpg_base.Status.to_int resp.Response.status,
                   body,
                   Header.get resp.Response.header "Content-Type",
@@ -71,7 +76,7 @@ let dir_listing () =
             write_file dir "beta.txt" "b";
             serve_dir ~net ~sw ~clock dir (fun ~sw c url ->
                 let resp = ok_resp (Client.get ~sw c (url ^ "/")) in
-                let body = Body.read_all resp.Response.body in
+                let body = read_body resp.Response.body in
                 ( Httpg_base.Status.to_int resp.Response.status,
                   body,
                   Header.get resp.Response.header "Content-Type" ))))

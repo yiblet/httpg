@@ -27,31 +27,29 @@ val err_code_of_int : int -> err_code
 (** Maps a 32-bit wire value to an [err_code]; unknown values become
     [Unknown v]. *)
 
-exception Connection_error of err_code
-(** [ConnectionError] is an error that results in the termination of the entire
-    connection. Mirrors Go's [ConnectionError]. *)
-
 type stream_error = { stream_id : int; code : err_code; cause : exn option }
 (** [StreamError] is an error that only affects one stream within an HTTP/2
     connection. Mirrors Go's [StreamError] struct. [cause] is optional
     additional detail. *)
 
-exception Stream_error of stream_error
-
 val stream_error : int -> err_code -> stream_error
 (** Mirrors Go's [streamError] constructor (no cause). *)
 
-val conn_error : err_code -> exn
-(** Mirrors Go's [ConnectionError(code)] construction; returns the exception
-    value. *)
+(** Unified, handleable HTTP/2 error value. It is produced and consumed purely
+    as a [result]/value across the whole h2 stack — there is no carrier
+    exception and no exception<->value bridge: {!t} is the single typed h2
+    error.
 
-(** Unified, handleable HTTP/2 error value surfaced at the public boundaries
-    ({!H2_frame.read_frame} / {!H2_frame.read_meta_headers}). The internal
-    per-connection event loop continues to drive GOAWAY/RST by raising the
-    {!Connection_error}/{!Stream_error} exceptions (and the {!H2_frame}
-    frame-build exceptions); {!to_exception}/{!of_exception} bridge between the
-    [result] boundary and the raising loop so the loop's machinery is left
-    untouched (Result-migration Resolution #2 — boundary-only). *)
+    The {!H2_frame} read boundaries ({!H2_frame.read_frame} /
+    {!H2_frame.read_meta_headers}) and writers return it; the per-connection
+    read loops dispatch the [Error] by value (GOAWAY for a {!Connection} error,
+    RST_STREAM for a {!Stream} error); the server's [Read_error] event and the
+    transport's reader-done channel carry the value.
+
+    [Frame_too_large] is both a write-side build invariant and the read-side
+    result for an over-large inbound frame (mirrors Go's [ErrFrameTooLarge]).
+    [Invalid_stream_id], [Invalid_dep_stream_id] and [Pad_length_too_large] are
+    write-side build invariants only. *)
 type t =
   | Connection of err_code
   | Stream of stream_error
@@ -60,26 +58,6 @@ type t =
   | Invalid_dep_stream_id
   | Pad_length_too_large
   | Compression of Hpack.error
-
-exception Compression_error of Hpack.error
-(** Carrier exception for an HPACK ({!Hpack.error}) decode failure threaded
-    through the raising parse path. *)
-
-val set_frame_bridge :
-  to_exception:(t -> exn option) -> of_exception:(exn -> t option) -> unit
-(** Installs the {!H2_frame}-owned conversions for the [Frame_too_large] /
-    [Invalid_stream_id] / [Invalid_dep_stream_id] / [Pad_length_too_large] arms.
-    Called once at {!H2_frame} module init; keeps
-    {!to_exception}/{!of_exception} cycle-free. Not for general use. *)
-
-val to_exception : t -> exn
-(** [to_exception t] is the exception the internal event loop raises to drive
-    GOAWAY/RST/stream-abort for the error [t]. *)
-
-val of_exception : exn -> t option
-(** [of_exception e] recognizes the exceptions the internal raising paths use
-    and maps them to a unified {!t}; [None] for an exception that is not an
-    HTTP/2 boundary error. *)
 
 module Private : sig
   (** Helpers exposed only for the ported white-box tests; not part of the

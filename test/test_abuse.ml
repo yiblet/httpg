@@ -19,6 +19,11 @@ let ok_resp = function
 let hello_handler =
  fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* Start [handler] (built via [mk_server ~net ~clock ~sw]) and run [fn r w] over
    a raw buffered client connection, then close the server. *)
 let with_started ~secs mk_server fn =
@@ -249,12 +254,10 @@ let chunked_trailer_too_long () =
   in
   let r = read_response_str raw in
   let outcome =
-    try
-      ignore (Body.drain r.Response.body);
-      `No_error
-    with
-    | Io.Trailer_too_large -> `Trailer_too_large
-    | e -> `Other (Printexc.to_string e)
+    match Body.drain r.Response.body with
+    | Error Body.Trailer_too_large -> `Trailer_too_large
+    | Error e -> `Other (Body.error_to_string e)
+    | Ok (`Drained | `Too_big) -> `No_error
   in
   match outcome with
   | `Trailer_too_large -> ()
@@ -268,7 +271,7 @@ let chunked_empty_trailer_ok () =
     ^ "3\r\nbar\r\n" ^ "0\r\n\r\n"
   in
   let r = read_response_str raw in
-  let data = Body.read_all r.Response.body in
+  let data = read_body r.Response.body in
   Alcotest.(check string) "body" "foobar" data;
   Alcotest.(check bool) "no trailer" true (r.Response.trailer = None)
 
@@ -278,7 +281,7 @@ let chunked_small_trailer_ok () =
     ^ "3\r\nfoo\r\n" ^ "0\r\n" ^ "Md5: abc123\r\n" ^ "\r\n"
   in
   let r = read_response_str raw in
-  let data = Body.read_all r.Response.body in
+  let data = read_body r.Response.body in
   Alcotest.(check string) "body" "foo" data;
   match r.Response.trailer with
   | Some t ->
@@ -335,7 +338,7 @@ let expect_100_continue () =
   let handler =
    fun ~sw:_ r ->
     Response.create ()
-    |> Response.with_body_string (Body.read_all r.Request.body)
+    |> Response.with_body_string (read_body r.Request.body)
   in
   let interim, rest =
     with_started ~secs:5.
@@ -445,7 +448,7 @@ let response_header_under_limit_ok () =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = ok_resp (Client.get ~sw c url) in
     ( Httpg_base.Status.to_int resp.Response.status,
-      Body.read_all resp.Response.body )
+      read_body resp.Response.body )
   in
   let code, b = with_raw_server ~secs:5. ~serve client in
   Alcotest.(check int) "status 200" 200 code;
@@ -465,7 +468,7 @@ let stub_response req ?location () : Response.t =
     Response.status;
     proto = Httpg_base.Protocol.Http11;
     header;
-    body = Body.Empty;
+    body = Body.empty;
     content_length = Some 0L;
     transfer_encoding = [];
     close = false;

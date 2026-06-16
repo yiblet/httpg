@@ -3,10 +3,65 @@
    back through an in-memory Eio.Buf_read, asserting the parsed fields. Frame IO
    is synchronous, so no fibers/switch are needed for these round-trips. *)
 
-module F = Httpg_http2.H2_frame
 module H2 = Httpg_http2.H2
 module H2_error = Httpg_http2.H2_error
 module Hpack = Httpg_http2.Hpack
+
+(* The frame writers thread their build invariants as [(unit, H2_error.t)
+   result] (ticket 013). These round-trip tests use valid ids, so a build error
+   is impossible; [failwith] on it (so a regression fails loudly) and present the
+   writers as the unit-returning shape the tests were written against by
+   shadowing them in this local [F]. *)
+let ok : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
+
+module F = struct
+  include Httpg_http2.H2_frame
+
+  let write_data ?pad oc stream_id end_stream data =
+    ok (Httpg_http2.H2_frame.write_data ?pad oc stream_id end_stream data)
+
+  let write_headers oc ~stream_id ?end_stream ?end_headers ?pad_length ?priority
+      block =
+    ok
+      (Httpg_http2.H2_frame.write_headers oc ~stream_id ?end_stream ?end_headers
+         ?pad_length ?priority block)
+
+  let write_rst_stream oc stream_id code =
+    ok (Httpg_http2.H2_frame.write_rst_stream oc stream_id code)
+
+  let write_settings oc settings =
+    ok (Httpg_http2.H2_frame.write_settings oc settings)
+
+  let write_settings_ack oc = ok (Httpg_http2.H2_frame.write_settings_ack oc)
+  let write_ping oc ack data = ok (Httpg_http2.H2_frame.write_ping oc ack data)
+
+  let write_goaway oc max_stream_id code debug_data =
+    ok (Httpg_http2.H2_frame.write_goaway oc max_stream_id code debug_data)
+
+  let write_window_update oc stream_id incr =
+    ok (Httpg_http2.H2_frame.write_window_update oc stream_id incr)
+
+  let write_continuation oc stream_id end_headers frag =
+    ok (Httpg_http2.H2_frame.write_continuation oc stream_id end_headers frag)
+
+  let write_push_promise oc ~stream_id ~promise_id ?end_headers ?pad_length
+      block =
+    ok
+      (Httpg_http2.H2_frame.write_push_promise oc ~stream_id ~promise_id
+         ?end_headers ?pad_length block)
+
+  let write_raw oc typ flags stream_id payload =
+    ok (Httpg_http2.H2_frame.write_raw oc typ flags stream_id payload)
+
+  module Private = struct
+    include Httpg_http2.H2_frame.Private
+
+    let write_priority oc stream_id p =
+      ok (Httpg_http2.H2_frame.Private.write_priority oc stream_id p)
+  end
+end
 
 (* Capture the raw bytes a writer produces (for byte-exact encoding checks). *)
 let capture (writer : Eio.Buf_write.t -> unit) : string =
@@ -18,13 +73,16 @@ let with_pipe (writer : Eio.Buf_write.t -> unit) (reader : Eio.Buf_read.t -> 'a)
     : 'a =
   reader (Test_harness.buf_read_of_string (capture writer))
 
-(* read_frame returns [result]; unwrap [Ok], re-raising the boundary error via
-   [H2_error.to_exception] so the [check_raises] error tests below keep asserting
-   the exception identity (Frame_too_large / Connection_error / …). *)
+(* read_frame returns [result]; unwrap [Ok] for the round-trip tests. The
+   framing-error tests assert on the [Error] value directly (the boundary no
+   longer raises a carrier exception — ticket 014). *)
 let read_one ?max_size () r =
   match F.read_frame ?max_size r with
   | Ok f -> f
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame read error"
+
+(* Read the raw [(frame, H2_error.t) result] without unwrapping. *)
+let read_result ?max_size () r = F.read_frame ?max_size r
 
 (* ---- frame type string ---- *)
 
@@ -250,19 +308,28 @@ let test_write_priority () =
       Alcotest.(check int) "weight" 77 pf.priority.weight
   | _ -> Alcotest.fail "priority excl"
 
+(* The frame-build invariants are now [(unit, H2_error.t) result] (ticket 013):
+   an invalid stream dependency is [Error Invalid_dep_stream_id], not a raise. *)
 let test_write_invalid_stream_dep () =
-  Alcotest.check_raises "headers dep" F.Invalid_dep_stream_id (fun () ->
-      ignore
-        (capture (fun oc ->
-             F.write_headers oc ~stream_id:42
-               ~priority:
-                 { F.stream_dep = 1 lsl 31; exclusive = false; weight = 0 }
-               "")));
-  Alcotest.check_raises "priority dep" F.Invalid_dep_stream_id (fun () ->
-      ignore
-        (capture (fun oc ->
-             F.Private.write_priority oc 2
-               { F.stream_dep = 1 lsl 31; exclusive = false; weight = 0 })))
+  let check label r =
+    match r with
+    | Error H2_error.Invalid_dep_stream_id -> ()
+    | Error _ ->
+        Alcotest.failf "%s: expected Invalid_dep_stream_id, got another error"
+          label
+    | Ok () -> Alcotest.failf "%s: expected Error, got Ok" label
+  in
+  Test_harness.with_output_string (fun oc ->
+      check "headers dep"
+        (Httpg_http2.H2_frame.write_headers oc ~stream_id:42
+           ~priority:{ F.stream_dep = 1 lsl 31; exclusive = false; weight = 0 }
+           ""))
+  |> ignore;
+  Test_harness.with_output_string (fun oc ->
+      check "priority dep"
+        (Httpg_http2.H2_frame.Private.write_priority oc 2
+           { F.stream_dep = 1 lsl 31; exclusive = false; weight = 0 }))
+  |> ignore
 
 (* ---- SETTINGS (TestWriteSettings) ---- *)
 
@@ -410,32 +477,29 @@ let test_frame_header_codec () =
 let test_oversize_frame () =
   (* Write a raw frame with declared length 5 but read with max_size 4. *)
   let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Data) 0 1 "hello" in
-  Alcotest.check_raises "too large" F.Frame_too_large (fun () ->
-      ignore (with_pipe writer (read_one ~max_size:4 ())))
+  match with_pipe writer (read_result ~max_size:4 ()) with
+  | Error H2_error.Frame_too_large -> ()
+  | _ -> Alcotest.fail "expected Error Frame_too_large"
 
 (* ---- bad stream id: DATA on stream 0 -> PROTOCOL_ERROR ---- *)
 
 let test_bad_stream_id () =
+  let expect_conn label code writer =
+    match with_pipe writer (read_result ()) with
+    | Error (H2_error.Connection c) when c = code -> ()
+    | _ -> Alcotest.failf "%s: expected Error (Connection ...)" label
+  in
   (* Raw DATA frame on stream 0 -> connection error PROTOCOL_ERROR. *)
-  let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Data) 0 0 "abc" in
-  Alcotest.check_raises "data stream 0"
-    (H2_error.Connection_error H2_error.ProtocolError) (fun () ->
-      ignore (with_pipe writer (read_one ())));
+  expect_conn "data stream 0" H2_error.ProtocolError (fun oc ->
+      F.write_raw oc (H2.frame_type_to_int H2.Data) 0 0 "abc");
   (* SETTINGS on a non-zero stream -> PROTOCOL_ERROR. *)
-  let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Settings) 0 1 "" in
-  Alcotest.check_raises "settings stream 1"
-    (H2_error.Connection_error H2_error.ProtocolError) (fun () ->
-      ignore (with_pipe writer (read_one ())));
+  expect_conn "settings stream 1" H2_error.ProtocolError (fun oc ->
+      F.write_raw oc (H2.frame_type_to_int H2.Settings) 0 1 "");
   (* SETTINGS not a multiple of 6 -> FRAME_SIZE_ERROR. *)
-  let writer oc = F.write_raw oc (H2.frame_type_to_int H2.Settings) 0 0 "abc" in
-  Alcotest.check_raises "settings size"
-    (H2_error.Connection_error H2_error.FrameSizeError) (fun () ->
-      ignore (with_pipe writer (read_one ())))
+  expect_conn "settings size" H2_error.FrameSizeError (fun oc ->
+      F.write_raw oc (H2.frame_type_to_int H2.Settings) 0 0 "abc")
 
 (* ---- result boundary: read_frame returns Error (Ticket 7) ---- *)
-
-(* Read the raw [(frame, H2_error.t) result] without unwrapping. *)
-let read_result ?max_size () r = F.read_frame ?max_size r
 
 (* A frame whose declared length exceeds max_size -> Error Frame_too_large. *)
 let test_read_oversize_frame_result () =
@@ -478,16 +542,30 @@ let encode_header_raw pairs =
 
 let split_at s i = (String.sub s 0 i, String.sub s i (String.length s - i))
 
-let read_meta ?(max_header_list_size = 16 lsl 20) writer =
+(* The meta-headers read boundary returns [result] (ticket 014 — no carrier
+   exception). [read_meta_result] surfaces it; [read_meta] unwraps [Ok] for the
+   success-path tests. *)
+let read_meta_result ?(max_header_list_size = 16 lsl 20) writer =
   let r = Test_harness.buf_read_of_string (capture writer) in
   match F.read_frame r with
-  | Ok (F.Headers (fh, h)) -> (
+  | Ok (F.Headers (fh, h)) ->
       let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
-      match F.read_meta_headers ~max_header_list_size dec (fh, h) r with
-      | Ok mf -> mf
-      | Error e -> raise (H2_error.to_exception e))
+      F.read_meta_headers ~max_header_list_size dec (fh, h) r
   | Ok _ -> Alcotest.fail "expected HEADERS"
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame read error"
+
+let read_meta ?(max_header_list_size = 16 lsl 20) writer =
+  match read_meta_result ~max_header_list_size writer with
+  | Ok mf -> mf
+  | Error _ -> failwith "test: unexpected h2 meta-headers read error"
+
+(* Assert a meta-headers read yields a stream-level PROTOCOL_ERROR for [stream]. *)
+let expect_meta_stream_protocol_error label stream writer =
+  match read_meta_result writer with
+  | Error (H2_error.Stream se)
+    when se.stream_id = stream && se.code = H2_error.ProtocolError ->
+      ()
+  | _ -> Alcotest.failf "%s: expected Error (Stream ProtocolError)" label
 
 let field_pairs (mh : F.meta_headers_frame) =
   List.map (fun (f : Hpack.header_field) -> (f.name, f.value)) mh.fields
@@ -562,39 +640,23 @@ let test_meta_pseudo_after_regular () =
   let all =
     encode_header_raw [ (":method", "GET"); ("foo", "bar"); (":path", "/") ]
   in
-  Alcotest.check_raises "pseudo after regular"
-    (H2_error.Stream_error (H2_error.stream_error 1 H2_error.ProtocolError))
-    (fun () ->
-      ignore
-        (read_meta (fun oc ->
-             F.write_headers oc ~stream_id:1 ~end_headers:true all)))
+  expect_meta_stream_protocol_error "pseudo after regular" 1 (fun oc ->
+      F.write_headers oc ~stream_id:1 ~end_headers:true all)
 
 let test_meta_unknown_pseudo () =
   let all = encode_header_raw [ (":unknown", "foo"); ("foo", "bar") ] in
-  Alcotest.check_raises "unknown pseudo"
-    (H2_error.Stream_error (H2_error.stream_error 1 H2_error.ProtocolError))
-    (fun () ->
-      ignore
-        (read_meta (fun oc ->
-             F.write_headers oc ~stream_id:1 ~end_headers:true all)))
+  expect_meta_stream_protocol_error "unknown pseudo" 1 (fun oc ->
+      F.write_headers oc ~stream_id:1 ~end_headers:true all)
 
 let test_meta_dup_pseudo () =
   let all = encode_header_raw [ (":method", "GET"); (":method", "POST") ] in
-  Alcotest.check_raises "dup pseudo"
-    (H2_error.Stream_error (H2_error.stream_error 1 H2_error.ProtocolError))
-    (fun () ->
-      ignore
-        (read_meta (fun oc ->
-             F.write_headers oc ~stream_id:1 ~end_headers:true all)))
+  expect_meta_stream_protocol_error "dup pseudo" 1 (fun oc ->
+      F.write_headers oc ~stream_id:1 ~end_headers:true all)
 
 let test_meta_invalid_field_name () =
   let all = encode_header_raw [ ("CapitalBad", "x") ] in
-  Alcotest.check_raises "invalid name"
-    (H2_error.Stream_error (H2_error.stream_error 1 H2_error.ProtocolError))
-    (fun () ->
-      ignore
-        (read_meta (fun oc ->
-             F.write_headers oc ~stream_id:1 ~end_headers:true all)))
+  expect_meta_stream_protocol_error "invalid name" 1 (fun oc ->
+      F.write_headers oc ~stream_id:1 ~end_headers:true all)
 
 let tests =
   [

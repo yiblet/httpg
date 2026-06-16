@@ -8,12 +8,17 @@
    package reuses textproto canonicalization, callers inject
    [Httpg.Header.canonical_header_key] via [~canonical]. *)
 
-(* Go ErrRequestHeaderListSize. *)
-exception Request_header_list_size
+(* Handleable request-validation failures from [encode_headers], mirroring Go's
+   error returns from EncodeHeaders:
+   - [Invalid_request msg]: Go's errors.New / fmt.Errorf returns (the [msg]
+     carries Go's message text verbatim);
+   - [Header_list_size]: Go's ErrRequestHeaderListSize (the encoded header list
+     exceeds the peer's advertised limit). *)
+type error =
+  | Invalid_request of string
+  | Header_list_size
 
-(* A request was rejected during header encoding (Go's errors.New / fmt.Errorf
-   returns from EncodeHeaders); the string mirrors Go's message. *)
-exception Error of string
+val error_to_string : error -> string
 
 (* Go's [Request]: a subset of http.Request built from primitive types.
    [header]/[trailer] use the same structural type as [Httpg.Header.t]. *)
@@ -81,13 +86,14 @@ val is_request_gzip :
   Httpg_base.Method.t -> (string, string list) Hashtbl.t -> bool -> bool
 
 (* Go EncodeHeaders: validates the request and calls [headerf name value] for
-   each (lower-cased, validated) pseudo-header and header. May raise [Error] or
-   [Request_header_list_size]. *)
+   each (lower-cased, validated) pseudo-header and header. All validation runs
+   up-front (as in Go), so on [Error] no [headerf] call has happened and the
+   caller's hpack state is untouched. *)
 val encode_headers :
   canonical:(string -> string) ->
   encode_headers_param ->
   (string -> string -> unit) ->
-  encode_headers_result
+  (encode_headers_result, error) result
 
 (* Go NewServerRequest. Mutates [param.sp_header] in place (strips Expect,
    merges Cookie, strips Trailer) as Go mutates rp.Header. *)

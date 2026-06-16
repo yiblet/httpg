@@ -114,7 +114,23 @@ let encode_block enc f =
   f ();
   Buffer.contents buf
 
-let write_res_headers_frame oc enc (w : write_res_headers) =
+(* Apply [fn] over each fragment of [split_header_block], short-circuiting on
+   the first frame-build [Error] (Go's splitHeaderBlock returns on the first
+   writer error). *)
+let split_header_block_result block fn : (unit, H2_error.t) result =
+  let result = ref (Ok ()) in
+  (try
+     split_header_block block (fun frag first last ->
+         match fn frag first last with
+         | Ok () -> ()
+         | Error _ as e ->
+             result := e;
+             raise Exit)
+   with Exit -> ());
+  !result
+
+let write_res_headers_frame oc enc (w : write_res_headers) :
+    (unit, H2_error.t) result =
   let block =
     encode_block enc (fun () ->
         if w.http_res_code <> 0 then
@@ -127,13 +143,14 @@ let write_res_headers_frame oc enc (w : write_res_headers) =
   in
   if String.length block = 0 && w.trailers = None then
     failwith "unexpected empty hpack";
-  split_header_block block (fun frag first last ->
+  split_header_block_result block (fun frag first last ->
       if first then
         H2_frame.write_headers oc ~stream_id:w.rh_stream_id
           ~end_stream:w.rh_end_stream ~end_headers:last frag
       else H2_frame.write_continuation oc w.rh_stream_id last frag)
 
-let write_push_promise_frame oc enc (w : write_push_promise) =
+let write_push_promise_frame oc enc (w : write_push_promise) :
+    (unit, H2_error.t) result =
   let block =
     encode_block enc (fun () ->
         enc_kv enc ":method" (Httpg_base.Method.to_string w.pp_method);
@@ -143,13 +160,13 @@ let write_push_promise_frame oc enc (w : write_push_promise) =
         encode_headers enc w.pp_h None)
   in
   if String.length block = 0 then failwith "unexpected empty hpack";
-  split_header_block block (fun frag first last ->
+  split_header_block_result block (fun frag first last ->
       if first then
         H2_frame.write_push_promise oc ~stream_id:w.pp_stream_id
           ~promise_id:w.pp_promised_id ~end_headers:last frag
       else H2_frame.write_continuation oc w.pp_stream_id last frag)
 
-let write_frame ~enc oc w =
+let write_frame ~enc oc w : (unit, H2_error.t) result =
   match w with
   | Write_settings settings -> H2_frame.write_settings oc settings
   | Write_settings_ack -> H2_frame.write_settings_ack oc

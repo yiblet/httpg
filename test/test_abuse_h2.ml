@@ -13,6 +13,12 @@ module Hpack = Httpg_http2.Hpack
 module H2_error = Httpg_http2.H2_error
 module Api = Httpg_http2.Api
 
+(* The frame writers thread their build invariant as [(unit, H2_error.t) result]
+   (ticket 013); these raw-client helpers use valid values, so unwrap [Ok]. *)
+let ok : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
+
 (* Run [client r w] against [S.serve ?max_concurrent_streams ?max_header_bytes
    handler] over a loopback socket pair (shared harness). The server fiber is
    cancelled once the client returns. *)
@@ -38,12 +44,13 @@ let h2_request_block path =
     ]
 
 let h2_open oc ~stream_id =
-  F.write_headers oc ~stream_id ~end_stream:true ~end_headers:true
-    (h2_request_block "/")
+  ok
+    (F.write_headers oc ~stream_id ~end_stream:true ~end_headers:true
+       (h2_request_block "/"))
 
 let client_handshake oc =
   Eio.Buf_write.string oc H2.client_preface;
-  F.write_settings oc [];
+  ok (F.write_settings oc []);
   Eio.Buf_write.flush oc
 
 (* Read frames until a GOAWAY is seen; return its error code. *)
@@ -51,7 +58,7 @@ let rec read_until_goaway ic =
   match F.read_frame ic with
   | Ok (F.GoAway (_, gf)) -> gf.error_code
   | Ok _ -> read_until_goaway ic
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 let too_many_early_resets () =
   (* adv_max_streams = 1, so the backlog cap is 4 * 1 = 4: the 6th queued
@@ -79,14 +86,14 @@ let too_many_early_resets () =
     h2_open oc ~stream_id:1;
     Eio.Buf_write.flush oc;
     Eio.Promise.await started;
-    F.write_rst_stream oc 1 H2_error.Cancel;
+    ok (F.write_rst_stream oc 1 H2_error.Cancel);
     Eio.Buf_write.flush oc;
     (* Flood: open then immediately reset a stream, repeatedly; each queued
        handler grows the backlog until it exceeds 4*adv_max_streams. *)
     let rec loop sid n =
       if n > 0 then begin
         h2_open oc ~stream_id:sid;
-        F.write_rst_stream oc sid H2_error.Cancel;
+        ok (F.write_rst_stream oc sid H2_error.Cancel);
         Eio.Buf_write.flush oc;
         loop (sid + 2) (n - 1)
       end
@@ -106,7 +113,7 @@ let rec read_first_settings ic =
   match F.read_frame ic with
   | Ok (F.Settings (_, sf)) -> sf
   | Ok _ -> read_first_settings ic
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 (* TestH2AdvertisesMaxHeaderListSize: the server's initial SETTINGS frame
    contains a MAX_HEADER_LIST_SIZE entry equal to the configured value. *)
@@ -150,8 +157,9 @@ let rejects_header_list_bomb () =
   in
   let client c_ic oc =
     client_handshake oc;
-    F.write_headers oc ~stream_id:1 ~end_stream:true ~end_headers:true
-      bomb_block;
+    ok
+      (F.write_headers oc ~stream_id:1 ~end_stream:true ~end_headers:true
+         bomb_block);
     Eio.Buf_write.flush oc;
     read_until_goaway c_ic
   in
@@ -208,11 +216,12 @@ let rejects_duplicate_settings () =
   let client c_ic oc =
     Eio.Buf_write.string oc H2.client_preface;
     (* One SETTINGS frame, two entries for the SAME id (duplicate). *)
-    F.write_settings oc
-      [
-        { H2.id = H2.Initial_window_size; value = 65535l };
-        { H2.id = H2.Initial_window_size; value = 1024l };
-      ];
+    ok
+      (F.write_settings oc
+         [
+           { H2.id = H2.Initial_window_size; value = 65535l };
+           { H2.id = H2.Initial_window_size; value = 1024l };
+         ]);
     Eio.Buf_write.flush oc;
     read_until_goaway c_ic
   in
@@ -230,12 +239,13 @@ let accepts_distinct_settings () =
   in
   let client c_ic oc =
     Eio.Buf_write.string oc H2.client_preface;
-    F.write_settings oc
-      [
-        { H2.id = H2.Initial_window_size; value = 65535l };
-        { H2.id = H2.Max_concurrent_streams; value = 100l };
-        { H2.id = H2.Header_table_size; value = 4096l };
-      ];
+    ok
+      (F.write_settings oc
+         [
+           { H2.id = H2.Initial_window_size; value = 65535l };
+           { H2.id = H2.Max_concurrent_streams; value = 100l };
+           { H2.id = H2.Header_table_size; value = 4096l };
+         ]);
     Eio.Buf_write.flush oc;
     h2_open oc ~stream_id:1;
     Eio.Buf_write.flush oc;
@@ -246,14 +256,19 @@ let accepts_distinct_settings () =
           let fields = ref [] in
           Hpack.set_emit_func dec (fun (h : Hpack.header_field) ->
               fields := (h.name, h.value) :: !fields);
-          ignore (Hpack.write dec hf.header_frag);
-          Hpack.close dec;
+          (match Hpack.write_result dec hf.header_frag with
+          | Ok _ -> ()
+          | Error e ->
+              Alcotest.failf "hpack decode: %s" (Hpack.error_to_string e));
+          (match Hpack.close_result dec with
+          | Ok () -> ()
+          | Error e -> Alcotest.failf "hpack close: %s" (Hpack.error_to_string e));
           List.assoc_opt ":status" !fields
       | Ok (F.GoAway (_, gf)) ->
           Alcotest.failf "unexpected GOAWAY %s"
             (H2_error.Private.err_code_string gf.error_code)
       | Ok _ -> read_status ()
-      | Error e -> raise (H2_error.to_exception e)
+      | Error _ -> failwith "test: unexpected h2 frame-build invariant"
     in
     read_status ()
   in
@@ -271,7 +286,7 @@ let h2_flow_control_overflow_goaway () =
   let max_window = (1 lsl 31) - 1 in
   let client c_ic oc =
     client_handshake oc;
-    F.write_window_update oc 0 max_window;
+    ok (F.write_window_update oc 0 max_window);
     Eio.Buf_write.flush oc;
     read_until_goaway c_ic
   in
@@ -285,7 +300,7 @@ let rec read_until_rst ic =
   match F.read_frame ic with
   | Ok (F.RST_stream (fh, rf)) -> (fh.stream_id, rf.error_code)
   | Ok _ -> read_until_rst ic
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 (* TestH2MaxConcurrentStreamsRefused (regression): with adv_max_streams = 1, a
    second concurrent stream opened while the first is still active is refused
@@ -305,8 +320,9 @@ let h2_max_concurrent_streams_refused () =
   let client c_ic oc =
     client_handshake oc;
     (* Stream 1: kept open (no END_STREAM) so it counts as active. *)
-    F.write_headers oc ~stream_id:1 ~end_stream:false ~end_headers:true
-      (h2_request_block "/");
+    ok
+      (F.write_headers oc ~stream_id:1 ~end_stream:false ~end_headers:true
+         (h2_request_block "/"));
     Eio.Buf_write.flush oc;
     Eio.Promise.await started;
     (* Stream 3: over the limit -> RST_STREAM REFUSED_STREAM. *)

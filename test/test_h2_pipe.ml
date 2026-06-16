@@ -100,8 +100,9 @@ let test_pipe_close_with_error () =
   Alcotest.(check bool) "err = test error" true (err == Test_error);
   Alcotest.(check int) "0 unread bytes" 0 (Pipe.len p);
   (match Pipe.write p "abc" with
-  | _ -> Alcotest.fail "write after close should fail"
-  | exception Pipe.Closed_pipe_write -> ());
+  | Ok _ -> Alcotest.fail "write after close should fail"
+  | Error Pipe.Closed -> ()
+  | Error Pipe.Uninitialized -> Alcotest.fail "wrong write error");
   match Pipe.read p 1 with
   | _ -> Alcotest.fail "read after close should fail"
   | exception _ -> Alcotest.(check int) "0 unread bytes" 0 (Pipe.len p)
@@ -118,8 +119,9 @@ let test_pipe_break_with_error () =
   Alcotest.(check bool) "err = test error" true (err == Test_error);
   Alcotest.(check int) "3 unread bytes" 3 (Pipe.len p);
   (match Pipe.write p "abc" with
-  | _ -> Alcotest.fail "write after break should fail"
-  | exception Pipe.Closed_pipe_write -> ());
+  | Ok _ -> Alcotest.fail "write after break should fail"
+  | Error Pipe.Closed -> ()
+  | Error Pipe.Uninitialized -> Alcotest.fail "wrong write error");
   Alcotest.(check int) "3 unread bytes" 3 (Pipe.len p)
 
 (* A blocked Read is unblocked by a later Write. *)

@@ -16,6 +16,11 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* ~T-millisecond CPU busy loop: a real integer grind the optimizer cannot
    elide (the result is observed). Calibrated once per process against the
    monotonic clock so it spends roughly [target_s] seconds of CPU regardless of
@@ -181,7 +186,7 @@ let multicore_tls () =
              let transport = Transport.create ~net ~clock ~insecure:true () in
              let client = Client.create ~net ~clock ~transport () in
              let resp = ok_resp (Client.get ~sw client url) in
-             let body = Body.read_all resp.Response.body in
+             let body = read_body resp.Response.body in
              if Httpg_base.Status.to_int resp.Response.status = 200 then
                Atomic.incr ok;
              if body = "tls-ok" then Atomic.incr bodies));
@@ -276,7 +281,7 @@ let multicore_client () =
                    in
                    match ok_resp (Client.get ~sw:dsw client url) with
                    | resp ->
-                       let body = Body.read_all resp.Response.body in
+                       let body = read_body resp.Response.body in
                        if
                          Httpg_base.Status.to_int resp.Response.status = 200
                          && body = expect

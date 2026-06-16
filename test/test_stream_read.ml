@@ -12,6 +12,11 @@ let read_response_ok r =
   | Ok x -> x
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
+let read_body b =
+  match Httpg.Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Httpg.Body.error_to_string e)
+
 (* A chunked response: three small chunks, no trailer. *)
 let chunked_resp =
   "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ^ "3\r\nfoo\r\n"
@@ -20,18 +25,22 @@ let chunked_resp =
 (* First chunk obtainable before EOF. *)
 let first_chunk_before_eof () =
   let r = read_response_ok (r_of_string chunked_resp) in
-  match r.Httpg.Response.body with
-  | Httpg.Body.Stream next ->
-      Alcotest.(check (option string)) "first chunk" (Some "foo") (next ());
-      Alcotest.(check (option string)) "second chunk" (Some "bar") (next ())
-  | _ -> Alcotest.fail "expected a streaming body"
+  let next = Httpg.Body.to_stream r.Httpg.Response.body in
+  let pull () =
+    match next () with
+    | Some (Ok s) -> Some s
+    | Some (Error e) -> Alcotest.failf "body: %s" (Httpg.Body.error_to_string e)
+    | None -> None
+  in
+  Alcotest.(check (option string)) "first chunk" (Some "foo") (pull ());
+  Alcotest.(check (option string)) "second chunk" (Some "bar") (pull ())
 
 (* read_all of a fresh parse equals the full payload. *)
 let read_all_full_payload () =
   let r = read_response_ok (r_of_string chunked_resp) in
   Alcotest.(check string)
     "full body" "foobarbaz"
-    (Httpg.Body.read_all r.Httpg.Response.body)
+    (read_body r.Httpg.Response.body)
 
 (* Chunked body WITH a trailer: after draining the body the response trailer
    carries the trailer header. *)
@@ -57,7 +66,7 @@ let trailer_undeclared_after_drain () =
   let r = read_response_ok (r_of_string raw) in
   Alcotest.(check string)
     "body" "foo"
-    (Httpg.Body.read_all r.Httpg.Response.body);
+    (read_body r.Httpg.Response.body);
   match r.Httpg.Response.trailer with
   | Some t ->
       Alcotest.(check (option string))
@@ -76,7 +85,7 @@ let keep_alive_two_responses () =
   let r1 = read_response_ok r in
   Alcotest.(check string)
     "resp1 body" "hello"
-    (Httpg.Body.read_all r1.Httpg.Response.body);
+    (read_body r1.Httpg.Response.body);
   ignore (Httpg.Body.drain r1.Httpg.Response.body);
   let r2 = read_response_ok r in
   Alcotest.(check int)
@@ -84,7 +93,7 @@ let keep_alive_two_responses () =
     (Httpg_base.Status.to_int r2.Httpg.Response.status);
   Alcotest.(check string)
     "resp2 body" "world"
-    (Httpg.Body.read_all r2.Httpg.Response.body)
+    (read_body r2.Httpg.Response.body)
 
 (* Keep-alive across a chunked first body. *)
 let keep_alive_chunked_then_next () =

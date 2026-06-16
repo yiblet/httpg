@@ -32,7 +32,7 @@ let create () : t =
     status = Httpg_base.Status.Ok;
     proto = Httpg_base.Protocol.Http11;
     header = Header.create ();
-    body = Body.Empty;
+    body = Body.empty;
     content_length = Some 0L;
     transfer_encoding = [];
     close = false;
@@ -49,15 +49,20 @@ let with_header key value (r : t) : t =
 let with_set_header key value (r : t) : t =
   { r with header = Header.set r.header key value }
 
-let content_length_of_body = function
-  | Body.String s -> Some (Int64.of_int (String.length s))
-  | Body.Empty -> Some 0L
-  | Body.Stream _ -> None
-
+(* A body set via {!with_body} is treated as unknown-length (streaming): the
+   flat [Body.t] no longer encodes "empty"/"in-memory" in its shape, so the
+   producer declares the length explicitly. {!with_body_string} is the
+   known-length path; a caller with a known-length stream sets [content_length]
+   afterwards. *)
 let with_body (body : Body.t) (r : t) : t =
-  { r with body; content_length = content_length_of_body body }
+  { r with body; content_length = None }
 
-let with_body_string s (r : t) : t = with_body (Body.String s) r
+let with_body_string s (r : t) : t =
+  {
+    r with
+    body = Body.of_string s;
+    content_length = Some (Int64.of_int (String.length s));
+  }
 let with_trailer t (r : t) : t = { r with trailer = Some t }
 
 (* Response.Cookies. *)

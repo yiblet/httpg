@@ -12,13 +12,18 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* A handler: GET -> 200 "hello, h2"; POST /echo echoes the request body. Works
    identically over h2 and http/1.1. *)
 let test_handler =
  fun ~sw:_ (r : Request.t) ->
   let body =
     match (r.Request.meth, Uri.path r.Request.url) with
-    | Httpg_base.Method.Post, "/echo" -> Body.read_all r.Request.body
+    | Httpg_base.Method.Post, "/echo" -> read_body r.Request.body
     | _, _ -> "hello, h2"
   in
   Response.create () |> Response.with_body_string body
@@ -51,14 +56,14 @@ let test_clientserver_roundtrip () =
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         (* GET *)
         let get_resp = ok_resp (Client.get ~sw client (base ^ "/hello")) in
-        let get_body = Body.read_all get_resp.Response.body in
+        let get_body = read_body get_resp.Response.body in
         (* POST, reusing the same h2 connection from the pool. *)
         let post_resp =
           ok_resp
             (Client.post ~sw client (base ^ "/echo") ~content_type:"text/plain"
-               (Body.String "ping-pong"))
+               (Body.of_string "ping-pong"))
         in
-        let post_body = Body.read_all post_resp.Response.body in
+        let post_body = read_body post_resp.Response.body in
         ( Httpg_base.Status.to_int get_resp.Response.status,
           get_body,
           Httpg_base.Status.to_int post_resp.Response.status,
@@ -81,7 +86,7 @@ let test_http11_fallback () =
         let client = Client.create ~net ~clock ~transport () in
         let base = Printf.sprintf "https://127.0.0.1:%d" port in
         let resp = ok_resp (Client.get ~sw client (base ^ "/hello")) in
-        let body = Body.read_all resp.Response.body in
+        let body = read_body resp.Response.body in
         ( Httpg_base.Status.to_int resp.Response.status,
           body,
           Transport.h2_round_trip_count transport ))
@@ -117,11 +122,11 @@ let test_concurrent_multiplexing_one_conn () =
             ok_resp
               (if i mod 3 = 0 then
                  Client.post ~sw client (base ^ path) ~content_type:"text/plain"
-                   (Body.String "ping")
+                   (Body.of_string "ping")
                else Client.get ~sw client (base ^ path))
           in
           ( Httpg_base.Status.to_int resp.Response.status,
-            Body.read_all resp.Response.body,
+            read_body resp.Response.body,
             i )
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
@@ -165,7 +170,7 @@ let test_h2_dead_pooled_conn_redials_and_retries () =
             Transport.set_before_h2_round_trip transport (fun () -> ());
             Transport.close_pooled_h2_conn transport ~host:"127.0.0.1" ~port);
         let r2 = ok_resp (Client.get ~sw client (base ^ "/b")) in
-        let b2 = Body.read_all r2.Response.body in
+        let b2 = read_body r2.Response.body in
         ( Httpg_base.Status.to_int r2.Response.status,
           b2,
           (d1, Transport.dial_count transport),
@@ -264,7 +269,7 @@ let test_h2_pool_scales_out_when_saturated () =
             ok_resp (Client.get ~sw client (Printf.sprintf "%s/p%d" base i))
           in
           ( Httpg_base.Status.to_int resp.Response.status,
-            Body.read_all resp.Response.body )
+            read_body resp.Response.body )
         in
         let results = Eio.Fiber.List.map do_rt (List.init n (fun i -> i + 1)) in
         ( Transport.dial_count transport,

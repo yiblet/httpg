@@ -14,6 +14,11 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* ---- HttptestServer.server_get ---- *)
 let server_get () =
   let handler =
@@ -29,7 +34,7 @@ let server_get () =
             let c = Ts.client s in
             let resp = ok_resp (Client.get ~sw c (Ts.url s ^ "/foo")) in
             ( Httpg_base.Status.to_int resp.Response.status,
-              Body.read_all resp.Response.body )))
+              read_body resp.Response.body )))
   in
   Alcotest.(check int) "status 200" 200 status;
   Alcotest.(check string) "body is request path" "/foo" body
@@ -48,7 +53,7 @@ let server_tls () =
             let c = Ts.client s in
             let resp = ok_resp (Client.get ~sw c (Ts.url s)) in
             ( Httpg_base.Status.to_int resp.Response.status,
-              Body.read_all resp.Response.body,
+              read_body resp.Response.body,
               Ts.url s )))
   in
   Alcotest.(check bool)

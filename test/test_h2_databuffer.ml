@@ -10,7 +10,7 @@ module DB = Httpg_http2.H2_databuffer
 let repeat c n = String.make n c
 
 (* testDataBuffer: read the buffer fully at each read size and compare to
-   wantBytes. Reading stops at Read_empty. *)
+   wantBytes. Reading stops at [None] (Go's errReadEmpty). *)
 let check_data_buffer ~name (want : string) (setup : unit -> DB.t) =
   List.iter
     (fun read_size ->
@@ -19,12 +19,12 @@ let check_data_buffer ~name (want : string) (setup : unit -> DB.t) =
       let continue = ref true in
       while !continue do
         match DB.read_string b read_size with
-        | "" ->
+        | None -> continue := false (* empty buffer (Go's errReadEmpty) *)
+        | Some "" ->
             (* a zero-length read with data present can't happen for
-               read_size>0; an empty buffer raises Read_empty. *)
+               read_size>0. *)
             continue := false
-        | s -> Buffer.add_string got s
-        | exception DB.Read_empty -> continue := false
+        | Some s -> Buffer.add_string got s
       done;
       Alcotest.(check string)
         (Printf.sprintf "%s ReadSize=%d" name read_size)
@@ -82,24 +82,23 @@ let test_write_after_partial_read () =
   check_data_buffer ~name:"write_after_partial_read" "cdxyz" (fun () ->
       let b = DB.create () in
       Alcotest.(check int) "write abcd" 4 (DB.write_string b "abcd");
-      let p = DB.read_string b 2 in
+      let p = match DB.read_string b 2 with Some s -> s | None -> "" in
       Alcotest.(check string) "read ab" "ab" p;
       Alcotest.(check int) "write xyz" 3 (DB.write_string b "xyz");
       b)
 
-(* errReadEmpty on an empty buffer *)
+(* errReadEmpty on an empty buffer is now [None] *)
 let test_read_empty () =
+  let opt_str = Alcotest.option Alcotest.string in
   let b = DB.create () in
   Alcotest.(check int) "len 0" 0 (DB.len b);
-  Alcotest.check_raises "read empty" DB.Read_empty (fun () ->
-      ignore (DB.read_string b 4));
+  Alcotest.check opt_str "read empty -> None" None (DB.read_string b 4);
   (* and after draining all data *)
   ignore (DB.write_string b "hi");
   Alcotest.(check int) "len 2" 2 (DB.len b);
-  Alcotest.(check string) "drain" "hi" (DB.read_string b 8);
+  Alcotest.check opt_str "drain" (Some "hi") (DB.read_string b 8);
   Alcotest.(check int) "len 0 after drain" 0 (DB.len b);
-  Alcotest.check_raises "read empty again" DB.Read_empty (fun () ->
-      ignore (DB.read_string b 4))
+  Alcotest.check opt_str "read empty again -> None" None (DB.read_string b 4)
 
 let tests =
   [

@@ -5,7 +5,10 @@ let read ?request s =
   | Ok r -> r
   | Error e -> failwith (Httpg.Io.error_to_string e)
 
-let body_of (r : Httpg.Response.t) = Httpg.Body.read_all r.body
+let body_of (r : Httpg.Response.t) =
+  match Httpg.Body.read_all r.body with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Httpg.Body.error_to_string e)
 
 (* content_length is [int64 option]: [None] = unknown (Go's -1). *)
 let i64 (cl : int64 option) = Int64.to_string (Option.value ~default:(-1L) cl)
@@ -76,7 +79,7 @@ let location () =
       url = Uri.of_string "http://example.com/from";
       proto = Httpg_base.Protocol.Http11;
       header = Httpg.Header.create ();
-      body = Httpg.Body.Empty;
+      body = Httpg.Body.empty;
       content_length = Some 0L;
       transfer_encoding = [];
       close = false;

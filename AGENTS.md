@@ -1,89 +1,273 @@
-## What this is
+# AGENTS.md
 
-`httpg` is an **OCaml port of Go's `net/http`** — HTTP/1.0, HTTP/1.1, and HTTP/2 (over TLS via ALPN), server and client. The Go source is vendored read-only at **`go/src/net/http/`** (a git submodule) and is the **spec of record**: every `lib/` module corresponds to a Go source file, and the **observable behavior** (wire format, framing, protocol decisions, error conditions) must match Go's. HPACK lives at `go/src/vendor/golang.org/x/net/http2/hpack/`; HTTP/2 at `go/src/net/http/internal/http2/`.
+## Project
 
-**Prime directive: mirror Go, but present an API and code behavior that admits OCaml best practices.** Go is the reference for *what the code does on the wire and how it decides*, not a syntactic straitjacket for *how the OCaml expresses it*. Where an idiomatic OCaml shape is safer or clearer than a literal transliteration — and observable behavior stays faithful — prefer it: `option` instead of a zero-value sentinel (`""`/`0`/nil), `Result.t` for handleable errors instead of `(T, error)` tuples, persistent `Map`s and immutable builders instead of in-place mutation, smart constructors (e.g. `Cookie.make`) instead of zero-value structs, variants/GADTs where they tighten an invariant. These are the rule, not grudging exceptions; document each one (in the `.mli`, and under "Deliberate stand-ins" below if architectural), and never let one change what a peer Go client/server would observe. Function/type *names* still track Go for navigability unless the idiomatic shape renames them.
+`httpg` is an OCaml port of Go's `net/http`, covering HTTP/1.0, HTTP/1.1, and HTTP/2 over TLS/ALPN for both clients and servers.
 
-  **Rule of thumb: strongly typed > stringly typed — make illegal states unrepresentable.** The test is whether a value encodes a *state* or a *quantity/datum*. Convert the state: a *magic* number/string (`-1` = "unknown", `""` = "missing", a string that's really an enum or a parsed code) becomes `option`/a variant. Keep the primitive when it's a genuine value: free data (`request_uri`, header values, a filename) or a real quantity. `content_length` shows both at once — `-1` ("unknown") is a sentinel ⇒ becomes `int64 option`'s `None`, while `0` (genuinely empty body) is a real length ⇒ `Some 0L`. The win is precisely that `None` (unknown) and `Some 0L` (empty) stop being confusable.
+The vendored Go sources are the behavioral specification:
 
-## Non-negotiable conventions (read before editing)
+- `go/src/net/http/`
+- `go/src/net/http/internal/http2/`
+- `go/src/vendor/golang.org/x/net/http2/hpack/`
 
-- **Every `lib/` module has a hand-written `.mli`.** New modules must add one. Keep it in sync on every change.
-- **Mirror Go's data structures by default; reshape them when OCaml idiom wins (per the prime directive).** Go `map[K]V` → OCaml `Hashtbl` by default (not assoc lists), Go slices → lists/arrays as fits — *unless* an idiomatic shape is safer/clearer and stays behavior-faithful. Established reshapings: the public `Header.t` is a **persistent `Map`** with a functional API (`add`/`set`/`del : t -> … -> t`), so a value can be shared/forked freely — this is what lets `Response` be an immutable builder and handlers be `Request -> Response` (callers thread the returned value: `r.header <- Header.set r.header …`; `Transfer.read_transfer` returns the post-framing header in its `result`); zero-value-as-missing string fields become `option` (e.g. `Cookie.path`/`domain`, built via the `Cookie.make` smart constructor, normalized through `Httpg_base.Zero` — see the `convert-zero` skill). Mirror Go where `""`/`0` is a *legitimate value* (not a sentinel): a `content_length` of `0L` is a genuinely empty body, a header value of `""` is a present-but-empty header. A *magic* sentinel is the opposite — convert it (`content_length = -1` "unknown" → `int64 option` `None`; `Client.timeout` already `float option` for "no timeout"). The HTTP/2 `Api.Header` stays a mutable `Hashtbl` (decoupled); the ALPN shims convert at the boundary.
-- **Port Go's tests too, and treat them as the spec.** Each `test/test_<x>.ml` is ported from the matching `go/src/net/http/<x>_test.go`. **When a ported test fails, fix the implementation, not the test** — unless the failure is a genuine Go-specific porting artifact, which must be called out explicitly.
-- **Stream where Go streams.** Bodies are not buffered whole; reads/writes happen in bounded windows. Don't reintroduce whole-body `read_all` on hot paths.
-- **All failure is data; only bugs raise.** Every failure a caller could observe is a **typed error variant threaded through `('a, error) result`** (never a `string`, never a bare `exn`); the only things that `raise` are genuine programming bugs. See **"Exception philosophy"** below for the full rule — it is non-negotiable.
-- Cross-reference the matching `go/src/net/http/*.go` file (with line refs) when porting or fixing.
+Each OCaml module should remain easy to map back to its Go counterpart. Match Go's observable behavior: wire format, framing, protocol decisions, and error conditions.
 
-## Exception philosophy
+Use idiomatic OCaml where it improves safety or clarity without changing observable behavior.
 
-`httpg` models **all failure as data**. The dividing line is **bug-vs-failure**, not handleable-vs-unhandleable, pure-vs-effectful, or boundary-vs-internal. A *failure* is any outcome the program could encounter against valid code — a malformed message, a refused dial, a timeout, a closed connection, a protocol violation, EOF. A *bug* is a violated internal invariant that means the code itself is wrong. **Failures are typed `result`s. Only bugs raise.**
+## Core rules
 
-The only things that may `raise`:
-- `assert false` / `failwith "can't happen"` — an invariant the code guarantees was violated (i.e. a bug in *this* code).
-- `Invalid_argument` (`invalid_arg`) — a caller misused an API contract (e.g. `round_trip` with no `run` scope, write-after-close on a writer). This is the caller's bug, surfaced loudly.
-- `Eio.Cancel` and sibling fiber-control exceptions — owned by the switch/cancellation machinery; never caught and reclassified as an error, always allowed to propagate.
+1. **Behavior follows Go; representation follows OCaml.**
+   - Preserve Go-compatible behavior.
+   - Prefer `option`, variants, `result`, immutable data, and smart constructors over Go-style sentinels, nils, and mutation.
+   - Keep names close to Go where useful for source navigation.
+   - Document intentional API or architectural deviations in the relevant `.mli`. Add major deviations to **Deliberate deviations** below.
 
-Everything else is a typed error. This is **stricter than Go's `(T, error)`/`panic` split** and stricter than an earlier iteration of this port — it deliberately converts cases that previously raised:
+2. **Make illegal states unrepresentable.**
+   - Convert sentinel states into types.
+   - Example: Go `content_length = -1` means unknown, so use `None`; an actual zero-length body is `Some 0L`.
+   - Do not wrap genuine data or quantities merely for stylistic consistency.
 
-- **Per-module typed errors.** Each module that can fail owns a `type error = …` variant (carrying Go's message text where Go has it) plus `val error_to_string : error -> string`. No `string`-typed errors, no bare `exn` in a signature.
-- **Mid-stream failures are modeled, not raised.** A body that fails *after* its read boundary returned `Ok` (a malformed chunk found mid-pull, an over-long trailer) surfaces through the stream's own result-typed pull — not a `raise` from inside a `unit -> string option` thunk. The streaming contract still holds ("Stream where Go streams"); the pull just yields a `result`.
-- **Internal control signals are values, not carrier exceptions.** The HTTP/2 per-connection event loop, server shutdown, pipe close, and similar internal signals are typed values threaded to their handler, not exceptions raised in one place to be caught and reclassified in another.
+3. **Every public module has a handwritten `.mli`.**
+   - Add one for every new `lib/` module.
+   - Keep it synchronized with the implementation.
 
-Hard rules that follow:
-- **No re-raise bridges.** A lower layer must never `raise` a sentinel for an upper layer to `try`/`catch` and convert. If layer B can fail in a way layer A handles, B returns `result` and A embeds B's `error` in its own variant (e.g. `Transport.error` embeds `Net.error`/`Io.error`/`H2_transport.error`). A `try … with` that exists only to turn an exception back into an `Error` is a smell — push the `result` down to its source.
-- **`.mli` files declare `error` types, not `exception`s.** A new or edited `.mli` should not introduce an `exception` unless it is one of the three bug categories above. Failures are `type error` + `val f : … -> (_, error) result`.
-- When porting, a Go sentinel `error` value → an OCaml `error` variant; a Go `panic`/`recover` used for *control flow* (not a genuine bug) → still a typed `result` here, not an exception.
+4. **Port and preserve Go's tests.**
+   - `test/test_<x>.ml` should track the corresponding Go test file.
+   - When a ported test fails, fix the implementation.
+   - Change a test only for a genuine Go-specific artifact, and document why.
+
+5. **Stream where Go streams.**
+   - Do not buffer whole request or response bodies on hot paths.
+   - Use bounded reads and writes.
+   - Preserve incremental delivery and backpressure.
+
+6. **Failures are typed data.**
+   - Library code does not use exceptions for **error propagation**: a failure a
+     caller could observe is a typed `result`, never a raised exception.
+   - Fallible modules own a typed `error` variant and `error_to_string`.
+   - Public signatures use `('a, error) result`, never string errors or bare `exn`.
+   - Mid-stream failures must be represented in the stream, not raised.
+   - A purely **local** control-flow break (`raise Exit`/`Stop` to short-circuit
+     an internal `iter`/`fold` and return a value within the same function) is an
+     accepted OCaml idiom — it carries no error and never crosses a function
+     boundary. It is not error propagation and is allowed.
+
+## Exceptions and Eio boundaries
+
+Exceptions are allowed only where required by Eio interfaces:
+
+- Let `Eio.Cancel.Cancelled` propagate.
+- An implemented `Eio.Flow` source may raise `End_of_file` because the interface requires it.
+- Catch exceptions raised by `Eio.Buf_read` or other Eio APIs immediately at the boundary and convert them to typed results.
+
+Do not:
+
+- declare exceptions in `.mli` files;
+- raise private sentinels and catch them in another layer;
+- translate one of our own exceptions back into `Error`;
+- catch cancellation and reclassify it as a normal failure.
+
+`assert false` is allowed only for a compiler-required, genuinely unreachable branch. Prefer restructuring the type or match.
+
+## Data structure conventions
+
+Mirror Go by default, then deviate deliberately when OCaml gains a clear safety or API benefit.
+
+Established choices:
+
+- Public `Header.t` is a persistent map with functional `add`, `set`, and `del`.
+- HTTP/2 `Api.Header` remains a mutable `Hashtbl`; translate at the public/private boundary.
+- Missing string fields such as cookie path/domain use `option`.
+- `Cookie.make` is a smart constructor.
+- `Client.timeout` is `float option`.
+- Go maps normally become `Hashtbl` unless an established immutable representation is more appropriate.
+- Go slices become lists or arrays according to access patterns.
+
+## Architecture
+
+The repository contains four libraries.
+
+### `httpg_base` — `lib/base/`
+
+Foundation shared by the public HTTP implementation and HTTP/2 internals.
+
+Currently includes ports such as `Textproto`. It is public and re-exported.
+
+### `httpg_internal` — `lib/internal/`
+
+Private implementation details:
+
+- ports of Go `net/http/internal` packages;
+- unexported Go `net/http` implementation modules such as routing internals.
+
+These modules never appear under `Httpg.*`.
+
+### `httpg_http2` — `lib/internal/http2/`
+
+Private HTTP/2 stack:
+
+- HPACK;
+- frame, flow, pipe, buffering, scheduling, server, and transport modules;
+- decoupled `Api` types.
+
+This library may depend on `httpg_base` and `httpg_internal`, but must not depend on public `Request`, `Response`, `Body`, `Header`, or `Status` types.
+
+### `httpg` — `lib/`
+
+Public flat API exposed as `Httpg.*`.
+
+The public server and transport own the HTTP/1 ↔ HTTP/2 translation shims at the ALPN boundary.
+
+## Dependency order
+
+Keep dependencies moving upward to avoid OCaml module cycles:
+
+1. Pure data: method, status, header, cookie, sniff, time, URI/form values.
+2. Body and transfer framing.
+3. Request/response parsing and serialization.
+4. Networking and TLS.
+5. Client, server, routing, and transport.
+6. Private HTTP/2 stack plus boundary translation.
+
+Do not introduce a dependency from a lower layer onto a higher one to avoid a local refactor.
+
+## Concurrency and I/O
+
+Use Eio directly in direct style.
+
+- `Eio.Buf_read` / `Eio.Buf_write` correspond to Go `bufio`.
+- `Eio.Net` handles sockets.
+- TLS is driven through the sans-I/O `Tls.Engine`; do not introduce `tls-eio`.
+- Use `Eio.Switch` and `Eio.Time` for lifetime, cancellation, and deadlines.
+- Map goroutines/channels/condition variables to Eio fibers, streams, mutexes, and conditions.
+- HTTP/2 uses one event-loop fiber per connection.
+- The server may use `Eio.Domain_manager` to run accept loops across domains.
+
+Do not add an alternate monad or I/O functor abstraction.
+
+## Public endpoint model
+
+Handlers use the project API, not Go's `ResponseWriter` shape:
+
+```ocaml
+type handler =
+  sw:Eio.Switch.t ->
+  Body.t Request.t ->
+  Body.t Response.t
+```
+
+Responses are immutable builders. The serving loop writes and flushes them.
+
+Open response-bound resources under the request switch so they remain alive until transmission completes.
+
+A connection may be reused only after its body reaches EOF or is explicitly drained.
+
+Client cancellation and deadlines use the caller's switch and the configured Eio clock. There is no Go-style context parameter.
+
+## Deliberate deviations
+
+These are intentional and should not be “fixed” toward a literal Go API.
+
+### Forms and multipart
+
+Request records do not cache parsed form fields.
+
+- `Form` is a persistent multimap.
+- `Form.parse_query` parses query strings.
+- `Form.of_body` parses URL-encoded bodies.
+- Callers explicitly merge query and body values.
+- `Multipart.of_body` parses incrementally and may spill parts to switch-scoped temp files.
+- Custom unstructured part headers and consume-once wire-streaming part readers are non-goals.
+
+### Filesystem MIME detection
+
+Use the built-in extension table, then `Sniff` fallback. There is no full Go `mime` package port.
+
+### TLS
+
+Clients verify certificates by default through `ca-certs`. `~insecure` exists for self-signed test endpoints.
+
+### h2c
+
+Only HTTP/2 prior knowledge is supported.
+
+- No HTTP/1.1 `Upgrade: h2c`.
+- `?force_h2:true` sends plaintext connections directly to HTTP/2.
+- Over TLS, ALPN remains authoritative and the flag has no effect.
+
+### Handler API
+
+Handlers return immutable responses rather than mutating a Go-style `ResponseWriter`.
+
+## Source work
+
+When porting or correcting behavior:
+
+1. Locate the corresponding Go source and tests.
+2. Cross-reference the Go file and relevant line range in comments or the plan.
+3. Preserve externally visible behavior.
+4. Choose the smallest idiomatic OCaml representation that preserves that behavior.
+5. Update the `.mli`.
+6. Port or add tests.
+7. Run the focused test, then the full fast suite.
+
+Do not perform unrelated cleanup while fixing a behavioral discrepancy.
+
+## Plans and commits
+
+Substantial work uses an active `plans/*.plan.md` file organized as:
+
+- problem;
+- discovery;
+- target shape;
+- tickets;
+- execution record.
+
+Work one ticket at a time.
+
+For each ticket:
+
+1. confirm the existing tests are green;
+2. implement the ticket;
+3. add or port tests;
+4. verify the focused and relevant broader suites;
+5. update the plan's execution record;
+6. create one semantic commit.
+
+If the repository root contains `.jj`, use `jj`; otherwise use Git.
+
+Completed plans are removed. Their execution history remains in version control.
 
 ## Commands
 
 ```sh
-dune build                                   # build (warnings are errors)
-dune test                                    # run the suite, fast (skips `Slow tests; alias: dune runtest)
-HTTPG_SLOW=1 dune test                       # include the slow stress/timeout tests too
-dune exec test/test_httpg.exe -- test Header # run ONE suite (suite names below)
-dune exec test/test_httpg.exe -- test Header 3 # run one case within a suite
-dune exec httpg                             # run the demo (h1 + streaming + h2-over-TLS round trips)
-opam install . --deps-only --with-test       # install deps into the switch
+dune build
+dune test
+dune build @fmt --auto-promote 
+HTTPG_SLOW=1 dune test
+dune exec test/test_httpg.exe -- test Header
+dune exec test/test_httpg.exe -- test Header 3
+dune exec httpg
+opam install . --deps-only --with-test
 ```
 
-Tests are a single alcotest runner (`test/test_httpg.ml`) that aggregates one suite per module (`Header`, `Cookie`, `Transfer`, `Hpack`, `H2Frame`, `Fs`, `Httptest`, …). Eio-based tests run under `Eio_main.run` and are bounded by `Net.with_timeout` (an `Eio.Time` deadline) so a hang fails instead of blocking. A handful of slow stress/timeout tests are tagged `` `Slow `` (alcotest speed level) and skipped by default; `Test_harness.run_slow` (set by `HTTPG_SLOW=1`) feeds alcotest's `~quick_only` to include them. Tag new high-iteration or real-clock-wait tests `` `Slow `` rather than letting them bloat the default run.
+`dune build` treats warnings as errors.
 
-## Architecture
+The Alcotest runner is `test/test_httpg.ml`. Eio tests must have deadlines so hangs fail rather than block indefinitely.
 
-**Concurrency model:** written **directly against Eio** in direct style (no monad/IO-functor abstraction). `Eio.Buf_read.t`/`Eio.Buf_write.t` are the analogue of Go's `bufio.Reader`/`Writer`; `Eio.Net` for sockets; TLS is hand-driven over the sans-io `Tls.Engine` state machine (no `tls-eio`). Capabilities (`net`, `clock`, optional `domain_mgr`) are captured at construction and threaded via `Eio.Switch`; cancellation rides switch teardown (`Eio.Cancel`) rather than a context value. Go's goroutines + channels + `sync.Cond` map to Eio fibers + `Eio.Condition`/`Eio.Stream`/`Eio.Mutex` (most visible in `h2_server.ml`/`h2_transport.ml`, which use a single per-connection event-loop fiber). The accept loop can fan out across OS cores via an `Eio.Domain_manager` (one accept loop per domain on the shared listening socket).
+Mark tests as `` `Slow `` when they use high iteration counts or real clock waits. Keep the default suite fast.
 
-**Four libraries** (mirroring Go's package layout below/within `net/http`):
-- `lib/base/` → `httpg_base`, the **foundation layer** below net/http: ports of the Go stdlib packages `net/http` and `internal/http2` both depend on — currently `Textproto` (`textproto.CanonicalMIMEHeaderKey`). Re-exported publicly. Not "internal" — it sits beneath net/http. (Go's `context` is not ported: under Eio, deadlines/cancellation ride `Eio.Switch`/`Eio.Time` instead.)
-- `lib/internal/` → the private `httpg_internal` library: **the home for everything that is not part of `httpg`'s public API.** That is (a) ports of the *loose files* of Go's `net/http/internal` — `Chunked`, `Ascii`, `Common` (sentinel errors), `Sniff` (`internal/sniff.go`; the public `Httpg.Sniff` is a wrapper), `Httpcommon` (`internal/httpcommon`; the h1/h2-shared request/header encoding) — and (b) modules that live in Go's `net/http` package but are kept **unexported** there, so they shouldn't be exported here either: the routing internals `Pattern` (`pattern.go`), `Routing_tree` (`routingNode`), `Mapping` (`mapping.go`). Consumers in `lib/` reach them via `Httpg_internal.Pattern` (etc.), usually behind a local module alias; they never appear under `Httpg.*`. The rule is **"hidden from the public API," not "Go package == `net/http/internal`."** A module that Go *exports* (e.g. `http.TimeFormat`/`ParseTime` → `Http_time`, `url.Values` → `Form`, `http.DetectContentType` → `Sniff` wrapper) stays public in `lib/`.
-- `lib/internal/http2/` → the private `httpg_http2` library, mirroring Go's `net/http/internal/http2` subdirectory: the whole HTTP/2 stack (`Hpack*`, `H2`, `H2_frame`, `H2_flow`, `H2_pipe`, `H2_databuffer`, `H2_error`, `H2_writesched`, `H2_write`, `H2_server`, `H2_transport`) plus `Api` (Go's `api.go` decoupled types). It depends on `httpg_base`/`httpg_internal` but **never names** the public `Request`/`Response`/`Body`/`Header`/`Status` types.
-- `lib/` → the public `httpg` library. Flat modules, accessed as `Httpg.Header`, `Httpg.Server`, etc. It contains the **h1/h2 translation shims** (Go's `http2.go`): `Transport`/`Server` convert `Request.t`/`Response.t` ⇄ the `Httpg_http2.Api` types at the ALPN boundary.
+## Before finishing
 
-**Layering (bottom-up; this order avoids OCaml module cycles):**
-1. Pure data: `method`, `status`, `header`, `cookie`, `sniff`, `http_time`; URLs use the `uri` opam lib (`Uri.t`), not a `net/url` port. `form` is the `url.Values` multimap (a persistent `Map`, like `header`) **plus** urlencoded body parsing (`Form.of_body`, so it also touches `body`).
-2. Framing: `transfer` (content-length/chunked), `body`, `httpg_internal/chunked`.
-3. Message read/write: `request`, `response` (records with a **parametric `'body` field**), `io` (read/write over `Eio.Buf_read`/`Eio.Buf_write`).
-4. Net: `net` (TCP listen/accept/connect, server-side TLS + ALPN; client TLS verifies via `ca-certs` by default, with a `?insecure` opt-out).
-5. Endpoints: `server` (Handler/ServeMux), `client`, `transport` (keep-alive pool). **Handlers are axum-style** (deliberate deviation from Go's `ServeHTTP(ResponseWriter, *Request)`): `handler = sw:Eio.Switch.t -> Body.t Request.t -> Body.t Response.t` — build an immutable `Response` (the `Response.create () |> with_status … |> with_body …` builder) and return it; the serve loop flushes it. Streaming is a `Body.Stream` body the loop pulls and flushes per chunk (so incremental delivery is preserved); the framing is chosen from the body shape, honoring a declared `content_length` for known-length streams (file ranges). `~sw` is the request switch — a handler streaming from an opened resource (the file server's fd) opens it under `~sw`, released once the response is sent.
-6. HTTP/2: the whole stack lives in the private **`httpg_http2`** library (`lib/internal/http2/`), mirroring Go's `net/http/internal/http2`. Like Go's package it is **decoupled** from net/http: it works in `Httpg_http2.Api` types (`api.go` — `client_request`/`server_request`/`client_response`/`response_writer`, `Header = Hashtbl`, an `io.ReadCloser`-shaped `Body`) and never names `Request`/`Response`/`Body`/`Header`/`Status`. The public `Server`/`Transport` hold the **translation shims** (Go's `http2.go`: `http2RoundTrip` / `http2Handler.ServeHTTP`) that convert `Request.t`/`Response.t` ⇄ `Api` at the ALPN boundary, with h1 fallback. (`Status.status_text` for a response is applied by the client shim, as in Go.)
+Verify all of the following:
 
-**Bodies & lifecycle:** `Body.t = Empty | String of string | Stream of (unit -> string option)`. Read paths return a `Stream`; the connection is reused only after the body reaches EOF / `Body.drain`. There is no `?context` parameter (Go's `context` is dropped in this port): per-request cancellation is expressed via the caller's `~sw`, and `Client`'s overall `?timeout` is enforced as an `Eio.Time` deadline (`Net.with_timeout`) when a `clock` was captured.
+- observable behavior still matches Go;
+- no whole-body buffering was added to a streaming path;
+- errors are typed and no new internal exception bridge exists;
+- every changed public module has an updated `.mli`;
+- relevant Go tests are represented;
+- focused tests pass;
+- `dune build` and the fast test suite pass;
+- the active plan and commit history reflect the completed ticket.
 
-**Testing helpers:** `Httptest.Server` (ephemeral loopback server, http + TLS, with a preconfigured client) — used by `fs` and server/client tests as Go uses `net/http/httptest`. (Go's `ResponseRecorder` is dropped: with `Request -> Response` handlers a handler is tested by calling it directly and inspecting the returned `Response.t`.)
-
-## Working style in this repo
-
-Substantial features are built via **ticketed plan files** in `plans/*.plan.md` (problem → discovery → target shape → tickets). Work proceeds **one ticket at a time, one `jj commit` per ticket**, each leaving the build green with ported tests and an updated execution record in the plan. Completed plans are removed (their records persist in git history); the active plan stays under `plans/`.
-
-## Deliberate stand-ins (affect current behavior)
-
-- **Form/multipart parsing is exposed as composable body parsers, not Request cache fields** (deliberate deviation from Go's Request-mutating `ParseForm`/`ParseMultipartForm`): `Request.t` has no `form`/`post_form`/`multipart_form`. `Form` merges Go's `url.Values` and form parsing into one module — a **persistent `Map`** multimap (`Form.t`, functional `add`/`set`/`del`/`merge`, like `Header`) with `Form.parse_query` (query strings) and `Form.of_body : Body.t -> (Form.t, error) result` (urlencoded body); query and urlencoded body share one type because they're the same wire format. `Multipart.of_body : sw:_ -> ?max_memory:int -> boundary:string -> Body.t -> (Multipart.part, error) result Seq.t` parses the body directly. They chain (`body |> Gzip.decompress |> Form.of_body`). The merged Go `Form` (query+body) is the caller's own `Form.merge` of the two halves — no source-blind magic. Multipart is incremental: each forced `Seq` element settles the next part to memory or — past `max_memory` (default 32 MB) — a tempfile registered on `~sw` (unlinked on release); per-element `Error` gives partial delivery. A `Multipart.part_body` is abstract with `to_string`/`to_body`. Backed by the sans-io `multipart_form` opam lib (Go hand-rolls `mime/multipart`); unstructured custom part headers are dropped, and true per-part *wire* streaming (consume-once readers) is a non-goal.
-- MIME-by-extension in `fs` is a small built-in table + `Sniff` fallback (no `mime` package port).
-- TLS client verifies certs by default (`ca-certs`); use `~insecure` for self-signed (e.g. the test server).
-- **h2c (HTTP/2 cleartext) is a deliberate deviation, not a port:** Go's `net/http` has no h2c (it lives in `golang.org/x/net/http2/h2c`, outside the vendored spec). We support only the **prior-knowledge** form (RFC 9113 §3.3), not the HTTP/1.1 `Upgrade: h2c` dance. Server: `Server.create`/`listen_and_serve`/`_started ?force_h2:true` makes a *plaintext* listener hand each connection straight to `H2_server.serve` (which reads/validates the client preface itself) — no ALPN, no `Upgrade:`. Client: `Client.get`/`head`/`post`/`do_`/`do_one ?force_h2:true` (and `Transport.round_trip ?force_h2`) speak h2c over an `http://` URL. The flag is a no-op over TLS, where ALPN selects the protocol.
-
-Remaining gaps and explicit non-goals (HTTP/3, proxies, cookie jar, server push, …) are tracked in **`TODO.md`**.
-
-## VCS
-
-IMPORTANT: this repo may use either only git or git w/ jj colocation. If the root repo has a .jj file please use jj. otherwise assume it's a git repo.
+Remaining features and non-goals are tracked in `TODO.md`.

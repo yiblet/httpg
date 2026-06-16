@@ -7,6 +7,12 @@
 open Httpg_http2
 module F = H2_frame
 
+(* The frame writers thread their build invariant as [(unit, H2_error.t) result]
+   (ticket 013); the raw test server uses valid values, so unwrap [Ok]. *)
+let ok : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
+
 let mk_request ~meth ~path ?(body = Api.Body.Empty) () : Api.client_request =
   let content_length =
     match body with
@@ -351,7 +357,7 @@ let encode_block (fields : (string * string) list) =
 let malformed_raw_server r w =
   let preface = Eio.Buf_read.take H2.client_preface_len r in
   if preface <> H2.client_preface then failwith "bad preface";
-  F.write_settings w [];
+  ok (F.write_settings w []);
   Eio.Buf_write.flush w;
   let stream_id = ref 0 in
   (try
@@ -359,7 +365,7 @@ let malformed_raw_server r w =
        match F.read_frame r with
        | Ok (F.Settings (fh, _)) ->
            if fh.flags land 0x1 = 0 then (
-             F.write_settings_ack w;
+             ok (F.write_settings_ack w);
              Eio.Buf_write.flush w)
        | Ok (F.Headers (fh, _)) -> stream_id := fh.stream_id
        | Ok _ -> ()
@@ -369,8 +375,9 @@ let malformed_raw_server r w =
   if !stream_id <> 0 then (
     (* HEADERS with END_HEADERS|END_STREAM but no :status pseudo-header. *)
     let block = encode_block [ ("content-type", "text/plain") ] in
-    F.write_headers w ~stream_id:!stream_id ~end_stream:true ~end_headers:true
-      block;
+    ok
+      (F.write_headers w ~stream_id:!stream_id ~end_stream:true ~end_headers:true
+         block);
     Eio.Buf_write.flush w);
   Eio.Fiber.await_cancel ()
 
@@ -408,9 +415,36 @@ let test_malformed_response_missing_status () =
        with _ -> ());
       Eio.Fiber.await_cancel ())
 
+(* ---- Ticket 002: a request rejected by httpcommon.encode_headers (an invalid
+   header value, here a control byte) surfaces as the typed
+   [Error (Request_invalid _)] arm of round_trip — NOT a raised exception.
+   Validation runs up-front, before anything is written, so the server never
+   sees the request; we drive it against the normal S.serve harness and assert
+   the client got the typed error. *)
+let test_invalid_request_header_is_error () =
+  let handler (rw : H2_server.response_writer) (_req : Api.server_request) =
+    rw.rw_write "ok";
+    rw.rw_flush ()
+  in
+  let client cc =
+    let req = mk_request ~meth:"GET" ~path:"/" () in
+    (* a CTL byte in a header value is rejected by validate_headers. *)
+    Api.Header.add req.creq_header "X-Bad" "bad\x01value";
+    match H2_transport.round_trip cc req with
+    | Ok _ -> `Ok
+    | Error (H2_transport.Request_invalid _) -> `Invalid
+    | Error _ -> `Other
+  in
+  let outcome = run ~handler client in
+  Alcotest.(check bool)
+    "invalid request header -> Error (Request_invalid _)" true
+    (outcome = `Invalid)
+
 let tests =
   [
     Alcotest.test_case "get" `Quick test_get;
+    Alcotest.test_case "invalid_request_header_is_error" `Quick
+      test_invalid_request_header_is_error;
     Alcotest.test_case "closed_conn_unusable" `Quick test_closed_conn_unusable;
     Alcotest.test_case "malformed_response_missing_status" `Quick
       test_malformed_response_missing_status;

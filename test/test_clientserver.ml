@@ -14,6 +14,11 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* Start a server with [handler], run [client ~net ~sw ~clock ~port] against it,
    stop it. The accept loop runs in a fiber under the env switch. *)
 let with_server handler client =
@@ -35,7 +40,7 @@ let hello_handler =
 (* Echo the request body back in the response. *)
 let echo_handler =
  fun ~sw:_ r ->
-  Response.create () |> Response.with_body_string (Body.read_all r.Request.body)
+  Response.create () |> Response.with_body_string (read_body r.Request.body)
 
 (* ---- Clientserver.get_roundtrip ---- *)
 (* Server returns 200 + "hello"; Client.get reads status 200 and body "hello". *)
@@ -44,7 +49,7 @@ let get_roundtrip () =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = ok_resp (Client.get ~sw (Client.create ~net ~clock ()) url) in
     ( Httpg_base.Status.to_int resp.Response.status,
-      Body.read_all resp.Response.body )
+      read_body resp.Response.body )
   in
   let status, body = with_server hello_handler client in
   Alcotest.(check int) "status 200" 200 status;
@@ -62,7 +67,7 @@ let post_body () =
            url ~content_type:"text/plain" (Body.of_string payload))
     in
     ( Httpg_base.Status.to_int resp.Response.status,
-      Body.read_all resp.Response.body )
+      read_body resp.Response.body )
   in
   let status, body = with_server echo_handler client in
   Alcotest.(check int) "status 200" 200 status;
@@ -77,10 +82,10 @@ let keepalive_reuse () =
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp1 = ok_resp (Client.get ~sw c url) in
-    let b1 = Body.read_all resp1.Response.body in
+    let b1 = read_body resp1.Response.body in
     let dials_after_1 = Transport.dial_count transport in
     let resp2 = ok_resp (Client.get ~sw c url) in
-    let b2 = Body.read_all resp2.Response.body in
+    let b2 = read_body resp2.Response.body in
     let dials_after_2 = Transport.dial_count transport in
     (b1, b2, dials_after_1, dials_after_2)
   in
@@ -121,7 +126,7 @@ let tls_handshake_failure_is_typed () =
           let insecure = Client.create ~net ~clock ~insecure:true () in
           let resp = ok_resp (Client.get ~sw insecure url) in
           ( Httpg_base.Status.to_int resp.Response.status,
-            Body.read_all resp.Response.body )))
+            read_body resp.Response.body )))
   |> fun (code, body) ->
   Alcotest.(check int) "insecure status" 200 code;
   Alcotest.(check string) "insecure body" "hello" body

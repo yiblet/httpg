@@ -6,8 +6,17 @@
    - the :path / NewServerRequest path is validated by the cheap
      [valid_pseudo_path] / leading-char check rather than url.ParseRequestURI. *)
 
-exception Request_header_list_size
-exception Error of string
+(* Handleable request-validation failures from [encode_headers] (Go's
+   errors.New / fmt.Errorf returns from EncodeHeaders, and ErrRequestHeaderListSize).
+   [Invalid_request] carries Go's message text verbatim. *)
+type error =
+  | Invalid_request of string
+  | Header_list_size  (* Go ErrRequestHeaderListSize. *)
+
+let error_to_string = function
+  | Invalid_request s -> s
+  | Header_list_size ->
+      "request header list larger than peer's advertised limit"
 
 type request = {
   url_scheme : string;
@@ -127,9 +136,12 @@ let check_conn_headers h =
         && not (Ascii.equal_fold v0 "keep-alive")
     | _ -> true
   in
-  if bad_upgrade then raise (Error "invalid Upgrade request header");
-  if bad_te then raise (Error "invalid Transfer-Encoding request header");
-  if bad_conn then raise (Error "invalid Connection request header")
+  if bad_upgrade then Error (Invalid_request "invalid Upgrade request header")
+  else if bad_te then
+    Error (Invalid_request "invalid Transfer-Encoding request header")
+  else if bad_conn then
+    Error (Invalid_request "invalid Connection request header")
+  else Ok ()
 
 (* Go validateHeaders: returns "" when ok, else a short description. *)
 let validate_headers hdrs =
@@ -145,15 +157,19 @@ let validate_headers hdrs =
 
 let comma_separated_trailers ~canonical trailer =
   let keys = Hashtbl.fold (fun k _ acc -> canonical k :: acc) trailer [] in
-  List.iter
-    (function
-      | ("Transfer-Encoding" | "Trailer" | "Content-Length") as k ->
-          raise (Error (Printf.sprintf "invalid Trailer key %S" k))
-      | _ -> ())
-    keys;
-  match keys with
-  | [] -> ""
-  | _ -> String.concat "," (List.sort String.compare keys)
+  let bad =
+    List.find_opt
+      (function
+        | "Transfer-Encoding" | "Trailer" | "Content-Length" -> true
+        | _ -> false)
+      keys
+  in
+  match bad with
+  | Some k -> Error (Invalid_request (Printf.sprintf "invalid Trailer key %S" k))
+  | None -> (
+      match keys with
+      | [] -> Ok ""
+      | _ -> Ok (String.concat "," (List.sort String.compare keys)))
 
 (* Go's per-Cookie-header splitting on ';' (8.1.2.5). *)
 let emit_cookie f v =
@@ -171,24 +187,26 @@ let emit_cookie f v =
   in
   go v
 
+let ( let* ) = Result.bind
+
 let encode_headers ~canonical param headerf =
   let req = param.request in
-  check_conn_headers req.header;
+  let* () = check_conn_headers req.header in
   let host = if req.host <> "" then req.host else req.url_host in
   let protocol =
     match hget req.header ":protocol" with v :: _ -> v | [] -> ""
   in
-  let is_normal_connect =
-    if req.meth = Httpg_base.Method.Connect && protocol = "" then true
+  let* is_normal_connect =
+    if req.meth = Httpg_base.Method.Connect && protocol = "" then Ok true
     else if protocol <> "" && req.meth <> Httpg_base.Method.Connect then
-      raise (Error "invalid :protocol header in non-CONNECT request")
-    else false
+      Error (Invalid_request "invalid :protocol header in non-CONNECT request")
+    else Ok false
   in
-  let path =
-    if is_normal_connect then ""
+  let* path =
+    if is_normal_connect then Ok ""
     else begin
       let p = req.request_uri in
-      if valid_pseudo_path p then p
+      if valid_pseudo_path p then Ok p
       else begin
         let prefix = req.url_scheme ^ "://" ^ host in
         let plen = String.length prefix in
@@ -197,21 +215,29 @@ let encode_headers ~canonical param headerf =
             String.sub p plen (String.length p - plen)
           else p
         in
-        if valid_pseudo_path p2 then p2
+        if valid_pseudo_path p2 then Ok p2
         else if req.url_opaque <> "" then
-          raise
-            (Error
+          Error
+            (Invalid_request
                (Printf.sprintf "invalid request :path %S from URL.Opaque = %S" p
                   req.url_opaque))
-        else raise (Error (Printf.sprintf "invalid request :path %S" p))
+        else Error (Invalid_request (Printf.sprintf "invalid request :path %S" p))
       end
     end
   in
-  (let e = validate_headers req.header in
-   if e <> "" then raise (Error (Printf.sprintf "invalid HTTP header %s" e)));
-  (let e = validate_headers req.trailer in
-   if e <> "" then raise (Error (Printf.sprintf "invalid HTTP trailer %s" e)));
-  let trailers = comma_separated_trailers ~canonical req.trailer in
+  let* () =
+    let e = validate_headers req.header in
+    if e <> "" then
+      Error (Invalid_request (Printf.sprintf "invalid HTTP header %s" e))
+    else Ok ()
+  in
+  let* () =
+    let e = validate_headers req.trailer in
+    if e <> "" then
+      Error (Invalid_request (Printf.sprintf "invalid HTTP trailer %s" e))
+    else Ok ()
+  in
+  let* trailers = comma_separated_trailers ~canonical req.trailer in
   let enumerate f =
     f ":authority" host;
     let m =
@@ -252,19 +278,23 @@ let encode_headers ~canonical param headerf =
     if param.add_gzip_header then f "accept-encoding" "gzip";
     if not !did_ua then f "user-agent" param.default_user_agent
   in
-  if param.peer_max_header_list_size > 0L then begin
-    let hl_size = ref 0L in
-    enumerate (fun name value ->
-        hl_size :=
-          Int64.add !hl_size
-            (Int64.of_int (String.length name + String.length value + 32)));
-    if !hl_size > param.peer_max_header_list_size then
-      raise Request_header_list_size
-  end;
+  let* () =
+    if param.peer_max_header_list_size > 0L then begin
+      let hl_size = ref 0L in
+      enumerate (fun name value ->
+          hl_size :=
+            Int64.add !hl_size
+              (Int64.of_int (String.length name + String.length value + 32)));
+      if !hl_size > param.peer_max_header_list_size then Error Header_list_size
+      else Ok ()
+    end
+    else Ok ()
+  in
   enumerate (fun name value ->
       let name, ascii = lower_header name in
       if ascii then headerf name value);
-  { has_body = req.actual_content_length <> 0L; has_trailers = trailers <> "" }
+  Ok
+    { has_body = req.actual_content_length <> 0L; has_trailers = trailers <> "" }
 
 let header_values_contains_token vv token =
   List.exists

@@ -176,14 +176,27 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   (* Resolve the body into a leading chunk (for sniffing + exact length) and an
      optional continuation. A String/Empty body is fully known; a Stream body is
      unknown-length and streamed (we probe one chunk up front for sniffing). *)
-  let leading, tail_stream =
-    match resp.Response.body with
-    | Body.Empty -> ("", None)
-    | Body.String s -> (s, None)
-    | Body.Stream next -> (
-        match next () with Some c -> (c, Some next) | None -> ("", None))
+  (* Resolve the body into a leading chunk (for sniffing) and a continuation
+     stream for the rest. The "known length vs streaming" framing decision is
+     [content_length] ([Some _] = exact Content-Length, raw bytes; [None] =
+     chunked/close-delimited), independent of how many chunks the body yields.
+     The serve loop must sniff the leading bytes, so we force the first element
+     (matching the old code, which forced the first [Stream] chunk for
+     sniffing); the rest stays lazy via the continuation. *)
+  let pull = Body.to_stream resp.Response.body in
+  let leading_error = ref false in
+  let leading, body_present =
+    match pull () with
+    | Some (Ok c) -> (c, true)
+    | Some (Error _) ->
+        leading_error := true;
+        ("", true)
+    | None -> ("", false)
   in
-  let streaming = Option.is_some tail_stream in
+  (* [streaming] = the response is delivered chunk-by-chunk through the loop
+     (true whenever a body was present); an empty body short-circuits. *)
+  let streaming = body_present in
+  let tail_stream = if streaming then Some pull else None in
   (* Content-Type sniff from the first <=512 bytes when unset. *)
   let header =
     if
@@ -267,7 +280,11 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
   Header.write_subset header out ~exclude:excluded_headers;
   Buffer.add_string out "\r\n";
   Eio.Buf_write.string w (Buffer.contents out);
-  (* Body. *)
+  (* Body. A mid-stream [Error] element (a body whose source failed while being
+     produced, e.g. a file read error) aborts the response: we stop writing and
+     force the connection closed, the faithful analogue of the old code's raise
+     propagating out of the write loop. *)
+  let aborted = ref !leading_error in
   if is_head then ()
   else if not streaming then begin
     if String.length leading > 0 then Eio.Buf_write.string w leading
@@ -285,20 +302,21 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
     | Some next ->
         let rec loop () =
           match next () with
-          | Some c ->
+          | Some (Ok c) ->
               write_chunk c;
               loop ()
+          | Some (Error _) -> aborted := true
           | None -> ()
         in
         loop ()
     | None -> ());
-    if chunking then begin
+    if (not !aborted) && chunking then begin
       Transfer.chunked_writer_close w;
       Eio.Buf_write.string w "\r\n"
     end
   end;
   Eio.Buf_write.flush w;
-  keep_alive
+  keep_alive && not !aborted
 
 (* maxPostHandlerReadBytes (server.go): the max number of unread Request.Body
    bytes the server discards to keep a connection alive; past this it closes. *)
@@ -310,8 +328,9 @@ let max_post_handler_read_bytes = 256 * 1024
 let drain_request_body (r : Request.t) : bool =
   try
     match Body.drain ~limit:max_post_handler_read_bytes r.Request.body with
-    | `Drained -> true
-    | `Too_big -> false
+    | Ok `Drained -> true
+    | Ok `Too_big -> false
+    | Error _ -> false
   with _ -> false
 
 (* ---- Server ---- *)
@@ -389,8 +408,11 @@ let create ~net ?clock ?domain_mgr ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
     close_listener = (fun () -> ());
   }
 
-(* The sentinel used to cancel the accept switch on {!close}; swallowed by
-   {!serve}/{!serve_tls} so a clean shutdown returns normally. *)
+(* Fiber-control cancellation signal (a sibling to [Eio.Cancel]), NOT a modeled
+   error: {!close} threads it through [Eio.Switch.fail] to cancel the accept
+   switches, and {!serve}/{!serve_tls} swallow it so a clean shutdown returns
+   normally. It rides [Eio.Switch.fail], which requires an [exn], so it stays an
+   [exception] under the philosophy's fiber-control exemption. *)
 exception Shutdown
 
 (* Minimal Server.Close: close the listener (free the port, refuse new
@@ -442,8 +464,9 @@ let write_read_error_response w (e : Io.error) : unit =
   | Io.Protocol _ | Io.Missing_host | Io.Transfer _ | Io.Trailer_too_large
   | Io.Malformed_host | Io.Response_header_too_large ->
       (* Invalid header, missing/malformed Host -> 400 Bad Request
-         (server.go:1045-1062). Trailer_too_large is normally a mid-stream raise;
-         Response_header_too_large is client-side and never reaches here. *)
+         (server.go:1045-1062). Trailer_too_large normally surfaces as a
+         mid-stream Body.error, not a boundary error; Response_header_too_large
+         is client-side and never reaches here. *)
       let public_err = "400 Bad Request" in
       write
         (Printf.sprintf "HTTP/1.1 %s%s%s" public_err error_headers public_err)
@@ -500,9 +523,10 @@ let with_deadline clock ~secs op =
    ReadTimeout / wholeReqDeadline). On the deadline the pull yields EOF so the
    read terminates. A zero [secs] / no clock leaves the body untouched. *)
 let wrap_read_timeout_body clock ~secs (r : Request.t) : unit =
-  match (clock, r.Request.body) with
-  | Some clock, Body.Stream inner when secs > 0. ->
+  match clock with
+  | Some clock when secs > 0. ->
       let deadline = Eio.Time.now clock +. secs in
+      let inner = Body.to_stream r.Request.body in
       let next () =
         Eio.Fiber.first
           (fun () ->
@@ -510,28 +534,30 @@ let wrap_read_timeout_body clock ~secs (r : Request.t) : unit =
             None)
           inner
       in
-      r.Request.body <- Body.Stream next
+      r.Request.body <- Body.of_stream_result next
   | _ -> ()
 
 (* Go's expectContinueReader (server.go:964-983): the FIRST body read replies
    "HTTP/1.1 100 Continue\r\n\r\n" once, then proceeds. Lazy so a client that
    withholds the body until it sees 100 unblocks. *)
 let wrap_expect_continue_body w (r : Request.t) : unit =
-  match r.Request.body with
-  | Body.Empty | Body.String _ -> ()
-  | Body.Stream inner ->
-      let wrote = ref false in
-      let next () =
-        if not !wrote then begin
-          wrote := true;
-          try
-            Eio.Buf_write.string w "HTTP/1.1 100 Continue\r\n\r\n";
-            Eio.Buf_write.flush w
-          with _ -> ()
-        end;
-        inner ()
-      in
-      r.Request.body <- Body.Stream next
+  (* Wrap unconditionally: the 100 is sent only on the first actual pull, so a
+     body that is never read (or is empty and pulls straight to EOF only when
+     read) sends nothing until the handler asks for bytes — matching Go, which
+     wraps the (present) request body and emits 100 on first Read. *)
+  let inner = Body.to_stream r.Request.body in
+  let wrote = ref false in
+  let next () =
+    if not !wrote then begin
+      wrote := true;
+      try
+        Eio.Buf_write.string w "HTTP/1.1 100 Continue\r\n\r\n";
+        Eio.Buf_write.flush w
+      with _ -> ()
+    end;
+    inner ()
+  in
+  r.Request.body <- Body.of_stream_result next
 
 (* The per-connection keep-alive serve loop over buffered channels (used by the
    plaintext and HTTP/1.x-over-TLS paths). Reads a request, dispatches, writes
@@ -603,9 +629,9 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
 
 let body_of_api_body (b : Httpg_http2.Api.Body.t) : Body.t =
   match b with
-  | Httpg_http2.Api.Body.Empty -> Body.Empty
-  | Httpg_http2.Api.Body.String s -> Body.String s
-  | Httpg_http2.Api.Body.Stream f -> Body.Stream f
+  | Httpg_http2.Api.Body.Empty -> Body.empty
+  | Httpg_http2.Api.Body.String s -> Body.of_string s
+  | Httpg_http2.Api.Body.Stream f -> Body.of_stream f
 
 (* The decoupled Api.header (mutable Hashtbl) -> the public Header (Map). *)
 let header_of_api_header (t : Httpg_http2.Api.header) : Header.t =
@@ -656,19 +682,17 @@ let h2_handler_of_handler (handler : handler) : Httpg_http2.H2_server.handler =
           List.iter (fun v -> Httpg_http2.Api.Header.add h2h k v) vs)
         (Header.to_list resp.Response.header);
       h2w.rw_write_header (Httpg_base.Status.to_int resp.Response.status);
-      (match resp.Response.body with
-      | Body.Empty -> ()
-      | Body.String s -> h2w.rw_write s
-      | Body.Stream next ->
-          let rec loop () =
-            match next () with
-            | Some c ->
-                h2w.rw_write c;
-                h2w.rw_flush ();
-                loop ()
-            | None -> ()
-          in
-          loop ());
+      (let next = Body.to_stream resp.Response.body in
+       let rec loop () =
+         match next () with
+         | Some (Ok c) ->
+             h2w.rw_write c;
+             h2w.rw_flush ();
+             loop ()
+         | Some (Error _) -> () (* mid-stream framing error: stop the body *)
+         | None -> ()
+       in
+       loop ());
       h2w.rw_flush ())
 
 (* Serve one accepted plaintext connection. With [~force_h2] the connection is

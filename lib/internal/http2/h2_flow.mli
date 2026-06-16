@@ -14,12 +14,12 @@ val create_inflow : unit -> inflow
 val inflow_init : inflow -> int32 -> unit
 (** [inflow_init f n] sets the initial window. Mirrors [inflow.init]. *)
 
-val inflow_add : inflow -> int -> int32
+val inflow_add : inflow -> int -> (int32, H2_error.err_code) result
 (** [inflow_add f n] adds [n] bytes to the window, returning the number of bytes
-    to send in a WINDOW_UPDATE frame (0 when buffered). Mirrors [inflow.add].
-    Raises [Invalid_argument] on a negative update (Go panics — a programming
-    bug). Raises [H2_error.Connection_error H2_error.FlowControlError] if the
-    window would exceed 2^31-1 (Go panics there too, but we surface a modeled
+    to send in a WINDOW_UPDATE frame (0 when buffered) as [Ok]. Mirrors
+    [inflow.add]. Raises [Invalid_argument] on a negative update (Go panics — a
+    programming bug). Returns [Error H2_error.FlowControlError] if the window
+    would exceed 2^31-1 (Go panics there too, but we surface a modeled
     connection error so the serve loop converts it to a [FLOW_CONTROL_ERROR]
     GOAWAY rather than crashing the connection fiber). *)
 

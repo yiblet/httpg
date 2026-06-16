@@ -7,14 +7,6 @@ let error_to_string = function
   | Invalid_huffman -> "invalid Huffman-coded data"
   | String_too_long -> "hpack: string too long"
 
-(* Internal sentinel used by the decoder loop to bail out to the [result]
-   boundary. Not exposed; mapped to [Error Invalid_huffman] by {!decode}. *)
-exception Invalid_huffman_sentinel
-
-(* Go's huffmanDecode returns ErrStringLength once [maxLen] output bytes are
-   produced (huffman.go:67-68,:87-88); mapped to [Error String_too_long]. *)
-exception String_too_long_sentinel
-
 (* Go: var huffmanCodes = [256]uint32{...} (tables.go) *)
 let huffman_codes =
   [|
@@ -586,69 +578,78 @@ let build_root_huffman_node () =
 let root_huffman_node = lazy (build_root_huffman_node ())
 
 (* Go: huffmanDecode. If [max_len > 0], decoding errors with
-   [String_too_long_sentinel] the moment the output reaches [max_len] bytes
+   [String_too_long] the moment the output reaches [max_len] bytes
    (huffman.go:67-68,:87-88) -- i.e. it never allocates more than [max_len]
    output bytes, so an oversized compressed string cannot force a large
-   transient allocation. [max_len = 0] means unlimited. Raises the internal
-   [Invalid_huffman_sentinel] sentinel on invalid data; {!decode} maps both to a
-   [result]. *)
-let huffman_decode ?(max_len = 0) (v : string) : string =
+   transient allocation. [max_len = 0] means unlimited. Returns
+   [Error Invalid_huffman] on invalid data. The decode error is threaded as a
+   [result] (recorded in [err] and surfaced after the local [raise Exit]
+   loop-break, which is pure internal control flow, not error propagation). *)
+let decode ?(max_len = 0) (v : string) : (string, error) result =
   let root = Lazy.force root_huffman_node in
   let buf = Buffer.create (String.length v) in
+  (* [err] records the decode error to surface; [Fail] bails out of the whole
+     decode with [err] set; [Padding] is a pure loop-break for the
+     trailing-bits loop (leaving [err = None]) after which validation still
+     runs. Neither exception carries the error — it rides [err]. *)
+  let exception Fail in
+  let exception Padding in
+  let err = ref None in
+  let fail e =
+    err := Some e;
+    raise Fail
+  in
   let emit sym =
-    if max_len <> 0 && Buffer.length buf = max_len then
-      raise String_too_long_sentinel;
+    if max_len <> 0 && Buffer.length buf = max_len then fail String_too_long;
     Buffer.add_char buf (Char.chr sym)
   in
   let n = ref root in
   (* cur is the bit buffer; cbits valid low bits; sbits = symbol-prefix bits. *)
   let cur = ref 0 and cbits = ref 0 and sbits = ref 0 in
-  String.iter
-    (fun ch ->
-      let b = Char.code ch in
-      cur := (!cur lsl 8) lor b;
-      cbits := !cbits + 8;
-      sbits := !sbits + 8;
-      while !cbits >= 8 do
-        let idx = (!cur lsr (!cbits - 8)) land 0xff in
-        (match !n.children.(idx) with
-        | None -> raise Invalid_huffman_sentinel
-        | Some child -> n := child);
-        if is_leaf !n then begin
+  (try
+     String.iter
+       (fun ch ->
+         let b = Char.code ch in
+         cur := (!cur lsl 8) lor b;
+         cbits := !cbits + 8;
+         sbits := !sbits + 8;
+         while !cbits >= 8 do
+           (match !n.children.((!cur lsr (!cbits - 8)) land 0xff) with
+           | None -> fail Invalid_huffman
+           | Some child -> n := child);
+           if is_leaf !n then begin
+             emit !n.sym;
+             cbits := !cbits - !n.code_len;
+             n := root;
+             sbits := !cbits
+           end
+           else cbits := !cbits - 8
+         done)
+       v;
+     (try
+        while !cbits > 0 do
+          let idx = (!cur lsl (8 - !cbits)) land 0xff in
+          (match !n.children.(idx) with
+          | None -> fail Invalid_huffman
+          | Some child -> n := child);
+          (* A leaf whose code is longer than the remaining bits is padding;
+             stop the loop (pure loop-break — validation below still runs). *)
+          if (not (is_leaf !n)) || !n.code_len > !cbits then raise Padding;
           emit !n.sym;
           cbits := !cbits - !n.code_len;
           n := root;
           sbits := !cbits
-        end
-        else cbits := !cbits - 8
-      done)
-    v;
-  (try
-     while !cbits > 0 do
-       let idx = (!cur lsl (8 - !cbits)) land 0xff in
-       (match !n.children.(idx) with
-       | None -> raise Invalid_huffman_sentinel
-       | Some child -> n := child);
-       if (not (is_leaf !n)) || !n.code_len > !cbits then raise Exit;
-       emit !n.sym;
-       cbits := !cbits - !n.code_len;
-       n := root;
-       sbits := !cbits
-     done
-   with Exit -> ());
-  if !sbits > 7 then
-    (* Either an incomplete symbol, or overlong padding. *)
-    raise Invalid_huffman_sentinel;
-  let mask = (1 lsl !cbits) - 1 in
-  if !cur land mask <> mask then
-    (* Trailing bits must be a prefix of EOS. *)
-    raise Invalid_huffman_sentinel;
-  Buffer.contents buf
-
-let decode ?(max_len = 0) (v : string) : (string, error) result =
-  try Ok (huffman_decode ~max_len v) with
-  | Invalid_huffman_sentinel -> Error Invalid_huffman
-  | String_too_long_sentinel -> Error String_too_long
+        done
+      with Padding -> ());
+     if !sbits > 7 then
+       (* Either an incomplete symbol, or overlong padding. *)
+       fail Invalid_huffman;
+     let mask = (1 lsl !cbits) - 1 in
+     if !cur land mask <> mask then
+       (* Trailing bits must be a prefix of EOS. *)
+       fail Invalid_huffman
+   with Fail -> ());
+  match !err with Some e -> Error e | None -> Ok (Buffer.contents buf)
 
 (* Go: AppendHuffmanString (starting from an empty dst). Uses 64-bit
    arithmetic faithfully via Int64; max code length is 30 so an Int64 buffer

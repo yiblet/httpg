@@ -3,19 +3,7 @@
    ReadResponse / Response.Write. Multipart, trace and proxy modes are out of
    scope. *)
 
-(* Retained for the mid-stream body thunk (errors discovered after the read
-   boundary returned [Ok] keep raising) and for the mid-stream trailer parse
-   path. Transport also raises it to thread a round-trip failure message. The
-   linear read-HEAD path no longer raises it — it threads [Error (Protocol _)].
-*)
-exception Protocol_error of string
-
 let bad_string_error_string what value = Printf.sprintf "%s %S" what value
-
-(* "suspiciously long trailer after chunked body" (transfer.go:934). Read
-   mid-stream inside the body [Stream] thunk, so per the mid-stream policy it
-   keeps raising rather than surfacing as a boundary [Error]. *)
-exception Trailer_too_large
 
 (* Handleable boundary error (see io.mli). *)
 type error =
@@ -183,44 +171,52 @@ let merge_trailer (declared : Header.t option) (hdr : Header.t) :
 let trailer_buffer_size = 4096
 
 (* readTrailer (transfer.go:911-951): read the trailer block after a chunked
-   body, bounded so a malicious peer cannot OOM us. Read {b mid-stream} inside
-   the body [Stream] thunk (a [unit -> string option] closure that cannot return
-   a result), so per the mid-stream policy a parse failure {b raises}: a budget
-   exhaustion as {!Trailer_too_large}, any other framing error as the
-   {!Protocol_error} carrying its message text. *)
-let read_trailer (r : Eio.Buf_read.t) : Header.t =
+   body, bounded so a malicious peer cannot OOM us. Read {b mid-stream} when the
+   body reaches EOF; a parse failure is typed data ([Error (Body.error)]): a
+   budget exhaustion as {!Body.Trailer_too_large}, any other framing error as
+   {!Body.Protocol} carrying its message text. *)
+let read_trailer (r : Eio.Buf_read.t) : (Header.t, Body.error) result =
   let limit = Some (ref trailer_buffer_size) in
   match read_mime_header_threaded ?limit r with
-  | Ok h -> h
-  | Error Request_too_large -> raise Trailer_too_large
-  | Error e -> raise (Protocol_error (error_to_string e))
+  | Ok h -> Ok h
+  | Error Request_too_large -> Error Body.Trailer_too_large
+  | Error e -> Error (Body.Protocol (error_to_string e))
 
-(* Wrap [read_transfer]'s incremental reader as a [Body.Stream]. On the first
-   EOF, for a chunked body, read the trailing trailer block and merge it into
-   the trailer cell ([set_trailer] mutates the message's [trailer], Go's
-   mergeSetHeader). A second call after EOF keeps returning [None] (gating
-   keep-alive reuse). *)
+(* Wrap [read_transfer]'s body as the public read-path body: it pulls the
+   underlying body chunks; on the first clean EOF, for a chunked body, it reads
+   the trailing trailer block and merges it into the trailer cell ([set_trailer]
+   mutates the message's [trailer], Go's mergeSetHeader). The underlying body
+   already produces its mid-stream framing failures as terminal [Error] elements
+   (ticket 006: the chunked / fixed-length readers are result-yielding), so this
+   only forwards them; the trailer read likewise returns its own [Error]. No
+   try/with converting a raise to an [Error] remains. *)
 let stream_body ~(is_chunked : bool) ~(declared_trailer : Header.t option)
     ~(set_trailer : Header.t option -> unit) (r : Eio.Buf_read.t)
-    (reader : unit -> string option) : Body.t =
+    (inner : Body.t) : Body.t =
+  let pull = Body.to_stream inner in
   let eof = ref false in
-  let next () : string option =
+  let next () : (string, Body.error) result option =
     if !eof then None
     else
-      match reader () with
-      | Some _ as chunk -> chunk
+      match pull () with
+      | Some (Ok _) as chunk -> chunk
+      | Some (Error _) as e ->
+          eof := true;
+          e
       | None ->
           eof := true;
-          if is_chunked then begin
-            set_trailer (merge_trailer declared_trailer (read_trailer r));
-            None
-          end
+          if is_chunked then
+            match read_trailer r with
+            | Ok tr ->
+                set_trailer (merge_trailer declared_trailer tr);
+                None
+            | Error e -> Some (Error e)
           else begin
             set_trailer declared_trailer;
             None
           end
   in
-  Body.Stream next
+  Body.of_stream_result next
 
 (* ------------------------------------------------------------------ *)
 (* read_request (readRequest / ReadRequest).                           *)
@@ -363,7 +359,7 @@ let read_request_threaded ?(max_header_bytes : int option) (r : Eio.Buf_read.t)
           url;
           proto = proto_t;
           header;
-          body = Body.Empty;
+          body = Body.empty;
           content_length =
             (let n = res.Transfer.content_length in
              if Int64.compare n 0L < 0 then None else Some n);
@@ -377,13 +373,12 @@ let read_request_threaded ?(max_header_bytes : int option) (r : Eio.Buf_read.t)
         }
       in
       req.Request.body <-
-        (match res.Transfer.body with
-        | Body.Stream reader ->
-            stream_body ~is_chunked:res.Transfer.is_chunked
-              ~declared_trailer:res.Transfer.trailer
-              ~set_trailer:(fun t -> req.Request.trailer <- t)
-              r reader
-        | (Body.Empty | Body.String _) as b -> b);
+        (if res.Transfer.streaming then
+           stream_body ~is_chunked:res.Transfer.is_chunked
+             ~declared_trailer:res.Transfer.trailer
+             ~set_trailer:(fun t -> req.Request.trailer <- t)
+             r res.Transfer.body
+         else res.Transfer.body);
       Ok req
 
 (* ------------------------------------------------------------------ *)
@@ -471,7 +466,7 @@ let read_response_threaded ?(request : Request.t option)
                     Response.status = status_code;
                     proto = proto_t;
                     header = res.Transfer.header;
-                    body = Body.Empty;
+                    body = Body.empty;
                     content_length =
                       (let n = res.Transfer.content_length in
                        if Int64.compare n 0L < 0 then None else Some n);
@@ -484,13 +479,12 @@ let read_response_threaded ?(request : Request.t option)
                   }
                 in
                 resp.Response.body <-
-                  (match res.Transfer.body with
-                  | Body.Stream reader ->
-                      stream_body ~is_chunked:res.Transfer.is_chunked
-                        ~declared_trailer:res.Transfer.trailer
-                        ~set_trailer:(fun t -> resp.Response.trailer <- t)
-                        r reader
-                  | (Body.Empty | Body.String _) as b -> b);
+                  (if res.Transfer.streaming then
+                     stream_body ~is_chunked:res.Transfer.is_chunked
+                       ~declared_trailer:res.Transfer.trailer
+                       ~set_trailer:(fun t -> resp.Response.trailer <- t)
+                       r res.Transfer.body
+                   else res.Transfer.body);
                 Ok resp))
 
 (* ------------------------------------------------------------------ *)
@@ -513,8 +507,9 @@ let string_contains_ctl_byte s =
 (* The read path threads [result] directly; the write path threads it too:
    "no Host", a control byte in the request URI, and an invalid Trailer key
    (from {!Transfer.write_transfer_header}) all surface as [Error] returns.
-   Mid-stream body-write raises (chunked writer / length mismatch in
-   {!Transfer.write_body}) stay raising, per Resolution #1. *)
+   A ContentLength/body-length mismatch or a broken write-side body in
+   {!Transfer.write_body} is a caller contract violation and raises
+   [Invalid_argument] (an unhandleable bug, not a modeled [Error]). *)
 let write_request (w : Eio.Buf_write.t) (r : Request.t) : (unit, error) result =
   let out = Eio.Buf_write.string w in
   let host =
@@ -620,13 +615,24 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
   let content_length = ref r.Response.content_length in
   let body = ref r.Response.body in
   let close = ref r.Response.close in
-  (* If ContentLength==0 and body non-nil, probe whether it is actually empty. *)
-  if !content_length = Some 0L && !body <> Body.Empty then begin
-    let data = Body.read_all !body in
-    if data = "" then body := Body.Empty
+  (* If ContentLength==0 and body non-nil, probe whether it is actually empty.
+     This path already buffers the whole body (Go's resp.Write reads it to learn
+     the real length), so [read_all] here is not a new whole-body buffering. A
+     mid-stream framing [Error] is unexpected on a write-side body (a broken
+     caller-supplied body is a contract violation), so it raises [Invalid_argument]
+     (an unhandleable bug; this helper is unit-returning / test-facing). *)
+  let body_is_nil, peeked = Body.is_empty !body in
+  body := peeked;
+  if !content_length = Some 0L && not body_is_nil then begin
+    let data =
+      match Body.read_all !body with
+      | Ok d -> d
+      | Error e -> invalid_arg ("http: write body: " ^ Body.error_to_string e)
+    in
+    if data = "" then body := Body.empty
     else begin
       content_length := None;
-      body := Body.String data
+      body := Body.of_string data
     end
   end;
   (* HTTP/1.1 non-chunked unknown length must signal EOF via Connection: close. *)
@@ -650,11 +656,12 @@ let write_response (w : Eio.Buf_write.t) (r : Response.t) : unit =
       ~content_length:(Option.value ~default:(-1L) !content_length)
       ~transfer_encoding:r.Response.transfer_encoding ()
   in
-  (* White-box test-only: a forbidden Trailer key surfaces as a local raise of
-     the boundary [error] (no result thread out of this test helper). *)
+  (* White-box test-only: a forbidden Trailer key is a caller contract
+     violation, raised as [Invalid_argument] (no result thread out of this test
+     helper). *)
   (match Transfer.write_transfer_header w tw with
   | Ok () -> ()
-  | Error e -> raise (Protocol_error (error_to_string (Transfer e))));
+  | Error e -> invalid_arg (error_to_string (Transfer e)));
   let buf = Buffer.create 256 in
   Header.write_subset r.Response.header buf
     ~exclude:[ "Content-Length"; "Transfer-Encoding"; "Trailer" ];

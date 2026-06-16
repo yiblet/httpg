@@ -11,26 +11,6 @@
    [fn r w] with the channels live and close everything on return (mirroring
    [Eio.Net.with_tcp_connect] / [Buf_write.with_flow]). *)
 
-exception Tls_error of string
-(** Retained ONLY for the transport.ml re-raise bridge (pending Step 4): [Net]
-    no longer raises this from its client entry points — they thread
-    [(_, error) result] (see {!error}). It still carries the underlying
-    [Tls.Engine.string_of_failure] text of a TLS handshake / authentication /
-    protocol failure (untrusted or expired certificate, protocol violation,
-    connection closed mid-handshake). The [result]-free contracts ({!listen},
-    {!accept_tls}) and the mid-stream Flow.SOURCE read re-raise it internally to
-    honor their non-[result] signatures. Distinct from the bare [Failure] kept
-    for genuine usage bugs (write-before-handshake, bad config). *)
-
-exception Dial_error of string
-(** Retained ONLY for the transport.ml re-raise bridge (pending Step 4): [Net]
-    no longer raises this from its client entry points — they thread
-    [(_, error) result] (see {!error}). It still carries the offending
-    [host:port] of a dial failure (DNS resolution turning up no address). The
-    [result]-free {!listen} contract re-raises it internally when the bind
-    address cannot be resolved. Distinct from the bare [Failure] kept for
-    genuine usage/config bugs. *)
-
 type error =
   | Dial of string
   | Tls of string
@@ -65,7 +45,12 @@ val listen :
     socket with [SO_REUSEADDR] and listens. [host] is used as given (e.g.
     ["0.0.0.0"] or ["127.0.0.1"]); [port = 0] selects an ephemeral port,
     recoverable with {!bound_port}. [backlog] defaults to 128 (Go's [net.Listen]
-    default). The socket is closed when [sw] finishes. *)
+    default). The socket is closed when [sw] finishes.
+
+    This is a [result]-free startup contract: if [host]/[port] cannot be
+    resolved it raises an exception internal to [Net] (it never crosses the
+    public surface as a typed value — a bad bind address is a startup config
+    error, akin to {!bound_port}'s [Failure]). *)
 
 val accept :
   sw:Eio.Switch.t ->
@@ -202,7 +187,14 @@ val accept_tls :
     channels over the TLS session, [proto] being the negotiated ALPN protocol
     ([None] if none agreed). The connection is flushed and a [close_notify] is
     sent on return. [flow] is accepted by the caller's per-connection fiber, so
-    a slow handshake never stalls the accept loop. *)
+    a slow handshake never stalls the accept loop.
+
+    This is a [result]-free per-connection contract: a server-side handshake
+    failure raises an exception internal to [Net] (it never crosses the public
+    surface as a typed value). The per-connection fiber is forked with an
+    [on_error] (see {!accept_fork}) that swallows it, so one failed handshake
+    never tears down the accept loop — there is no buffered channel to respond
+    over, so the failure is simply dropped, as in Go. *)
 
 (** {1 Address helpers} *)
 

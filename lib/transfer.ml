@@ -6,14 +6,11 @@
    The [read_transfer] inputs are modeled as the [message] record, mirroring the
    fields of Go's [transferReader] that come from a *Request or *Response. *)
 
-(* Re-export the codec's mid-stream exceptions so dependents keep the same
-   [Transfer.*] identity the codec raises. *)
-exception Err_line_too_long = Httpg_internal.Chunked.Err_line_too_long
-exception Chunk_error = Httpg_internal.Chunked.Chunk_error
-
-(* Handleable framing error variant for the header / initial-parse boundary.
-   The legacy exceptions above stay for the mid-stream Body.Stream thunks,
-   which keep raising, per Resolution #1. *)
+(* Typed framing error. Used both at the header / initial-parse boundary
+   (returned as [Error] from [read_transfer] / the [Private] helpers) and
+   mid-stream: a malformed chunk / short read discovered while pulling the body
+   becomes a terminal [Error] element of the body's result-seq (mapped into
+   [Body.error] by the read path), never a raise. *)
 type error =
   | Line_too_long
   | Chunk of string
@@ -99,7 +96,22 @@ let parse_hex_uint (v : string) : (int64, error) result =
   | Error Httpg_internal.Chunked.Line_too_long -> Error Line_too_long
   | Error (Httpg_internal.Chunked.Chunk msg) -> Error (Chunk msg)
 
-let new_chunked_reader = Httpg_internal.Chunked.new_chunked_reader
+(* Map a codec error into [Transfer.error]. *)
+let error_of_chunked = function
+  | Httpg_internal.Chunked.Line_too_long -> Line_too_long
+  | Httpg_internal.Chunked.Chunk msg -> Chunk msg
+
+(* Re-export the codec's reader, mapping its error type into [Transfer.error]
+   so the public surface speaks a single error type. *)
+let new_chunked_reader (r : Eio.Buf_read.t) :
+    unit -> (string, error) result option =
+  let next = Httpg_internal.Chunked.new_chunked_reader r in
+  fun () ->
+    match next () with
+    | None -> None
+    | Some (Ok _ as ok) -> Some ok
+    | Some (Error e) -> Some (Error (error_of_chunked e))
+
 let chunked_writer_write = Httpg_internal.Chunked.chunked_writer_write
 let chunked_writer_close = Httpg_internal.Chunked.chunked_writer_close
 
@@ -279,8 +291,9 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
       end
 
 (* parseTransferEncoding equivalent: set whether chunked, version-sensitive.
-   Mutates [header] (deletes Transfer-Encoding). Raises Chunk_error for
-   unsupported encodings (the unsupportedTEError analogue). HTTP/1.0 ignores
+   Mutates [header] (deletes Transfer-Encoding). Returns
+   [Error (Unsupported_transfer_encoding _)] / [Error (Chunk _)] for unsupported
+   / too-many encodings (the unsupportedTEError analogue). HTTP/1.0 ignores
    Transfer-Encoding entirely (Issue 12785). *)
 let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
     (bool * Header.t, error) result =
@@ -320,6 +333,11 @@ type message = {
    message (Go writes these into the Request/Response struct). *)
 type result = {
   body : Body.t;
+  streaming : bool;
+      (** whether [body] is a live stream reader (vs a statically-empty body):
+          the read paths only interpose the chunked-trailer/EOF adapter on a
+          streaming body, never on a known-empty one (a HEAD / no-body chunked
+          response must not trigger a spurious trailer read) *)
   content_length : int64;
   is_chunked : bool;
   result_close : bool;
@@ -329,9 +347,20 @@ type result = {
           Transfer-Encoding / Connection / Trailer) have been consumed *)
 }
 
+(* Map a framing [error] into a [Body.error] at the point the read path builds
+   the body. Body sits BELOW Transfer (layering), so the mapping happens here,
+   where the streaming body is constructed. *)
+let body_error_of (e : error) : Body.error =
+  match e with
+  | Line_too_long -> Body.Line_too_long
+  | Chunk msg -> Body.Malformed_chunk msg
+  | Unexpected_eof -> Body.Unexpected_eof
+  | Bad_content_length _ | Unsupported_transfer_encoding _ | Bad_header _ ->
+      Body.Protocol (error_to_string e)
+
 (* read_transfer: header/initial-parse framing errors short-circuit as [Error];
-   the resulting body's [Body.Stream] thunk keeps raising on mid-stream errors
-   (Resolution #1). *)
+   the resulting body's stream surfaces mid-stream framing failures as a
+   terminal [Body.error] element (typed data, never a raise). *)
 let read_transfer (msg : message) (r : Eio.Buf_read.t) :
     (result, error) Stdlib.result =
   let ( let* ) = Result.bind in
@@ -387,43 +416,68 @@ let read_transfer (msg : message) (r : Eio.Buf_read.t) :
         Eio.Buf_read.take (min want avail) r
   in
 
-  (* Prepare body reader. *)
+  (* Prepare body reader. The streaming pulls produce their mid-stream framing
+     failures as a terminal [Body.error] element ([Body.of_stream_result]); a
+     malformed chunk / short read is data in the stream, not a raise. *)
+  let streaming = ref true in
   let body : Body.t =
     if is_chunked then
       if
         is_response
         && (no_response_body_expected request_method
            || not (body_allowed_for_status status))
-      then Body.Empty
-      else Body.Stream (new_chunked_reader r)
-    else if Int64.compare real_length 0L = 0 then Body.Empty
+      then begin
+        streaming := false;
+        Body.empty
+      end
+      else
+        let next = new_chunked_reader r in
+        Body.of_stream_result (fun () ->
+            match next () with
+            | None -> None
+            | Some (Ok _ as ok) -> Some ok
+            | Some (Error e) -> Some (Error (body_error_of e)))
+    else if Int64.compare real_length 0L = 0 then begin
+      streaming := false;
+      Body.empty
+    end
     else if Int64.compare real_length 0L > 0 then begin
       (* LimitReader(r, realLength): read exactly real_length bytes. *)
       let remaining = ref real_length in
-      Body.Stream
-        (fun () ->
+      Body.of_stream_result (fun () ->
           if Int64.compare !remaining 0L <= 0 then None
           else
             let want = min copy_buf_size (Int64.to_int !remaining) in
             let s = read_some want in
             if s = "" then begin
               remaining := 0L;
-              raise (Chunk_error "unexpected EOF") (* ErrUnexpectedEOF *)
+              Some (Error Body.Unexpected_eof) (* ErrUnexpectedEOF *)
             end
             else begin
               remaining := Int64.sub !remaining (Int64.of_int (String.length s));
-              Some s
+              Some (Ok s)
             end)
     end
     else if close then
       (* realLength < 0 and closing (HTTP/1.0 close-delimited): read until EOF. *)
-      Body.Stream
-        (fun () ->
+      Body.of_stream (fun () ->
           let s = read_some copy_buf_size in
           if s = "" then None else Some s)
-    else Body.Empty (* persistent connection, no length -> no body *)
+    else begin
+      streaming := false;
+      Body.empty (* persistent connection, no length -> no body *)
+    end
   in
-  Ok { body; content_length; is_chunked; result_close = close; trailer; header }
+  Ok
+    {
+      body;
+      streaming = !streaming;
+      content_length;
+      is_chunked;
+      result_close = close;
+      trailer;
+      header;
+    }
 
 (* ------------------------------------------------------------------ *)
 (* write_body: the transferWriter body-writing logic.                  *)
@@ -456,26 +510,26 @@ let request_method_usually_lacks_body = function
    Unlike Go we don't bound the wait with a channel — a streaming body thunk
    that blocks would block here too, but Go's blocking is the same hazard. *)
 let probe_request_body (body : Body.t ref) : bool =
-  match !body with
-  | Body.Empty -> false
-  | Body.String s -> String.length s > 0
-  | Body.Stream inner -> (
-      match inner () with
-      | None | Some "" ->
-          body := Body.Empty;
-          false
-      | Some first ->
-          (* Re-prepend the probed chunk so the body still reads in full. *)
-          let pending = ref (Some first) in
-          body :=
-            Body.Stream
-              (fun () ->
-                match !pending with
-                | Some _ as c ->
-                    pending := None;
-                    c
-                | None -> inner ());
-          true)
+  (* Peek the first chunk via [Seq.uncons] (this is the probe — forcing the
+     first element is the whole point). Skip leading empty [Ok ""] chunks the
+     way Go skips zero-length reads; a terminal [Error] is treated as
+     content-present (left in place for the consumer to surface). *)
+  let rec peek (s : Body.t) : bool =
+    match Seq.uncons s with
+    | None ->
+        body := Body.empty;
+        false
+    | Some (Ok "", rest) -> peek rest
+    | Some ((Ok _ as elem), rest) ->
+        (* Re-prepend the peeked chunk so the body still reads in full. *)
+        body := Seq.cons elem rest;
+        true
+    | Some ((Error _ as elem), rest) ->
+        (* Surface the failure to the eventual consumer; treat as present. *)
+        body := Seq.cons elem rest;
+        true
+  in
+  peek !body
 
 (* shouldSendChunkedRequestBody (transfer.go:152): only for cl<0, non-CONNECT.
    Body-lacking methods (GET/HEAD/...) are probed so a content-less ReadCloser
@@ -504,9 +558,13 @@ let make_transfer_writer ?(is_response = false)
     && !te = []
     && should_send_chunked_request_body ~method_ body
   then te := [ "chunked" ];
-  let body_is_nil = !body = Body.Empty in
+  (* Go's [Body == nil]: the flat [Body.t] no longer carries this in its shape,
+     so we peek one element (non-destructive — [body] re-reads in full). The
+     probe above may already have peeked. *)
+  let body_is_nil, peeked = Body.is_empty !body in
+  body := peeked;
   if response_to_head then begin
-    body := Body.Empty;
+    body := Body.empty;
     if chunked !te then cl := -1L
   end
   else begin
@@ -587,10 +645,21 @@ let write_transfer_header (w : Eio.Buf_write.t) (t : transfer_writer) :
               ^ "\r\n");
           Ok ())
 
-(* writeBody: write the body (and trailers) to [w] in wire format. Raises
-   Chunk_error on a ContentLength/body-length mismatch. *)
+(* writeBody: write the body (and trailers) to [w] in wire format.
+   A ContentLength/body-length mismatch is the {b caller} having declared a
+   length its body does not match — a contract violation (Go returns this as an
+   error from [transferWriter.writeBody]; here, the write path is unit-returning
+   and the caller owns the body it supplied), so it is an unhandleable
+   [Invalid_argument] (AGENTS.md rule 5: bugs / invariant violations raise). A
+   mid-stream [Body.error] on a {b write-side} body is likewise a broken
+   caller-supplied body, not a wire-read failure, so it too is [Invalid_argument]. *)
 let write_body (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
-  let body_present = (not t.tw_response_to_head) && t.tw_body <> Body.Empty in
+  let force = function
+    | Ok () -> ()
+    | Error e -> invalid_arg ("http: write body: " ^ Body.error_to_string e)
+  in
+  let body_is_nil, body = Body.is_empty t.tw_body in
+  let body_present = (not t.tw_response_to_head) && not body_is_nil in
   let after_body () =
     if (not t.tw_response_to_head) && chunked t.tw_transfer_encoding then begin
       (match t.tw_trailer with
@@ -604,28 +673,28 @@ let write_body (w : Eio.Buf_write.t) (t : transfer_writer) : unit =
   in
   if not body_present then after_body ()
   else if chunked t.tw_transfer_encoding then begin
-    Body.iter (fun chunk -> chunked_writer_write w chunk) t.tw_body;
+    force (Body.iter (fun chunk -> chunked_writer_write w chunk) body);
     chunked_writer_close w;
     after_body ()
   end
   else if Int64.compare t.tw_content_length (-1L) = 0 then begin
-    Body.write w t.tw_body;
+    force (Body.write w body);
     (* unknown length: copy entire body *)
     after_body ()
   end
   else begin
     (* Fixed length (Go's io.CopyN): count bytes and verify against ContentLength. *)
     let n = ref 0L in
-    Body.iter
-      (fun chunk ->
-        n := Int64.add !n (Int64.of_int (String.length chunk));
-        Eio.Buf_write.string w chunk)
-      t.tw_body;
+    force
+      (Body.iter
+         (fun chunk ->
+           n := Int64.add !n (Int64.of_int (String.length chunk));
+           Eio.Buf_write.string w chunk)
+         body);
     if Int64.compare t.tw_content_length !n <> 0 then
-      raise
-        (Chunk_error
-           (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld"
-              t.tw_content_length !n));
+      invalid_arg
+        (Printf.sprintf "http: ContentLength=%Ld with Body length %Ld"
+           t.tw_content_length !n);
     after_body ()
   end
 

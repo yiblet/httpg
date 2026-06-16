@@ -9,8 +9,9 @@
    after the handshake a hand-driven server floods the client with TLS 1.3
    KeyUpdate records -- records that decode but carry no application data and
    need no reply (non-advancing). The client's [Tls_flow.single_read] must cut
-   the peer off with [Net.Tls_error "too many ignored records"] after the
-   bounded count, rather than spinning unbounded. *)
+   the peer off with [Error (Net.Tls "too many ignored records")] (surfaced at
+   the connect boundary) after the bounded count, rather than spinning
+   unbounded. *)
 
 open Httpg
 
@@ -110,7 +111,7 @@ let tls_spin_guard () =
         in
         let client () =
           (* The spin guard trips inside the TLS read while [fn] runs, so the
-             handleable [Net.Tls_error] is converted at the public boundary into
+             handleable TLS failure is converted at the public boundary into
              [Error (Net.Tls _)]. A stray [End_of_file] (no guard) is captured
              separately so the failure mode is distinguishable. *)
           match

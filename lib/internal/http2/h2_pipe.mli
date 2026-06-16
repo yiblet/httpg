@@ -1,12 +1,12 @@
 (* Port of go/src/net/http/internal/http2/pipe.go *)
 
-exception Closed_pipe_write
-(** Raised by {!write} on a closed/broken pipe. Mirrors Go's
-    [errClosedPipeWrite] ("write on closed buffer"). *)
+type error =
+  | Closed  (** write on a closed/broken pipe (Go's [errClosedPipeWrite]) *)
+  | Uninitialized
+      (** write before {!set_buffer} (Go's [errUninitializedPipeWrite]) *)
 
-exception Uninitialized_pipe_write
-(** Raised by {!write} when the buffer was never initialized via {!set_buffer}.
-    Mirrors Go's [errUninitializedPipeWrite]. *)
+val error_to_string : error -> string
+(** Renders {!error} as a human-readable string. *)
 
 type t
 (** A fiber-safe Reader/Writer pair backed by an internal {!H2_databuffer.t},
@@ -33,10 +33,10 @@ val read : t -> int -> string
     first and the error is raised only once drained; on break, the error is
     raised immediately. Mirrors [pipe.Read]. *)
 
-val write : t -> string -> int
-(** [write p d] appends [d] and wakes a waiting reader, returning the count
-    written. Raises {!Closed_pipe_write} if closed/broken, or
-    {!Uninitialized_pipe_write} if no buffer was set. Mirrors [pipe.Write]. *)
+val write : t -> string -> (int, error) result
+(** [write p d] appends [d] and wakes a waiting reader, returning [Ok n] with
+    the count written, [Error Closed] if closed/broken, or [Error Uninitialized]
+    if no buffer was set. Mirrors [pipe.Write]. *)
 
 val close_with_error : t -> exn -> unit
 (** [close_with_error p err] causes the next {!read} (waking a blocked reader)

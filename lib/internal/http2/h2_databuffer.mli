@@ -1,9 +1,5 @@
 (* Port of go/src/net/http/internal/http2/databuffer.go *)
 
-exception Read_empty
-(** Raised by {!read}/{!read_string} when no data is available. Mirrors Go's
-    [errReadEmpty] ("read from empty dataBuffer"). *)
-
 type t
 (** [dataBuffer] is a ReadWriter backed by a list of data chunks. Used to read
     DATA frames on a single stream. The buffer is divided into size-classed
@@ -18,10 +14,10 @@ val create : ?expected:int64 -> unit -> t
 val len : t -> int
 (** [len b] is the number of unread bytes. Mirrors [dataBuffer.Len]. *)
 
-val read : t -> bytes -> int -> int -> int
+val read : t -> bytes -> int -> int -> int option
 (** [read b p off plen] copies up to [plen] bytes into [p] starting at [off],
-    returning the count copied. Raises {!Read_empty} when [b] is empty. Mirrors
-    [dataBuffer.Read]. *)
+    returning [Some n] with the count copied, or [None] when [b] is empty
+    (mirrors Go's [errReadEmpty] sentinel). Mirrors [dataBuffer.Read]. *)
 
 val write : t -> bytes -> int -> int -> int
 (** [write b p off plen] appends [plen] bytes of [p] (from [off]) to the buffer,
@@ -30,6 +26,6 @@ val write : t -> bytes -> int -> int -> int
 val write_string : t -> string -> int
 (** [write_string b s] appends [s], returning its length. *)
 
-val read_string : t -> int -> string
-(** [read_string b n] reads up to [n] bytes, returning them as a string. Raises
-    {!Read_empty} when [b] is empty. *)
+val read_string : t -> int -> string option
+(** [read_string b n] reads up to [n] bytes, returning [Some s], or [None] when
+    [b] is empty (mirrors Go's [errReadEmpty] sentinel). *)

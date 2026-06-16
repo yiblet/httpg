@@ -70,26 +70,24 @@ let err_code_string = function
   | HTTP11Required -> "HTTP_1_1_REQUIRED"
   | Unknown v -> Printf.sprintf "unknown error code 0x%x" v
 
-exception Connection_error of err_code
-
 type stream_error = { stream_id : int; code : err_code; cause : exn option }
 
-exception Stream_error of stream_error
-
 let stream_error id code = { stream_id = id; code; cause = None }
-let conn_error code = Connection_error code
 
-(* Unified, handleable HTTP/2 error value surfaced at the public boundaries
-   (H2_frame.read_frame / read_meta_headers). The internal per-connection event
-   loop still drives GOAWAY/RST by raising the [Connection_error]/[Stream_error]
-   exceptions (and the H2_frame frame-build exceptions); [to_exception]/[of_exception] bridge
-   the two worlds so the loop is left untouched.
+(* Unified, handleable HTTP/2 error value. It is produced and consumed purely as
+   a [result]/value across the whole h2 stack: {!H2_frame}'s read boundaries
+   ([read_frame]/[read_meta_headers]) and writers return it, the per-connection
+   read loops dispatch the [Error] by value (GOAWAY for a connection error,
+   RST_STREAM for a stream error), the server's [Read_error] event and the
+   transport's reader-done channel carry the value, never an exception. There is
+   no carrier exception and no exception<->value bridge: [t] is the single,
+   typed h2 error.
 
-   The [Frame_too_large], [Invalid_stream_id], [Invalid_dep_stream_id] and
-   [Pad_length_too_large] arms correspond to the same-named exceptions declared
-   in {!H2_frame}; H2_frame's [read_frame] maps those (and the connection/stream
-   exceptions) into [t] at its boundary, and [to_exception] maps them back via the
-   bridge functions H2_frame installs. *)
+   [Frame_too_large] is both a write-side build invariant (an over-large frame
+   the writer refuses) and the read-side result for an over-large inbound frame
+   (mirrors Go's [ErrFrameTooLarge]). [Invalid_stream_id],
+   [Invalid_dep_stream_id] and [Pad_length_too_large] are write-side build
+   invariants only. *)
 type t =
   | Connection of err_code
   | Stream of stream_error
@@ -98,39 +96,6 @@ type t =
   | Invalid_dep_stream_id
   | Pad_length_too_large
   | Compression of Hpack.error
-
-(* Carrier exception for an HPACK decode failure threaded through the raising
-   parse path (mirrors Go wrapping a CompressionError). *)
-exception Compression_error of Hpack.error
-
-(* Bridge hooks for the frame-build invariant exceptions ([Frame_too_large],
-   [Invalid_stream_id], [Invalid_dep_stream_id], [Pad_length_too_large]), which
-   are owned by {!H2_frame}. To keep [to_exception]/[of_exception] cycle-free, H2_frame
-   installs the conversions for those four arms at module init via
-   [set_frame_bridge]. The connection / stream / compression arms are handled
-   directly here. *)
-let frame_to_exception : (t -> exn option) ref = ref (fun _ -> None)
-let frame_of_exception : (exn -> t option) ref = ref (fun _ -> None)
-
-let set_frame_bridge ~to_exception ~of_exception =
-  frame_to_exception := to_exception;
-  frame_of_exception := of_exception
-
-let to_exception : t -> exn = function
-  | Connection code -> Connection_error code
-  | Stream se -> Stream_error se
-  | Compression e -> Compression_error e
-  | ( Frame_too_large | Invalid_stream_id | Invalid_dep_stream_id
-    | Pad_length_too_large ) as t -> (
-      match !frame_to_exception t with
-      | Some e -> e
-      | None -> Failure "H2_error.to_exception: frame bridge not installed")
-
-let of_exception : exn -> t option = function
-  | Connection_error code -> Some (Connection code)
-  | Stream_error se -> Some (Stream se)
-  | Compression_error e -> Some (Compression e)
-  | e -> !frame_of_exception e
 
 module Private = struct
   let err_code_string = err_code_string

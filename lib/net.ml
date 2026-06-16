@@ -9,34 +9,33 @@
 module Buf_read = Eio.Buf_read
 module Buf_write = Eio.Buf_write
 
-(* NOTE: the resolve/handshake path no longer RAISES these to escape [Net] — the
-   inner [resolve]/handshake-driver helpers thread [(_, error) result] and the
-   public client entry points return it directly (no boundary try/catch over
-   resolve+handshake). These exceptions are retained, declared and exported,
-   ONLY for the transport.ml re-raise bridge (Step-4-pending), which still turns
-   Net's [result] back into them; Step 4 removes the bridge. They are also still
-   raised at a few INTERNAL call sites that honor non-[result] signatures and
-   never let the raise escape Net: the [result]-free [listen]/[accept_tls]
-   contracts re-raise on resolve/handshake failure, and the mid-stream
-   Flow.SOURCE read ([Tls_flow.single_read]) cannot return [result] through
-   Eio's interface, so its spin-guard re-raises [Tls_error] and the
-   [connect_*] boundary's [run_buffered_result] maps it back to [Error]. None
-   of these is a sentinel-carrier for the resolve/handshake path.
+(* INTERNAL-ONLY exceptions (NOT in net.mli — they never appear on the public
+   surface). The public, handleable failure of the resolve/handshake path is the
+   {!error} variant threaded as [(_, error) result] by the client entry points
+   ([connect]/[connect_tls]/[connect_alpn]) — those have no [exception] at all.
+   These two exceptions exist solely for the handful of internal call sites that
+   honor non-[result] signatures forced on us by Eio and the startup contracts,
+   and the raise is converted/swallowed before it could ever escape [Net] as a
+   public contract:
 
-   A TLS handshake / authentication / protocol failure -- handleable, mirroring
-   Go's tls.Conn.Handshake returning an [error] that dialConn->RoundTrip
-   propagates (transport.go:1803-1819), never a panic. Carries the underlying
-   [Tls.Engine.string_of_failure] text. (Write-before-handshake stays a bare
-   [Failure]: that is a usage bug, not a peer/protocol condition.) *)
-exception Tls_error of string
+   - [Tls_flow.single_read] / [raise_tls]: Eio's [Flow.SOURCE.read] cannot return
+     a [result], so a mid-stream modeled TLS failure re-raises [Internal_tls_error]
+     here; the [connect_*] boundary's [run_buffered_result] catches it and maps it
+     back to [Error (Tls _)] (see there). It never escapes [Net].
+   - [listen] (resolve/bind failure): a [result]-free startup contract; a bad bind
+     address re-raises [Internal_dial_error] (a startup config error, like
+     {!bound_port}'s [Failure]).
+   - [accept_tls] (per-connection handshake failure): a [result]-free
+     per-connection contract; re-raises [Internal_tls_error], which the server's
+     per-conn [on_error] swallows (one failed handshake must not kill the accept
+     loop) — there is no buffered channel to respond over, so it is dropped, as in
+     Go.
 
-(* A dial failure -- DNS resolution turning up no address (or, more generally, a
-   host/port that cannot be connected). Handleable, mirroring Go's [Dial]
-   returning an [error] (a [*net.DNSError] "no such host" for the resolver case)
-   that [Transport.dialConn] propagates up through [RoundTrip] rather than a
-   panic. Carries the host:port that could not be resolved/dialed. Retained for
-   the same Step-4-pending transport bridge as {!Tls_error}. *)
-exception Dial_error of string
+   Carries the underlying [Tls.Engine.string_of_failure] / host:port text.
+   Distinct from the bare [Failure] kept for genuine usage bugs
+   (write-before-handshake, bad TLS config). *)
+exception Internal_tls_error of string
+exception Internal_dial_error of string
 
 (* Public, handleable failure of the client connect entry points, mirroring Go's
    [Dial]/[tls.Conn.Handshake] returning an [error]. The inner resolve/handshake
@@ -99,13 +98,14 @@ let with_buffered (flow : _ Eio.Flow.two_way) fn =
 (* ----- TCP ----- *)
 
 let listen ?(backlog = default_backlog) ~sw net host port =
-  (* [listen]'s public contract raises [Dial_error] when the bind address
-     cannot be resolved (it is not a [result]-returning entry point); [resolve]
-     now threads a [result], so re-raise its modeled [Dial] failure here. *)
+  (* [listen] is a [result]-free startup contract; [resolve] threads a [result],
+     so on an unresolvable bind address re-raise the INTERNAL exception (a
+     startup config error that never crosses the public surface — see the
+     exception block above). *)
   match resolve net host port with
   | Ok addr -> Eio.Net.listen ~reuse_addr:true ~backlog ~sw net addr
-  | Error (Dial s) -> raise (Dial_error s)
-  | Error (Tls s) -> raise (Tls_error s)
+  | Error (Dial s) -> raise (Internal_dial_error s)
+  | Error (Tls s) -> raise (Internal_tls_error s)
 
 let accept ~sw listen_sock = Eio.Net.accept ~sw listen_sock
 
@@ -223,13 +223,17 @@ module Tls_flow = struct
      Progress here is app data reaching [inbuf]; records that decode but yield
      none (warning alerts, key updates) are bounded. (* crypto/tls conn.go:791 *) *)
   (* Mid-stream TLS failures discovered while pulling decrypted plaintext can't
-     return a [result] through Eio's Flow.SOURCE interface, so the modeled
-     [Error (Tls _)] from [handle]/[too_many_ignored] is re-raised as
-     [Tls_error] here (Eio reads raise; this is internal IO control-flow). *)
+     return a [result] through Eio's Flow.SOURCE interface (its [read] must
+     raise), so the modeled [Error (Tls _)] from [handle]/[too_many_ignored] is
+     re-raised as the INTERNAL [Internal_tls_error] here. It is caught and mapped
+     back to [Error] at the [connect_*] boundary ([run_buffered_result]); it
+     never escapes [Net]. This is the philosophy's fiber-control exemption: a
+     raise forced by an Eio interface ([Flow.SOURCE.read]) that cannot return a
+     [result], not a modeled failure surfaced as an exception. *)
   let raise_tls = function
     | Ok v -> v
-    | Error (Tls s) -> raise (Tls_error s)
-    | Error (Dial s) -> raise (Dial_error s)
+    | Error (Tls s) -> raise (Internal_tls_error s)
+    | Error (Dial s) -> raise (Internal_dial_error s)
 
   let single_read t buf =
     let useless = ref 0 in
@@ -340,16 +344,17 @@ let client_config ?(alpn = []) ?authenticator ?insecure ~peer_name () =
    failure to [Error]. Resolve and the handshake driver already thread [result]
    (no boundary catch), but the Flow.SOURCE read ([Tls_flow.single_read]) cannot
    return a [result] through Eio's interface: its spin-guard / decode failures
-   re-raise [Tls_error] while [fn] is streaming over the connection (the
-   [tls_spin_guard] test exercises exactly this -- a guard tripped after the
-   handshake, during a [Buf_read.line]). This narrow catch maps those modeled
-   mid-stream raises back to [Error (Tls/Dial _)]; anything else (raw
-   [End_of_file], [Eio.Cancel], usage [Failure]) propagates unchanged. *)
+   re-raise the INTERNAL [Internal_tls_error] while [fn] is streaming over the
+   connection (the [tls_spin_guard] test exercises exactly this -- a guard
+   tripped after the handshake, during a [Buf_read.line]). This narrow catch
+   maps those modeled mid-stream raises back to [Error (Tls/Dial _)]; anything
+   else (raw [End_of_file], [Eio.Cancel], usage [Failure]) propagates
+   unchanged. *)
 let run_buffered_result fn : (_, error) result =
   match fn () with
   | v -> Ok v
-  | exception Tls_error s -> Error (Tls s)
-  | exception Dial_error s -> Error (Dial s)
+  | exception Internal_tls_error s -> Error (Tls s)
+  | exception Internal_dial_error s -> Error (Dial s)
 
 (* [connect_alpn ... fn] dials [host]/[port], optionally upgrades to TLS
    (advertising [alpn] and verifying per the secure-by-default policy), and runs
@@ -460,13 +465,15 @@ let accept_tls s (flow : _ Eio.Net.stream_socket) fn =
   ensure_rng ();
   let state = Tls.Engine.server s.config in
   (* [accept_tls]'s public contract is [result]-free (it returns ['a]); a
-     server-side handshake failure re-raises [Tls_error], as before. The
+     server-side handshake failure re-raises the INTERNAL exception, which the
+     server's per-conn [on_error] swallows (one bad handshake must not kill the
+     accept loop, and there is no buffered channel to respond over). The
      [result] threading is confined to the client entry points. *)
   let tls_flow, proto =
     match Tls_flow.establish flow state with
     | Ok v -> v
-    | Error (Tls s) -> raise (Tls_error s)
-    | Error (Dial s) -> raise (Dial_error s)
+    | Error (Tls s) -> raise (Internal_tls_error s)
+    | Error (Dial s) -> raise (Internal_dial_error s)
   in
   Fun.protect
     ~finally:(fun () -> try Eio.Flow.shutdown tls_flow `Send with _ -> ())

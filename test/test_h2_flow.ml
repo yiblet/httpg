@@ -5,6 +5,13 @@ module Flow = Httpg_http2.H2_flow
 
 let i32 = Alcotest.testable (Fmt.of_to_string Int32.to_string) Int32.equal
 
+(* [err_code] testable for the [inflow_add] result (ticket 008). *)
+let ec =
+  Alcotest.testable
+    (Fmt.of_to_string (fun c ->
+         string_of_int (Httpg_http2.H2_error.err_code_to_int c)))
+    ( = )
+
 (* TestInFlowTake *)
 let test_inflow_take () =
   let f = Flow.create_inflow () in
@@ -20,16 +27,17 @@ let test_inflow_add_small () =
   Flow.inflow_init f 0l;
   (* Adding even a small amount when there is no flow causes an immediate
      send. *)
-  Alcotest.check i32 "add(1) to 1" 1l (Flow.inflow_add f 1)
+  Alcotest.check (Alcotest.result i32 ec) "add(1) to 1" (Ok 1l)
+    (Flow.inflow_add f 1)
 
 (* TestInflowAdd *)
 let test_inflow_add () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f (Int32.of_int (10 * Flow.Private.inflow_min_refresh));
-  Alcotest.check i32 "add(minRefresh-1)" 0l
+  Alcotest.check (Alcotest.result i32 ec) "add(minRefresh-1)" (Ok 0l)
     (Flow.inflow_add f (Flow.Private.inflow_min_refresh - 1));
-  Alcotest.check i32 "add(1) reaches minRefresh"
-    (Int32.of_int Flow.Private.inflow_min_refresh)
+  Alcotest.check (Alcotest.result i32 ec) "add(1) reaches minRefresh"
+    (Ok (Int32.of_int Flow.Private.inflow_min_refresh))
     (Flow.inflow_add f 1)
 
 (* TestTakeInflows *)
@@ -51,14 +59,13 @@ let test_inflow_add_negative () =
     (fun () -> ignore (Flow.inflow_add f (-1)))
 
 (* inflow add overflow: Go panics (flow.go:42), but to avoid crashing the
-   serve fiber we surface a modeled FLOW_CONTROL_ERROR connection error that
-   the serve loop converts to a GOAWAY (Ticket 11). *)
+   serve fiber we surface a modeled FLOW_CONTROL_ERROR connection error as a
+   typed [Error] that the serve loop converts to a GOAWAY (ticket 008). *)
 let test_inflow_add_overflow () =
   let f = Flow.create_inflow () in
   Flow.inflow_init f (Int32.of_int Flow.max_window);
-  Alcotest.check_raises "overflow"
-    (Httpg_http2.H2_error.Connection_error Httpg_http2.H2_error.FlowControlError)
-    (fun () -> ignore (Flow.inflow_add f 1))
+  Alcotest.check (Alcotest.result i32 ec) "overflow"
+    (Error Httpg_http2.H2_error.FlowControlError) (Flow.inflow_add f 1)
 
 (* TestOutFlow *)
 let test_outflow () =

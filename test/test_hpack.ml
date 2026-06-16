@@ -48,10 +48,11 @@ let var_int_roundtrip () =
     H.Private.append_var_int buf n i;
     let s = Buffer.contents buf in
     match H.Private.read_var_int n s 0 with
-    | Ok (v, p) ->
+    | `Ok (v, p) ->
         Alcotest.(check int) (Printf.sprintf "n=%d i=%d value" n i) i v;
         Alcotest.(check int) "consumed all" (String.length s) p
-    | Error _ -> Alcotest.fail "read_var_int unexpected error"
+    | `Error _ -> Alcotest.fail "read_var_int unexpected error"
+    | `Need_more -> Alcotest.fail "read_var_int unexpected need_more"
   in
   List.iter
     (fun (n, i) -> check n i)
@@ -85,14 +86,14 @@ let var_int_rfc_c12 () =
   Alcotest.check hex "C.1.2" (of_hex "1f9a0a") (Buffer.contents buf)
 
 let var_int_need_more () =
-  (* a multi-byte varint that is truncated -> raises the internal Need_more
-     sentinel (kept as an exception; not part of [error]). *)
+  (* a multi-byte varint that is truncated -> the internal [`Need_more] signal
+     (threaded as a variant arm; not part of [error]). *)
   let buf = Buffer.create 4 in
   H.Private.append_var_int buf 5 1337;
   let s = String.sub (Buffer.contents buf) 0 1 in
   match H.Private.read_var_int 5 s 0 with
-  | (_ : (int * int, H.error) result) -> Alcotest.fail "expected Need_more"
-  | exception H.Need_more -> ()
+  | `Need_more -> ()
+  | `Ok _ | `Error _ -> Alcotest.fail "expected `Need_more"
 
 (* ---------- RFC 7541 C.2 — literal representations ---------- *)
 

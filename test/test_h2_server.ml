@@ -8,10 +8,16 @@ open Httpg_http2
 module F = H2_frame
 module S = H2_server
 
+(* The frame writers thread their build invariant as [(unit, H2_error.t) result]
+   (ticket 013); these raw-client helpers use valid values, so unwrap [Ok]. *)
+let ok : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
+
 (* Client-side helper: send preface + an (empty) SETTINGS frame. *)
 let client_handshake oc =
   Eio.Buf_write.string oc H2.client_preface;
-  F.write_settings oc [];
+  ok (F.write_settings oc []);
   Eio.Buf_write.flush oc
 
 (* Encode a header field list into a single HPACK block. *)
@@ -28,7 +34,7 @@ let encode_block (fields : (string * string) list) =
 (* Send a request HEADERS frame. *)
 let client_headers oc ~stream_id ?(end_stream = true) fields =
   let block = encode_block fields in
-  F.write_headers oc ~stream_id ~end_stream ~end_headers:true block
+  ok (F.write_headers oc ~stream_id ~end_stream ~end_headers:true block)
 
 (* A collected frame. For HEADERS we eagerly decode the block (the server sends
    END_HEADERS in a single frame in these tests) using the connection-wide
@@ -41,7 +47,7 @@ let rec collect_frames ic (dec : Hpack.decoder) acc ~until =
   let f =
     match F.read_frame ic with
     | Ok f -> f
-    | Error e -> raise (H2_error.to_exception e)
+    | Error _ -> failwith "test: unexpected h2 frame-build invariant"
   in
   let headers =
     match f with
@@ -49,8 +55,12 @@ let rec collect_frames ic (dec : Hpack.decoder) acc ~until =
         let fields = ref [] in
         Hpack.set_emit_func dec (fun (hf : Hpack.header_field) ->
             fields := (hf.name, hf.value) :: !fields);
-        ignore (Hpack.write dec hf.header_frag);
-        Hpack.close dec;
+        (match Hpack.write_result dec hf.header_frag with
+        | Ok _ -> ()
+        | Error e -> Alcotest.failf "hpack decode: %s" (Hpack.error_to_string e));
+        (match Hpack.close_result dec with
+        | Ok () -> ()
+        | Error e -> Alcotest.failf "hpack close: %s" (Hpack.error_to_string e));
         Some (List.rev !fields)
     | _ -> None
   in
@@ -131,7 +141,7 @@ let test_post_echo () =
         (":scheme", "https");
         (":authority", "example.com");
       ];
-    F.write_data oc 1 true "ping";
+    ok (F.write_data oc 1 true "ping");
     Eio.Buf_write.flush oc;
     let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
     collect_frames ic dec [] ~until:(saw_end_stream 1)
@@ -450,7 +460,7 @@ let test_read_timeout_closes_idle_peer () =
     in
     Net.with_connection flow (fun _r w ->
         Eio.Buf_write.string w H2.client_preface;
-        F.write_settings w [];
+        ok (F.write_settings w []);
         Eio.Buf_write.flush w;
         (* Send nothing further; the read timer must fire and close the conn. *)
         Eio.Promise.await server_done;

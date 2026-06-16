@@ -6,21 +6,59 @@ module F = H2_frame
 module Body = Api.Body
 module Header = Api.Header
 
-(* errClientConnClosed / errClientConnGotGoAway / aborts, as exceptions. *)
-exception Client_conn_closed
-exception Conn_got_goaway of H2_error.err_code
+(* The frame writers thread their build invariants as [(unit, H2_error.t)
+   result] (ticket 013). The transport's stream / dep ids and frame sizes are
+   built from valid client state, so those invariants are unreachable here;
+   [must_write] turns the impossible [Error] into the programming bug it would
+   be (and lets the control-frame call sites stay unit-typed). *)
+let must_write : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ ->
+      invalid_arg "H2_transport: frame-build invariant violated (bug)"
 
-(* errClientConnUnusable (transport.go:530): a pooled conn raced into
-   closed/closing before this request wrote anything to the wire. Distinct so the
-   transport pool can evict + retry on a fresh dial (Go's shouldRetryRequest),
-   knowing the request is unmodified. *)
-exception Conn_unusable
-exception Stream_aborted of exn
-exception Malformed_response of string
+(* Handleable failures surfaced by [round_trip] as an [Error] arm (the external
+   boundary of the decoupled h2 client). These are produced and carried as
+   VALUES across the per-connection fibers (ticket 014): the read-loop /
+   body-pump / cleanup fibers set [cc.reader_err] / [cs.abort_err] to an
+   [error], and the request fiber's [await_response] reads that value back —
+   there is no carrier exception threaded across the fiber boundary. *)
+type error =
+  | Conn_closed
+  | Conn_unusable
+  | Got_goaway of H2_error.err_code
+  | Malformed_response of string
+  | Request_canceled
+  | Request_invalid of string
+  | Request_header_list_size
 
-(* errRequestCanceled (transport.go): the caller abandoned the request (early
-   return / undrained response / cancelled scope) before a clean close. *)
-exception Request_canceled
+let error_to_string = function
+  | Conn_closed -> "h2: client connection closed"
+  | Conn_unusable -> "h2: client connection unusable"
+  | Got_goaway c ->
+      Printf.sprintf "h2: server sent GOAWAY (%s)"
+        (H2_error.Private.err_code_string c)
+  | Malformed_response s -> Printf.sprintf "h2: malformed response: %s" s
+  | Request_canceled -> "h2: request canceled"
+  | Request_invalid s -> Printf.sprintf "h2: invalid request: %s" s
+  | Request_header_list_size ->
+      "h2: request header list larger than peer's advertised limit"
+
+(* Body-pump fiber unwind, PRIVATE to this module (never declared in the .mli).
+   The forked body-writer fiber ([write_request_body]) signals an aborted write
+   to itself by raising this; its own [try…with] catches it and exits the fiber.
+   The handleable cause is already recorded on [cs.abort_err] as an [error]
+   value before the raise, so nothing crosses the fiber boundary AS an
+   exception — this is purely a local non-local exit out of the writer fiber. *)
+exception Body_write_aborted
+
+(* Pipe-break cause attached to a stream's response body pipe ([cs.buf_pipe])
+   when the stream is aborted (RST_STREAM / GOAWAY / unclean teardown) while a
+   client is reading the response body. {!H2_pipe} carries the close cause as an
+   [exn]; on the next body read it is raised, carrying the handleable {!error}.
+   It crosses the read-loop -> response-body-reader boundary only through the
+   pipe (an Eio-style channel). PRIVATE to this module (never in the .mli);
+   [None] cause (clean EOF) uses [End_of_file] as before. *)
+exception Pipe_aborted of error
 
 (* ---- clientStream (mirrors Go's clientStream) ---- *)
 
@@ -33,7 +71,7 @@ type client_stream = {
   mutable res : Api.client_response option;
   mutable resp_recv_done : bool;
   mutable peer_closed_done : bool;
-  mutable abort_err : exn option; (* set on stream error / RST / GOAWAY *)
+  mutable abort_err : error option; (* set on stream error / RST / GOAWAY *)
   mutable past_headers : bool; (* got the first MetaHeadersFrame *)
   mutable read_closed : bool; (* peer sent END_STREAM *)
   mutable read_aborted : bool; (* read loop reset the stream *)
@@ -76,7 +114,8 @@ type client_conn = {
   mutable goaway : F.goaway_frame option;
   mutable want_settings_ack : bool;
   mutable seen_settings : bool;
-  mutable reader_err : exn option; (* set when the read loop ends *)
+  mutable reader_err : error option;
+      (* set when the read loop ends with a modeled error (None = clean EOF) *)
   req_header_mu : Eio.Mutex.t; (* serializes stream-id alloc + HEADERS write *)
 }
 
@@ -97,8 +136,9 @@ let forget_stream cc id =
     Eio.Condition.broadcast cc.cond
   end
 
-(* abort a stream: set abort_err once, forget it, wake waiters. *)
-let abort_stream cc cs err =
+(* abort a stream: set abort_err (an [error] value) once, forget it, wake
+   waiters. *)
+let abort_stream cc cs (err : error) =
   (match cs.abort_err with Some _ -> () | None -> cs.abort_err <- Some err);
   forget_stream cc cs.id;
   Eio.Condition.broadcast cc.cond
@@ -116,9 +156,10 @@ let cleanup_write_request cc cs =
     let clean = cs.sent_end_stream && cs.read_closed in
     (match (clean, cs.abort_err) with
     | false, None ->
-        let err = Stream_aborted Request_canceled in
-        cs.abort_err <- Some err;
-        H2_pipe.break_with_error cs.buf_pipe err (* no-op if already closed *)
+        cs.abort_err <- Some Request_canceled;
+        (* break the response pipe so a parked body reader unblocks; no-op if
+           already closed. *)
+        H2_pipe.break_with_error cs.buf_pipe (Pipe_aborted Request_canceled)
     | _ -> ());
     (* An unclean teardown is the analogue of Go's RST_STREAM-with-PING path: we
        keep the slot counted against the limit (as a pending reset) until a PING
@@ -152,9 +193,10 @@ let write_headers_block cc ~stream_id ~end_stream (hdrs : string) =
       let chunk = String.sub hdrs pos chunk_len in
       let next = pos + chunk_len in
       let end_headers = next >= len in
-      if first then
-        F.write_headers cc.w ~stream_id ~end_stream ~end_headers chunk
-      else F.write_continuation cc.w stream_id end_headers chunk;
+      must_write
+        (if first then
+           F.write_headers cc.w ~stream_id ~end_stream ~end_headers chunk
+         else F.write_continuation cc.w stream_id end_headers chunk);
       loop next false
     end
   in
@@ -179,8 +221,13 @@ let actual_content_length (req : Api.client_request) =
   | Body.Stream _ -> Int64.to_int req.creq_content_length
 
 (* encode the request headers into a single HPACK block via
-   httpcommon.EncodeHeaders (Go encodeAndWriteHeaders, sans wmu plumbing). *)
-let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
+   httpcommon.EncodeHeaders (Go encodeAndWriteHeaders, sans wmu plumbing). The
+   underlying [Httpcommon.encode_headers] already returns a [result]; thread it
+   so an invalid request becomes an [Error] without an internal raise/catch
+   bridge (it propagates up through the HEADERS-write mutex closure as a
+   [result]). *)
+let encode_request_headers cc (req : Api.client_request) (acl : int) :
+    (string, Httpg_internal.Httpcommon.error) result =
   let url = req.creq_url in
   let host =
     if req.creq_host <> "" then req.creq_host
@@ -216,21 +263,32 @@ let encode_request_headers cc (req : Api.client_request) (acl : int) : string =
   in
   let buf = Buffer.create 256 in
   Hpack.set_writer cc.henc (fun s -> Buffer.add_string buf s);
-  let (_ : HC.encode_headers_result) =
+  match
     HC.encode_headers ~canonical:Header.canonical_header_key param
       (fun name value ->
         Hpack.write_field cc.henc { name; value; sensitive = false })
-  in
-  Buffer.contents buf
+  with
+  | Ok (_ : HC.encode_headers_result) -> Ok (Buffer.contents buf)
+  | Error e -> Error e
 
 (* ---- request body writing (Go writeRequestBody + awaitFlowControl) ---- *)
 
 (* await [1, min(maxBytes, maxFrameSize)] flow control tokens. *)
 let rec await_flow_control cc cs max_bytes : int =
-  if cc.closed then raise Client_conn_closed
+  (* Runs in the forked body-pump fiber. On conn-close / stream-abort it records
+     the [error] on [cs.abort_err] (so [await_response] sees it) and unwinds the
+     writer fiber via the module-private [Body_write_aborted]. *)
+  if cc.closed then begin
+    (match cs.abort_err with
+    | Some _ -> ()
+    | None ->
+        cs.abort_err <-
+          Some (match cc.reader_err with Some e -> e | None -> Conn_closed));
+    raise Body_write_aborted
+  end
   else
     match cs.abort_err with
-    | Some e -> raise e
+    | Some _ -> raise Body_write_aborted
     | None ->
         let avail = Int32.to_int (H2_flow.available cs.flow) in
         if avail > 0 then begin
@@ -252,7 +310,7 @@ let write_data_chunk cc cs ~end_stream (data : string) : unit =
       let send_end = end_stream && next >= len in
       let piece = String.sub data pos allowed in
       Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-          F.write_data cc.w cs.id send_end piece;
+          must_write (F.write_data cc.w cs.id send_end piece);
           Eio.Buf_write.flush cc.w);
       loop next
     end
@@ -263,7 +321,7 @@ let write_data_chunk cc cs ~end_stream (data : string) : unit =
 let write_request_body cc cs (req : Api.client_request) : unit =
   let send_empty_end () =
     Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-        F.write_data cc.w cs.id true "";
+        must_write (F.write_data cc.w cs.id true "");
         Eio.Buf_write.flush cc.w)
   in
   (match req.creq_body with
@@ -286,8 +344,12 @@ let write_request_body cc cs (req : Api.client_request) : unit =
 
 (* ---- response construction (Go handleResponse) ---- *)
 
+(* Build the response, or an [Error (Malformed_response …)] on a bad status
+   pseudo-header (Go's handleResponse error returns). Runs in the read-loop
+   fiber; [process_headers] routes an [Error] through [end_stream_error]. *)
 let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
-    Api.client_response =
+    (Api.client_response, error) result =
+  let ( let* ) = Result.bind in
   let status = ref "" in
   let header = Header.create () in
   List.iter
@@ -296,12 +358,13 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
         if hf.name = ":status" then status := hf.value)
       else Header.add header (Header.canonical_header_key hf.name) hf.value)
     mf.fields;
-  if !status = "" then raise (Malformed_response "missing status pseudo header");
-  let status_code =
-    match int_of_string_opt !status with
-    | Some n -> n
-    | None ->
-        raise (Malformed_response "malformed non-numeric status pseudo header")
+  let* status_code =
+    if !status = "" then Error (Malformed_response "missing status pseudo header")
+    else
+      match int_of_string_opt !status with
+      | Some n -> Ok n
+      | None ->
+          Error (Malformed_response "malformed non-numeric status pseudo header")
   in
   let content_length =
     match Header.values header "Content-Length" with
@@ -330,21 +393,22 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
               None)
     end
   in
-  let status =
+  let* status =
     match Httpg_base.Status.of_int_result status_code with
-    | Ok status -> status
-    | Error _ -> raise (Malformed_response "malformed status code")
+    | Ok status -> Ok status
+    | Error _ -> Error (Malformed_response "malformed status code")
   in
   (* status text, proto, and request back-pointer are filled by the public
      Transport shim (Go's http2RoundTrip). *)
-  {
-    Api.cres_status_code = status;
-    cres_content_length = content_length;
-    cres_uncompressed = false;
-    cres_header = header;
-    cres_trailer = Api.Header.create ();
-    cres_body = body;
-  }
+  Ok
+    {
+      Api.cres_status_code = status;
+      cres_content_length = content_length;
+      cres_uncompressed = false;
+      cres_header = header;
+      cres_trailer = Api.Header.create ();
+      cres_body = body;
+    }
 
 (* ---- read loop (Go clientConnReadLoop) ---- *)
 
@@ -375,7 +439,7 @@ let end_stream_error cc cs err =
 let send_window_update cc ~stream_id ~incr =
   if incr > 0 then
     Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-        F.write_window_update cc.w stream_id incr;
+        must_write (F.write_window_update cc.w stream_id incr);
         Eio.Buf_write.flush cc.w)
 
 let process_headers cc (mf : F.meta_headers_frame) : unit =
@@ -385,10 +449,10 @@ let process_headers cc (mf : F.meta_headers_frame) : unit =
   | Some cs ->
       if cs.read_closed then
         end_stream_error cc cs
-          (Stream_aborted (Failure "headers after END_STREAM"))
+          (Malformed_response "headers after END_STREAM")
       else if mf.truncated then
         end_stream_error cc cs
-          (Stream_aborted (Failure "response header list too large"))
+          (Malformed_response "response header list too large")
       else if cs.past_headers then
         (* trailers: a HEADERS marking trailers carries END_STREAM. *)
         end_stream cc cs
@@ -397,8 +461,8 @@ let process_headers cc (mf : F.meta_headers_frame) : unit =
         (* read_meta_headers preserves the HEADERS flags in mf.fh. *)
         let stream_ended = mf.fh.flags land H2.flag_end_stream <> 0 in
         match build_response cc cs mf ~stream_ended with
-        | exception e -> end_stream_error cc cs (Stream_aborted e)
-        | res ->
+        | Error err -> end_stream_error cc cs err
+        | Ok res ->
             let status_code =
               res.Api.cres_status_code |> Httpg_base.Status.to_int
             in
@@ -412,58 +476,87 @@ let process_headers cc (mf : F.meta_headers_frame) : unit =
             end
       end
 
-let process_data cc (fh : F.frame_header) (df : F.data_frame) : unit =
+(* The connection-level [process_*] family threads modeled protocol violations
+   as [(unit, H2_error.t) result] up to [read_loop], which dispatches the
+   [Error] by value to [signal_reader_done] (no raise/re-catch round trip).
+   [inflow_add]'s [Error] flow-control code is lifted into that connection
+   error here (ticket 008). *)
+let ( let* ) = Result.bind
+let conn_err code : (unit, H2_error.t) result = Error (H2_error.Connection code)
+
+(* lift [inflow_add]'s [(int32, err_code) result] into the connection-error
+   monad, mapping a flow-control overflow to a connection-level [Error]. *)
+let inflow_add f n : (int32, H2_error.t) result =
+  match H2_flow.inflow_add f n with
+  | Ok v -> Ok v
+  | Error code -> Error (H2_error.Connection code)
+
+let process_data cc (fh : F.frame_header) (df : F.data_frame) :
+    (unit, H2_error.t) result =
   let id = fh.stream_id in
   let length = fh.length in
   match stream_by_id cc id with
   | None ->
-      if id >= cc.next_stream_id then
-        raise (H2_error.Connection_error H2_error.FlowControlError)
+      if id >= cc.next_stream_id then conn_err H2_error.FlowControlError
       else if length > 0 then begin
         (* return flow control for a canceled stream. *)
         let ok = H2_flow.inflow_take cc.conn_inflow length in
-        let conn_add = H2_flow.inflow_add cc.conn_inflow length in
-        if not ok then
-          raise (H2_error.Connection_error H2_error.FlowControlError)
-        else send_window_update cc ~stream_id:0 ~incr:(Int32.to_int conn_add)
+        let* conn_add = inflow_add cc.conn_inflow length in
+        if not ok then conn_err H2_error.FlowControlError
+        else begin
+          send_window_update cc ~stream_id:0 ~incr:(Int32.to_int conn_add);
+          Ok ()
+        end
       end
+      else Ok ()
   | Some cs ->
-      if cs.read_closed then
-        end_stream_error cc cs
-          (Stream_aborted (Failure "DATA after END_STREAM"))
-      else if not cs.past_headers then
-        end_stream_error cc cs (Stream_aborted (Failure "DATA before HEADERS"))
+      if cs.read_closed then begin
+        end_stream_error cc cs (Malformed_response "DATA after END_STREAM");
+        Ok ()
+      end
+      else if not cs.past_headers then begin
+        end_stream_error cc cs (Malformed_response "DATA before HEADERS");
+        Ok ()
+      end
       else begin
         let data = df.data in
-        if length > 0 then begin
-          if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length) then
-            raise (H2_error.Connection_error H2_error.FlowControlError);
-          (* padding refund: length includes padding stripped from [data]. *)
-          let refund = ref (length - String.length data) in
-          let did_reset = ref false in
-          if String.length data > 0 then (
-            try ignore (H2_pipe.write cs.buf_pipe data)
-            with _ ->
-              did_reset := true;
-              refund := !refund + String.length data);
-          let send_conn =
-            Int32.to_int (H2_flow.inflow_add cc.conn_inflow !refund)
-          in
-          let send_stream =
-            if !did_reset then 0
-            else Int32.to_int (H2_flow.inflow_add cs.inflow !refund)
-          in
-          send_window_update cc ~stream_id:0 ~incr:send_conn;
-          send_window_update cc ~stream_id:id ~incr:send_stream
-        end;
-        if df.end_stream then end_stream cc cs
+        let* () =
+          if length > 0 then
+            if not (H2_flow.take_inflows cc.conn_inflow cs.inflow length) then
+              conn_err H2_error.FlowControlError
+            else begin
+              (* padding refund: length includes padding stripped from [data]. *)
+              let refund = ref (length - String.length data) in
+              let did_reset = ref false in
+              (if String.length data > 0 then
+                 match H2_pipe.write cs.buf_pipe data with
+                 | Ok _ -> ()
+                 | Error _ ->
+                     did_reset := true;
+                     refund := !refund + String.length data);
+              let* conn_add = inflow_add cc.conn_inflow !refund in
+              let send_conn = Int32.to_int conn_add in
+              let* stream_add =
+                if !did_reset then Ok 0l else inflow_add cs.inflow !refund
+              in
+              let send_stream = Int32.to_int stream_add in
+              send_window_update cc ~stream_id:0 ~incr:send_conn;
+              send_window_update cc ~stream_id:id ~incr:send_stream;
+              Ok ()
+            end
+          else Ok ()
+        in
+        if df.end_stream then end_stream cc cs;
+        Ok ()
       end
 
-let process_settings cc (sf : F.settings_frame) : unit =
-  if sf.ack then begin
-    if cc.want_settings_ack then cc.want_settings_ack <- false
-    else raise (H2_error.Connection_error H2_error.ProtocolError)
-  end
+let process_settings cc (sf : F.settings_frame) : (unit, H2_error.t) result =
+  if sf.ack then
+    if cc.want_settings_ack then begin
+      cc.want_settings_ack <- false;
+      Ok ()
+    end
+    else conn_err H2_error.ProtocolError
   else begin
     let seen_mcs = ref false in
     List.iter
@@ -492,39 +585,46 @@ let process_settings cc (sf : F.settings_frame) : unit =
       Eio.Condition.broadcast cc.cond
     end;
     Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-        F.write_settings_ack cc.w;
-        Eio.Buf_write.flush cc.w)
+        must_write (F.write_settings_ack cc.w);
+        Eio.Buf_write.flush cc.w);
+    Ok ()
   end
 
 let process_window_update cc (fh : F.frame_header) (wf : F.window_update_frame)
-    : unit =
+    : (unit, H2_error.t) result =
   let id = fh.stream_id in
-  if id = 0 then begin
+  if id = 0 then
     if not (H2_flow.add cc.conn_flow (Int32.of_int wf.increment)) then
-      raise (H2_error.Connection_error H2_error.FlowControlError)
-    else Eio.Condition.broadcast cc.cond
-  end
-  else
-    match stream_by_id cc id with
+      conn_err H2_error.FlowControlError
+    else begin
+      Eio.Condition.broadcast cc.cond;
+      Ok ()
+    end
+  else begin
+    (match stream_by_id cc id with
     | None -> ()
     | Some cs ->
         if not (H2_flow.add cs.flow (Int32.of_int wf.increment)) then
-          end_stream_error cc cs (Stream_aborted (Failure "flow control"))
-        else Eio.Condition.broadcast cc.cond
+          end_stream_error cc cs (Malformed_response "flow control")
+        else Eio.Condition.broadcast cc.cond);
+    Ok ()
+  end
 
 let process_reset_stream cc (fh : F.frame_header) (rf : F.rst_stream_frame) :
     unit =
   match stream_by_id cc fh.stream_id with
   | None -> ()
   | Some cs ->
-      let serr =
-        Stream_aborted
-          (H2_error.Stream_error
-             (H2_error.stream_error fh.stream_id rf.error_code))
+      (* the peer reset the stream: surface it as a handleable response failure
+         carrying the RST code (Go's clientStream sees a StreamError). *)
+      let err =
+        Malformed_response
+          (Printf.sprintf "stream reset by peer (%s)"
+             (H2_error.Private.err_code_string rf.error_code))
       in
-      abort_stream cc cs serr;
+      abort_stream cc cs err;
       cs.read_aborted <- true;
-      H2_pipe.close_with_error cs.buf_pipe serr
+      H2_pipe.close_with_error cs.buf_pipe (Pipe_aborted err)
 
 let process_ping cc (pf : F.ping_frame) : unit =
   if pf.ack then begin
@@ -536,7 +636,7 @@ let process_ping cc (pf : F.ping_frame) : unit =
   end
   else
     Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-        F.write_ping cc.w true pf.data;
+        must_write (F.write_ping cc.w true pf.data);
         Eio.Buf_write.flush cc.w)
 
 let process_goaway cc (gf : F.goaway_frame) : unit =
@@ -549,80 +649,108 @@ let process_goaway cc (gf : F.goaway_frame) : unit =
       cc.streams []
   in
   List.iter
-    (fun cs ->
-      abort_stream cc cs (Stream_aborted (Conn_got_goaway gf.error_code)))
+    (fun cs -> abort_stream cc cs (Got_goaway gf.error_code))
     victims
 
-(* mark the conn closed, record the reader error, abort pending streams. *)
-let signal_reader_done cc err =
+(* mark the conn closed, record the reader error (an [error] value; [None] =
+   clean EOF), abort pending streams. *)
+let signal_reader_done cc (err : error option) =
   cc.reader_err <- err;
   cc.closed <- true;
-  let e = match err with Some e -> e | None -> Client_conn_closed in
+  let e = match err with Some e -> e | None -> Conn_closed in
   (* snapshot: abort_stream mutates cc.streams via forget_stream. *)
   let all = Hashtbl.fold (fun _ cs acc -> cs :: acc) cc.streams [] in
-  List.iter (fun cs -> abort_stream cc cs (Stream_aborted e)) all;
+  List.iter (fun cs -> abort_stream cc cs e) all;
   Eio.Condition.broadcast cc.cond
 
-(* dispatch one frame (transport.go clientConnReadLoop.processFrame). *)
-let process_frame cc (f : F.frame) : unit =
+(* dispatch one frame (transport.go clientConnReadLoop.processFrame). The
+   connection-level [process_*] thread their modeled violations as [Error];
+   the stream-affecting handlers ([process_headers]/[process_reset_stream]) and
+   the side-effect-only ones ([process_ping]/[process_goaway]) stay unit and are
+   wrapped [Ok ()] here. *)
+let process_frame cc (f : F.frame) : (unit, H2_error.t) result =
   match f with
-  | F.Headers (fh, hf) ->
+  | F.Headers (fh, hf) -> (
       (* assemble HEADERS+CONTINUATION; preserve the HEADERS flags. *)
-      let mf =
-        match F.read_meta_headers cc.hdec (fh, hf) cc.r with
-        | Ok mf -> mf
-        | Error e -> raise (H2_error.to_exception e)
-      in
-      let mf = { mf with F.fh = { mf.F.fh with flags = fh.flags } } in
-      process_headers cc mf
+      match F.read_meta_headers cc.hdec (fh, hf) cc.r with
+      | Error e -> Error e
+      | Ok mf ->
+          let mf = { mf with F.fh = { mf.F.fh with flags = fh.flags } } in
+          process_headers cc mf;
+          Ok ())
   | F.Data (fh, df) -> process_data cc fh df
   | F.Settings (_, sf) -> process_settings cc sf
   | F.Window_update (fh, wf) -> process_window_update cc fh wf
-  | F.RST_stream (fh, rf) -> process_reset_stream cc fh rf
-  | F.Ping (_, pf) -> process_ping cc pf
-  | F.GoAway (_, gf) -> process_goaway cc gf
-  | F.Push_promise _ -> raise (H2_error.Connection_error H2_error.ProtocolError)
-  | F.Priority _ | F.Continuation _ | F.Unknown _ -> ()
+  | F.RST_stream (fh, rf) ->
+      process_reset_stream cc fh rf;
+      Ok ()
+  | F.Ping (_, pf) ->
+      process_ping cc pf;
+      Ok ()
+  | F.GoAway (_, gf) ->
+      process_goaway cc gf;
+      Ok ()
+  | F.Push_promise _ -> conn_err H2_error.ProtocolError
+  | F.Priority _ | F.Continuation _ | F.Unknown _ -> Ok ()
 
 (* the read-loop fiber: read frames, dispatch. Mirrors Go's readLoop+run.
    Returns once the conn is closed (EOF or fatal error); the caller forks it
    into [cc.sw] and signals reader-done. *)
 let read_loop cc : unit =
   let got_settings = ref false in
-  let rec loop () =
-    match
-      match F.read_frame ~max_size:H2.default_max_read_frame_size cc.r with
-      | Ok f -> f
-      | Error e -> raise (H2_error.to_exception e)
-    with
-    | exception End_of_file -> signal_reader_done cc None
-    (* F019: an over-cap frame escaping read_frame as Buffer_limit_exceeded maps
-       to a FRAME_SIZE connection error. *)
-    | exception Eio.Buf_read.Buffer_limit_exceeded ->
-        signal_reader_done cc
-          (Some (H2_error.Connection_error H2_error.FrameSizeError))
-    | exception H2_error.Stream_error se ->
-        (* stream-level frame error: reset that stream, keep going. *)
+  (* A stream-level framing error ([H2_error.Stream]) resets just that stream and
+     keeps the loop going; any connection-level framing error is terminal — the
+     conn is dead, so awaiting streams see [Conn_closed]. The carried
+     [H2_error.t] is dispatched purely by value (no carrier exception). *)
+  let on_read_error (e : H2_error.t) : [ `Continue | `Done of error ] =
+    match e with
+    | H2_error.Stream se ->
         (match stream_by_id cc se.stream_id with
         | Some cs ->
-            end_stream_error cc cs (Stream_aborted (H2_error.Stream_error se))
+            let err =
+              Malformed_response
+                (Printf.sprintf "stream error (%s)"
+                   (H2_error.Private.err_code_string se.code))
+            in
+            end_stream_error cc cs err
         | None -> ());
-        loop ()
-    | exception e -> signal_reader_done cc (Some e)
-    | f ->
+        `Continue
+    | _ -> `Done Conn_closed
+  in
+  let rec loop () =
+    match F.read_frame ~max_size:H2.default_max_read_frame_size cc.r with
+    (* The framing boundary returns a [result]; dispatch the [Error] by value.
+       Eio's own raises at the read boundary still escape and are contained here:
+       a clean [End_of_file] is a clean close; a [Buffer_limit_exceeded]
+       (over-cap frame, F019) terminates the conn. *)
+    | exception End_of_file -> signal_reader_done cc None
+    | exception Eio.Buf_read.Buffer_limit_exceeded ->
+        signal_reader_done cc (Some Conn_closed)
+    | exception e -> raise e (* bug-class / Eio.Cancel: propagate (daemon). *)
+    | Error e -> (
+        match on_read_error e with
+        | `Continue -> loop ()
+        | `Done err -> signal_reader_done cc (Some err))
+    | Ok f ->
         (* enforce: first frame must be SETTINGS. *)
         let is_settings = match f with F.Settings _ -> true | _ -> false in
         if (not !got_settings) && not is_settings then
-          signal_reader_done cc
-            (Some (H2_error.Connection_error H2_error.ProtocolError))
+          signal_reader_done cc (Some Conn_closed)
         else begin
           got_settings := !got_settings || is_settings;
           match process_frame cc f with
-          | () -> loop ()
+          | Ok () -> loop ()
+          (* Modeled protocol violations are dispatched by value: a stream-level
+             error resets just that stream and the loop continues; any
+             connection-level error is terminal. *)
+          | Error e -> (
+              match on_read_error e with
+              | `Continue -> loop ()
+              | `Done err -> signal_reader_done cc (Some err))
+          (* An over-cap CONTINUATION escaping read_meta_headers as Buffer_limit
+             terminates the conn; bug-class / Cancel propagate. *)
           | exception Eio.Buf_read.Buffer_limit_exceeded ->
-              signal_reader_done cc
-                (Some (H2_error.Connection_error H2_error.FrameSizeError))
-          | exception e -> signal_reader_done cc (Some e)
+              signal_reader_done cc (Some Conn_closed)
         end
   in
   loop ()
@@ -684,21 +812,28 @@ let new_client_conn ~sw r w : client_conn =
     ]
   in
   Eio.Buf_write.string w H2.client_preface;
-  F.write_settings w initial_settings;
-  F.write_window_update w 0 conn_recv_window;
+  must_write (F.write_settings w initial_settings);
+  must_write (F.write_window_update w 0 conn_recv_window);
   Eio.Buf_write.flush w;
-  (* start the read loop as a daemon: cancelled when the conn switch ends. *)
+  (* start the read loop as a daemon: cancelled when the conn switch ends.
+     Eio-boundary catch: a read-side IO failure (TCP reset, etc.) means the conn
+     is dead -> record [Conn_closed]; bug-class exns and [Eio.Cancel] propagate
+     out of the daemon (the residual floor). *)
   Eio.Fiber.fork_daemon ~sw (fun () ->
       (try read_loop cc with
-      | Eio.Cancel.Cancelled _ as e -> raise e
-      | e -> signal_reader_done cc (Some e));
+      | (Eio.Cancel.Cancelled _ | Assert_failure _ | Match_failure _
+        | Invalid_argument _ | Stack_overflow | Out_of_memory) as e ->
+          raise e
+      | _ -> signal_reader_done cc (Some Conn_closed));
       `Stop_daemon);
   (* wait until the server's SETTINGS is seen (or the reader died). *)
   let rec wait_seen () =
     if cc.seen_settings then ()
     else if cc.closed then
       raise
-        (match cc.reader_err with Some e -> e | None -> Client_conn_closed)
+        (Failure
+           (error_to_string
+              (match cc.reader_err with Some e -> e | None -> Conn_closed)))
     else (
       Eio.Condition.await_no_mutex cc.cond;
       wait_seen ())
@@ -732,20 +867,21 @@ let make_stream cc id ~is_head =
     body_is_stream = false;
   }
 
-(* wait for the response headers, an abort, or the reader to die. *)
-let await_response cc cs : Api.client_response =
+(* wait for the response headers, an abort, or the reader to die. Runs in the
+   request fiber itself; it reads the [error] VALUE set by the read-loop /
+   body-pump / cleanup fibers (no carrier exception crosses the boundary) and
+   returns it as an [Error]. [Eio.Condition.await_no_mutex] still raises
+   [Eio.Cancel.Cancelled] on a cancelled request scope — that propagates. *)
+let await_response cc cs : (Api.client_response, error) result =
   let rec loop () =
     match cs.res with
-    | Some res -> res
+    | Some res -> Ok res
     | None -> (
         match cs.abort_err with
-        | Some e -> raise e
+        | Some err -> Error err
         | None ->
             if cc.closed then
-              raise
-                (match cc.reader_err with
-                | Some e -> e
-                | None -> Client_conn_closed)
+              Error (match cc.reader_err with Some e -> e | None -> Conn_closed)
             else (
               Eio.Condition.await_no_mutex cc.cond;
               loop ()))
@@ -756,11 +892,12 @@ let await_response cc cs : Api.client_response =
    count is below the peer's MAX_CONCURRENT_STREAMS. Caller holds req_header_mu,
    so the count check and the table insert that follows are switch-free between
    waiters (slots free via the read loop's forget_stream broadcast). *)
-let rec await_open_slot cc =
+let rec await_open_slot cc : (unit, [ `Conn_unusable ]) result =
   (* Conn died while we waited for a slot; nothing written yet (transport.go
-     :530 errClientConnUnusable). *)
-  if cc.closed || cc.closing then raise Conn_unusable
-  else if current_request_count cc < cc.max_concurrent_streams then ()
+     :530 errClientConnUnusable). Returned by value so it propagates out of the
+     HEADERS-write mutex closure as a [result] rather than a raise/catch. *)
+  if cc.closed || cc.closing then Error `Conn_unusable
+  else if current_request_count cc < cc.max_concurrent_streams then Ok ()
   else (
     Eio.Condition.await_no_mutex cc.cond;
     await_open_slot cc)
@@ -781,132 +918,94 @@ let reserve_new_request cc =
 let decr_stream_reservations cc =
   if cc.streams_reserved > 0 then cc.streams_reserved <- cc.streams_reserved - 1
 
-let round_trip_exn ?sw cc (req : Api.client_request) : Api.client_response =
+(* Map an [Httpcommon.encode_headers] failure to the matching request [error].
+   Threaded out of [encode_request_headers] as a [result] (no raise). *)
+let error_of_encode (e : Httpg_internal.Httpcommon.error) : error =
+  match e with
+  | HC.Invalid_request s -> Request_invalid s
+  | HC.Header_list_size -> Request_header_list_size
+
+let round_trip ?sw cc (req : Api.client_request) :
+    (Api.client_response, error) result =
   (* errClientConnUnusable (transport.go:530): conn dead before we wrote
-     anything, so the request is untouched and replayable on a fresh dial. *)
-  if cc.closed || cc.closing then raise Conn_unusable
+     anything, so the request is untouched and replayable on a fresh dial.
+     Returned by value (no raise) so the transport pool's evict + fresh-dial
+     retry branches on [Error Conn_unusable]. *)
+  if cc.closed || cc.closing then Error Conn_unusable
   else begin
     let is_head = req.creq_meth = Httpg_base.Method.Head in
     let acl = actual_content_length req in
     let has_body = acl <> 0 in
     (* await a slot + allocate stream id + write HEADERS under req_header_mu (Go
-       reqHeaderMu); the slot wait + table insert are atomic per waiter. *)
-    let cs =
+       reqHeaderMu); the slot wait + table insert are atomic per waiter. The
+       closure value is the result that [Eio.Mutex.use_rw] returns: a slot-wait
+       conn-death and an encode rejection propagate out of the mutex as [Error]
+       (no raise to escape the mutex). *)
+    let cs_result : (client_stream, error) result =
       Eio.Mutex.use_rw ~protect:false cc.req_header_mu (fun () ->
           (* consume any reservation made by [reserve_new_request] before the
              slot wait, mirroring decrStreamReservationsLocked (transport.go
              :1270). *)
           decr_stream_reservations cc;
-          await_open_slot cc;
-          let id = cc.next_stream_id in
-          cc.next_stream_id <- cc.next_stream_id + 2;
-          let cs = make_stream cc id ~is_head in
-          Hashtbl.replace cc.streams id cs;
-          (* wire caller-done teardown the instant the stream exists, before any
-             cancellation point (the HEADERS flush below), so an early cancel
-             still forgets it (transport.go:1217). *)
-          (match sw with
-          | Some s ->
-              Eio.Switch.on_release s (fun () -> cleanup_write_request cc cs)
-          | None -> ());
-          let hdrs = encode_request_headers cc req acl in
-          let end_stream = not has_body in
-          if end_stream then cs.sent_end_stream <- true;
-          Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
-              write_headers_block cc ~stream_id:id ~end_stream hdrs);
-          cs)
+          match await_open_slot cc with
+          | Error `Conn_unusable -> Error Conn_unusable
+          | Ok () -> (
+              let id = cc.next_stream_id in
+              cc.next_stream_id <- cc.next_stream_id + 2;
+              let cs = make_stream cc id ~is_head in
+              Hashtbl.replace cc.streams id cs;
+              (* wire caller-done teardown the instant the stream exists, before
+                 any cancellation point (the HEADERS flush below), so an early
+                 cancel still forgets it (transport.go:1217). *)
+              (match sw with
+              | Some s ->
+                  Eio.Switch.on_release s (fun () -> cleanup_write_request cc cs)
+              | None -> ());
+              match encode_request_headers cc req acl with
+              | Error e ->
+                  (* Encode rejected the request: nothing was written, so forget
+                     the just-allocated stream and surface the typed error. *)
+                  cleanup_write_request cc cs;
+                  Error (error_of_encode e)
+              | Ok hdrs ->
+                  let end_stream = not has_body in
+                  if end_stream then cs.sent_end_stream <- true;
+                  Eio.Mutex.use_rw ~protect:false cc.wmu (fun () ->
+                      write_headers_block cc ~stream_id:id ~end_stream hdrs);
+                  Ok cs))
     in
-    (* Fork the request-body pump so the response can be read concurrently (Go's
-       doRequest goroutine); it lives on the conn switch. It must NOT fork onto
-       the caller's [sw], or [Switch.run sw] would block waiting for a parked
-       writer to finish. Instead cleanup_write_request, run on [sw] release
-       (caller done: early return / undrained body / cancel — F020), aborts the
-       stream: that sets abort_err, so a writer parked in await_flow_control wakes
-       and exits, and forgets the stream — no writer fiber or table entry lingers
-       past the caller's interest (transport.go:1217 cleanupWriteRequest). *)
-    if has_body then
-      Eio.Fiber.fork ~sw:cc.sw (fun () ->
-          try write_request_body cc cs req with
-          | Eio.Cancel.Cancelled _ -> ()
-          | e -> abort_stream cc cs (Stream_aborted e));
-    await_response cc cs
+    match cs_result with
+    | Error _ as e -> e
+    | Ok cs ->
+        (* Fork the request-body pump so the response can be read concurrently
+           (Go's doRequest goroutine); it lives on the conn switch. It must NOT
+           fork onto the caller's [sw], or [Switch.run sw] would block waiting
+           for a parked writer to finish. Instead cleanup_write_request, run on
+           [sw] release (caller done: early return / undrained body / cancel —
+           F020), aborts the stream: that sets abort_err, so a writer parked in
+           await_flow_control wakes and exits, and forgets the stream — no writer
+           fiber or table entry lingers past the caller's interest
+           (transport.go:1217 cleanupWriteRequest). *)
+        if has_body then
+          Eio.Fiber.fork ~sw:cc.sw (fun () ->
+              try write_request_body cc cs req with
+              (* The body-pump fiber records its handleable cause on
+                 [cs.abort_err] as an [error] VALUE (in [await_flow_control] /
+                 here) — nothing crosses the fiber boundary as an exception.
+                 [Body_write_aborted] is its own non-local exit (cause already
+                 recorded). [Eio.Cancel] propagates (teardown); any other IO
+                 failure means the write died, so record [Conn_closed]. *)
+              | Body_write_aborted -> ()
+              | ( Eio.Cancel.Cancelled _ | Assert_failure _ | Match_failure _
+                | Invalid_argument _ | Stack_overflow | Out_of_memory ) as e ->
+                  raise e
+              | _ -> abort_stream cc cs Conn_closed);
+        (* [await_response] returns the [error] VALUE set by another fiber
+           ([cs.abort_err] / [cc.reader_err]) as an [Error] — no carrier
+           exception. [Eio.Cancel] from a cancelled request scope still
+           propagates out of [await_response]'s condition wait. *)
+        await_response cc cs
   end
-
-(* Pre-[type error] matchers for the exceptions whose names the [error] variants
-   shadow ([Conn_unusable]/[Malformed_response]/[Request_canceled]): once [type
-   error] is in scope those unqualified constructor names resolve to the variant,
-   so a [with] clause can no longer pattern-match the exception by name. Captured
-   here while the constructors still mean the exceptions. *)
-let match_conn_unusable = function Conn_unusable -> true | _ -> false
-let match_request_canceled = function Request_canceled -> true | _ -> false
-let match_malformed = function Malformed_response s -> Some s | _ -> None
-
-(* Builders for the same shadowed exceptions, captured for [error_to_exn] below
-   (which re-raises an [error] as its internal exception for the transport
-   bridge). *)
-let exn_conn_unusable = Conn_unusable
-let exn_request_canceled = Request_canceled
-let exn_malformed s = Malformed_response s
-
-(* Handleable failures surfaced by [round_trip] as an Error arm (the external
-   boundary of the decoupled h2 client). Internal fiber control-flow / event-loop
-   protocol transitions ([Stream_aborted], [H2_error.Connection_error]/
-   [Stream_error], [Eio.Cancel], asserts, pipe/databuffer guards) stay
-   exceptional and propagate unchanged. *)
-type error =
-  | Conn_closed
-  | Conn_unusable
-  | Got_goaway of H2_error.err_code
-  | Malformed_response of string
-  | Request_canceled
-
-let error_to_string = function
-  | Conn_closed -> "h2: client connection closed"
-  | Conn_unusable -> "h2: client connection unusable"
-  | Got_goaway c ->
-      Printf.sprintf "h2: server sent GOAWAY (%s)"
-        (H2_error.Private.err_code_string c)
-  | Malformed_response s -> Printf.sprintf "h2: malformed response: %s" s
-  | Request_canceled -> "h2: request canceled"
-
-(* Map a handleable internal exception to an [error]; [None] for anything that
-   is NOT a modeled boundary failure (a bug / fiber-control unwind) and must be
-   re-raised. *)
-let rec error_of_exn (e : exn) : error option =
-  match e with
-  | Client_conn_closed -> Some Conn_closed
-  | Conn_got_goaway c -> Some (Got_goaway c)
-  | Stream_aborted inner ->
-      (* [Stream_aborted] is the fiber-unwind wrapper; the real handleable cause
-         (a GOAWAY / cancel / etc.) rides [inner]. Unwrap and re-map; if [inner]
-         is itself not handleable, the caller re-raises it. *)
-      error_of_exn inner
-  | e when match_conn_unusable e -> Some Conn_unusable
-  | e when match_request_canceled e -> Some Request_canceled
-  | e -> (
-      match match_malformed e with
-      | Some s -> Some (Malformed_response s)
-      | None -> None)
-
-let round_trip ?sw cc (req : Api.client_request) :
-    (Api.client_response, error) result =
-  match round_trip_exn ?sw cc req with
-  | resp -> Ok resp
-  | exception e -> (
-      match error_of_exn e with Some err -> Error err | None -> raise e)
-
-(* Re-build the internal exception an [error] was mapped from. Used by the
-   transport bridge (lib/transport.ml) to re-raise while [Transport.round_trip]
-   still raises, so behavior is identical to before the result conversion. The
-   [error] variants shadow the same-named exceptions in this module's signature,
-   so callers cannot name those exceptions directly — this is the supported
-   re-raise path. *)
-let error_to_exn = function
-  | Conn_closed -> Client_conn_closed
-  | Conn_unusable -> exn_conn_unusable
-  | Got_goaway c -> Conn_got_goaway c
-  | Malformed_response s -> exn_malformed s
-  | Request_canceled -> exn_request_canceled
 
 let close cc : unit =
   cc.closing <- true;

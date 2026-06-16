@@ -82,6 +82,7 @@ let modules_with_type_error =
     "internal/http2/hpack";
     "internal/http2/hpack_huffman";
     "internal/pattern";
+    "internal/httpcommon";
     "cookie";
     "fs";
     "form";
@@ -112,14 +113,19 @@ let unhandleable_allowlist =
     (* Failure: scheduler invariant *)
     "net";
     (* Failure: bound_port + TLS/csr setup misuse (write-before-handshake, bad
-       config). Note: the handleable network failures are typed exception
-       carriers, not bare Failure -- a TLS handshake/auth/protocol failure is
-       [Net.Tls_error] (F006) and a DNS/dial failure is [Net.Dial_error]
-       (006-typed-network-failures). *)
+       config). Note: the handleable network failures are the typed [Net.error]
+       variant ([Dial]/[Tls]) threaded as [(_, error) result] by the client
+       entry points -- there is no public [exception] on [Net]. The only
+       surviving Net raises are INTERNAL ([Internal_tls_error]/
+       [Internal_dial_error], not in net.mli): the Eio-forced mid-stream
+       Flow.SOURCE read (mapped back to [Error] at the connect boundary) and the
+       [result]-free [listen]/[accept_tls] startup/per-conn contracts. *)
     "hpack_tables";
     (* Invalid_argument: table-index invariant (evict_oldest) *)
     "hpack";
-    (* exception Need_more: decoder control-flow sentinel *)
+    (* raise Exit: internal varint loop control flow; the decoder's incremental
+       [write]/[close] path raises internal decode sentinels (not in the .mli)
+       mapped back to [error] at the [result] boundary *)
     "hpack_huffman";
     (* raise Exit: internal loop control flow *)
     "pattern";
@@ -136,10 +142,6 @@ let unhandleable_allowlist =
     (* failwith: tree-construction invariant *)
     "h2_write";
     (* failwith "unexpected empty hpack": encoder invariant *)
-    "h2_pipe";
-    (* Closed_pipe_write / Uninitialized_pipe_write: write invariants *)
-    "h2_databuffer";
-    (* Read_empty: read-past-empty invariant *)
     "h2_transport";
     (* internal conn-loop control-flow exceptions (boundary-only conv) *)
     "h2_server";
@@ -220,8 +222,6 @@ let test_unhandleable_allowlisted () =
       "hpack";
       "pattern";
       "mapping";
-      "h2_pipe";
-      "h2_databuffer";
       "routing_tree";
       "h2_write";
       "httptest";

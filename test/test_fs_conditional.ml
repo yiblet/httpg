@@ -15,6 +15,11 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* ---- temp-dir + file helpers ---- *)
 
 let with_tmpdir ~fs ~net ~clock ~sw f =
@@ -78,7 +83,7 @@ let request_with_headers ~sw c url headers =
     List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
   let resp = ok_resp (Client.do_ ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
-    Body.read_all resp.Response.body,
+    read_body resp.Response.body,
     resp.Response.header )
 
 let serve ~net ~sw ~clock handler client =

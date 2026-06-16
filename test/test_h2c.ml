@@ -22,12 +22,17 @@ let ok_resp = function
   | Ok resp -> resp
   | Error e -> Alcotest.failf "client: %s" (Client.error_to_string e)
 
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+
 (* A handler: GET -> 200 "hello, h2c"; POST /echo echoes the request body. *)
 let test_handler =
  fun ~sw:_ (r : Request.t) ->
   let body =
     match (r.Request.meth, Uri.path r.Request.url) with
-    | Httpg_base.Method.Post, "/echo" -> Body.read_all r.Request.body
+    | Httpg_base.Method.Post, "/echo" -> read_body r.Request.body
     | _, _ -> "hello, h2c"
   in
   Response.create () |> Response.with_body_string body
@@ -61,14 +66,14 @@ let test_h2c_roundtrip () =
         let get_resp =
           ok_resp (Client.get ~force_h2:true ~sw client (base ^ "/hello"))
         in
-        let get_body = Body.read_all get_resp.Response.body in
+        let get_body = read_body get_resp.Response.body in
         (* POST, reusing the same h2c connection from the pool. *)
         let post_resp =
           ok_resp
             (Client.post ~force_h2:true ~sw client (base ^ "/echo")
-               ~content_type:"text/plain" (Body.String "ping-pong"))
+               ~content_type:"text/plain" (Body.of_string "ping-pong"))
         in
-        let post_body = Body.read_all post_resp.Response.body in
+        let post_body = read_body post_resp.Response.body in
         ( Httpg_base.Status.to_int get_resp.Response.status,
           get_resp.Response.proto,
           get_body,

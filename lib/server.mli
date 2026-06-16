@@ -45,9 +45,15 @@ type t
     fibers) down. *)
 
 exception Shutdown
-(** Sentinel used by {!close} to cancel the accept switches; swallowed by
-    {!serve} (the shared accept loop, also used by the TLS entry points) so a
-    clean shutdown returns normally. *)
+(** Fiber-control cancellation signal, not a modeled error. {!close} threads it
+    through [Eio.Switch.fail] to cancel the accept switches (loop 0 and every
+    forked domain's accept loop + in-flight connection fibers); the shared accept
+    loop in {!serve} (also used by the TLS entry points) swallows it so a clean
+    shutdown returns normally. It is a sibling to [Eio.Cancel] — it rides
+    [Eio.Switch.fail], which requires an [exn] and cannot carry a [result] — so it
+    legitimately stays an [exception] under the philosophy's fiber-control
+    exemption (see AGENTS.md "Exception philosophy"), rather than being a
+    failure modeled as a typed [error]. *)
 
 val create :
   net:_ Eio.Net.t ->

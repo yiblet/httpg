@@ -3,43 +3,26 @@
    Request.Write, ReadResponse, Response.Write.
 
    Read bodies {b stream} — they are not materialized in memory. {!read_request}
-   and {!read_response} return a {!Body.Stream} that pulls bytes lazily from the
-   connection (wrapping [Transfer.read_transfer]'s incremental reader). For a
-   chunked body, reaching EOF reads the trailing trailer block and merges it into
-   the message's [trailer] field (Go's [body.readTrailer] / [mergeSetHeader]), so
-   the trailer is only populated once the body has been consumed to EOF. Use
-   {!Body.read_all} to collect a whole body or {!Body.drain} to consume-and-
-   discard it. *)
-
-exception Protocol_error of string
-(** A parse / protocol error, carrying Go's message text (Go's [ProtocolError] /
-    [badStringError]).
-
-    {b Retained} for the {b mid-stream} body thunk (errors discovered after the
-    read boundary returned [Ok] keep raising) and as the internal raise
-    mechanism for the linear parse path; the handleable boundary error is
-    {!error} below. {!Transport} also raises it to carry a round-trip failure
-    message through its exception-based error flow. *)
-
-exception Trailer_too_large
-(** The trailer block following a chunked body exceeded the bounded read budget
-    (Go's "suspiciously long trailer after chunked body", transfer.go:934). The
-    trailer is read {b mid-stream} (inside the body [Stream] thunk, when the
-    body reaches EOF), so this is the form callers observe — it {b raises} from
-    a body pull ({!Body.read_all} / {!Body.drain}) rather than surfacing as a
-    boundary [Error] from {!read_request} / {!read_response}. The corresponding
-    boundary arm is {!error}'s {!constructor-Trailer_too_large}. *)
+   and {!read_response} return a streaming {!Body.t} that pulls bytes lazily
+   from the connection (wrapping [Transfer.read_transfer]'s incremental reader).
+   For a chunked body, reaching EOF reads the trailing trailer block and merges
+   it into the message's [trailer] field (Go's [body.readTrailer] /
+   [mergeSetHeader]), so the trailer is only populated once the body has been
+   consumed to EOF. Use {!Body.read_all} to collect a whole body or
+   {!Body.drain} to consume-and-discard it. *)
 
 (** Handleable error at the request/response read/write boundary. Lower-level
     framing failures are embedded via the {!constructor-Transfer} arm.
 
-    {b Mid-stream policy (Resolution #1):} errors discovered inside a {!Body.t}
-    [Stream] thunk {b after} {!read_request}/{!read_response} returned [Ok] keep
-    {b raising} (the faithful analogue of Go's "a later [Read] returns an
-    error"). Only the header / initial-parse boundary surfaces [Error]. *)
+    {b Mid-stream policy:} a framing failure discovered inside the streaming
+    {!Body.t} {b after} {!read_request}/{!read_response} returned [Ok] surfaces
+    as a terminal {!Body.error} element of the body's result-seq (typed data,
+    the faithful analogue of Go's "a later [Read] returns an error"), never a
+    raise. Only the header / initial-parse boundary uses this [error]. *)
 type error =
   | Protocol of string
-      (** malformed MIME header / request line; was {!Protocol_error} *)
+      (** malformed MIME header / request line (Go's [ProtocolError] /
+          [badStringError]) *)
   | Missing_host
       (** {!write_request}: no Host / URL host (Go's [errMissingHost]) *)
   | Transfer of Transfer.error
@@ -53,10 +36,11 @@ type error =
   | Trailer_too_large
       (** the trailer block following a chunked body exceeded the bounded read
           budget (Go's "suspiciously long trailer after chunked body",
-          transfer.go:934). Read {b mid-stream} inside the body [Stream] thunk,
-          so per the mid-stream policy this {b keeps raising} rather than
-          surfacing as a boundary [Error] from {!read_request}/{!read_response}.
-      *)
+          transfer.go:934). The trailer is read {b mid-stream} (when the body
+          reaches EOF), so the form callers observe is {!Body.Trailer_too_large}
+          — a terminal [Error] element of the body's result-seq, not a boundary
+          [Error] from {!read_request}/{!read_response}. This arm is retained for
+          callers that classify a boundary {!error} alongside that case. *)
   | Malformed_host
       (** {!read_request}: the single inbound [Host] header value contained a
           byte outside Go's lenient host byte set ([httpguts.ValidHostHeader],
@@ -84,7 +68,7 @@ val read_request :
   ?max_header_bytes:int -> Eio.Buf_read.t -> (Request.t, error) result
 (** [read_request ?max_header_bytes r] is [ReadRequest]: parse the request line,
     headers (Host promoted to [host] and deleted from the header map), and body
-    framing from [ic]. The body is a streaming {!Body.Stream} reading lazily
+    framing from [ic]. The body is a streaming {!Body.t} reading lazily
     from [ic]; it is not buffered. Consume it to EOF
     ({!Body.read_all}/{!Body.drain}) to reach the next message boundary and
     populate any chunked trailer.
@@ -111,7 +95,7 @@ val read_response :
 (** [read_response ?request ?max_header_bytes r] is [ReadResponse]: parse the
     status line, headers and body framing. [request] optionally supplies the
     corresponding request (for HEAD body suppression); a GET is assumed
-    otherwise. The body is a streaming {!Body.Stream} reading lazily from [ic]
+    otherwise. The body is a streaming {!Body.t} reading lazily from [ic]
     (not buffered); consume it to EOF to reach the next message boundary and
     read any chunked trailer.
 

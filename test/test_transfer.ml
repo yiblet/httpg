@@ -12,19 +12,29 @@ let with_output_string (f : Eio.Buf_write.t -> unit) : string =
   f w;
   Eio.Buf_write.serialize_to_string w
 
-(* Read everything a chunked reader yields, to a string. *)
-let read_chunked_all (s : string) : string =
+(* Read everything a chunked reader yields. A framing failure surfaces as a
+   terminal [Error] element of the reader's result-seq (ticket 006: no raise);
+   collect to [Ok bytes] on clean EOF, [Error e] on the first failure. *)
+let read_chunked_result (s : string) : (string, Transfer.error) result =
   let r = buf_read_of_string s in
   let next = Transfer.new_chunked_reader r in
   let buf = Buffer.create 64 in
   let rec loop () =
     match next () with
-    | None -> Buffer.contents buf
-    | Some d ->
+    | None -> Ok (Buffer.contents buf)
+    | Some (Ok d) ->
         Buffer.add_string buf d;
         loop ()
+    | Some (Error e) -> Error e
   in
   loop ()
+
+(* The success-path consumer: assert the stream decodes cleanly to a string. *)
+let read_chunked_all (s : string) : string =
+  match read_chunked_result s with
+  | Ok bytes -> bytes
+  | Error e ->
+      Alcotest.failf "chunked decode error: %s" (Transfer.error_to_string e)
 
 (* --- internal/chunked_test.go: TestChunk (writer wire format + roundtrip). *)
 
@@ -109,25 +119,30 @@ let test_parse_hex_uint () =
     (fun i -> ok (Printf.sprintf "%x" i) (Int64.of_int i))
     [ 0; 1; 15; 16; 255; 256; 1234 ]
 
-(* TestChunkInvalidInputs: each must error. *)
+(* TestChunkInvalidInputs: each must yield a terminal [Error] element (no
+   raise, ticket 006). *)
 let test_chunk_invalid_inputs () =
   let bad name b =
-    match read_chunked_all b with
-    | exception (Transfer.Chunk_error _ | Transfer.Err_line_too_long) ->
+    match read_chunked_result b with
+    | Error (Transfer.Chunk _ | Transfer.Line_too_long) ->
         Alcotest.(check pass) name () ()
-    | got -> Alcotest.failf "%s: unexpectedly parsed %S" name got
+    | Error e ->
+        Alcotest.failf "%s: unexpected error %s" name
+          (Transfer.error_to_string e)
+    | Ok got -> Alcotest.failf "%s: unexpectedly parsed %S" name got
   in
   bad "bare LF in chunk size" "1\na\r\n0\r\n";
   bad "extra LF in chunk size" "1\r\r\na\r\n0\r\n";
   bad "bare LF in chunk data" "1\r\na\n0\r\n";
   bad "bare LF in chunk extension" "1;\na\r\n0\r\n"
 
-(* TestChunkReadPartial (malformed tail): the malformed error surfaces on the
-   pull that consumes the chunk -- same error as Go, eagerly. *)
+(* TestChunkReadPartial (malformed tail): the malformed error surfaces as the
+   terminal [Error] element on the pull that consumes the chunk -- same error
+   as Go, eagerly. *)
 let test_chunk_read_partial () =
   let input = "7\r\n1234567xx" in
-  match read_chunked_all input with
-  | exception Transfer.Chunk_error msg ->
+  match read_chunked_result input with
+  | Error (Transfer.Chunk msg) ->
       Alcotest.(check bool)
         (Printf.sprintf "malformed error (got %S)" msg)
         true
@@ -136,18 +151,24 @@ let test_chunk_read_partial () =
            ignore (Str.search_forward re msg 0);
            true
          with Not_found -> false)
-  | got -> Alcotest.failf "expected malformed error, parsed %S" got
+  | Error e ->
+      Alcotest.failf "expected malformed error, got %s"
+        (Transfer.error_to_string e)
+  | Ok got -> Alcotest.failf "expected malformed error, parsed %S" got
 
-(* TestIncompleteChunk: every proper prefix of a valid stream is
-   ErrUnexpectedEOF (Chunk_error "unexpected EOF"); the full stream is fine. *)
+(* TestIncompleteChunk: every proper prefix of a valid stream yields a terminal
+   [Error] (ErrUnexpectedEOF, [Chunk "unexpected EOF"], or [Line_too_long]); the
+   full stream is fine. *)
 let test_incomplete_chunk () =
   let valid = "4\r\nabcd\r\n" ^ "5\r\nabc\r\n\r\n" ^ "0\r\n" in
   for i = 0 to String.length valid - 1 do
     let incomplete = String.sub valid 0 i in
-    match read_chunked_all incomplete with
-    | exception Transfer.Chunk_error _ -> ()
-    | exception Transfer.Err_line_too_long -> ()
-    | got ->
+    match read_chunked_result incomplete with
+    | Error (Transfer.Chunk _ | Transfer.Line_too_long) -> ()
+    | Error e ->
+        Alcotest.failf "expected unexpected-EOF for prefix len %d, got %s" i
+          (Transfer.error_to_string e)
+    | Ok got ->
         Alcotest.failf "expected unexpected-EOF for prefix len %d, got %S" i got
   done;
   Alcotest.(check string)
@@ -389,7 +410,7 @@ let test_write_body_length_mismatch () =
   in
   match with_output_string (fun w -> Transfer.write_body w tw) with
   | _ -> Alcotest.fail "expected ContentLength mismatch error"
-  | exception Transfer.Chunk_error _ ->
+  | exception Invalid_argument _ ->
       Alcotest.(check pass) "mismatch errors" () ()
 
 (* A [Body.Stream] yielding each element of [chunks] in order, then EOF. *)
@@ -442,7 +463,7 @@ let test_write_body_fixed_stream_mismatch () =
   in
   match with_output_string (fun w -> Transfer.write_body w tw) with
   | _ -> Alcotest.fail "expected ContentLength mismatch error"
-  | exception Transfer.Chunk_error _ ->
+  | exception Invalid_argument _ ->
       Alcotest.(check pass) "stream mismatch errors" () ()
 
 (* --- read_transfer: end-to-end chunked response body decode. *)
@@ -466,7 +487,10 @@ let test_read_transfer_chunked () =
     match Transfer.read_transfer msg r with
     | Ok res ->
         Alcotest.(check bool) "is_chunked" true res.Transfer.is_chunked;
-        Body.read_all res.Transfer.body
+        (match Body.read_all res.Transfer.body with
+        | Ok s -> s
+        | Error e ->
+            Alcotest.failf "body read: %s" (Body.error_to_string e))
     | Error e ->
         Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)
   in
@@ -490,15 +514,18 @@ let test_read_transfer_content_length () =
     match Transfer.read_transfer msg r with
     | Ok res ->
         Alcotest.(check int64) "content_length" 5L res.Transfer.content_length;
-        Body.read_all res.Transfer.body
+        (match Body.read_all res.Transfer.body with
+        | Ok s -> s
+        | Error e ->
+            Alcotest.failf "body read: %s" (Body.error_to_string e))
     | Error e ->
         Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)
   in
   Alcotest.(check string) "content-length body" "hello" got
 
 (* A boundary framing error short-circuits to [Error]; a bad chunk-size found
-   mid-stream (after read_transfer returned [Ok], inside the Body.Stream thunk)
-   keeps raising [Chunk_error] — the mid-stream policy (Resolution #1). *)
+   mid-stream (after read_transfer returned [Ok]) surfaces as a terminal
+   [Error] element of the body's result-seq (ticket 006: typed data, no raise). *)
 let test_read_transfer_bad_chunk () =
   let mk_msg header =
     {
@@ -522,8 +549,8 @@ let test_read_transfer_bad_chunk () =
         "unsupported TE -> Error %s; want Unsupported_transfer_encoding"
         (Transfer.error_to_string e)
   | Ok _ -> Alcotest.fail "unsupported TE -> Ok; want Error");
-  (* (b) Mid-stream bad chunk size: read_transfer returns Ok, the body thunk
-     raises Chunk_error when it parses the bad hex size. *)
+  (* (b) Mid-stream bad chunk size: read_transfer returns Ok, the body's
+     result-seq carries the failure as a terminal [Error] element. *)
   let h_chunked =
     Header.set_values (Header.create ()) "Transfer-Encoding" [ "chunked" ]
   in
@@ -534,10 +561,14 @@ let test_read_transfer_bad_chunk () =
         (Transfer.error_to_string e)
   | Ok res -> (
       match Body.read_all res.Transfer.body with
-      | got ->
-          Alcotest.failf "bad chunk size mid-stream parsed %S; want raise" got
-      | exception Transfer.Chunk_error _ ->
-          Alcotest.(check pass) "bad chunk -> mid-stream raise" () ())
+      | Ok got ->
+          Alcotest.failf "bad chunk size mid-stream parsed %S; want Error" got
+      | Error (Body.Malformed_chunk _) ->
+          Alcotest.(check pass) "bad chunk -> mid-stream Error" () ()
+      | Error e ->
+          Alcotest.failf
+            "bad chunk size mid-stream -> Error %s; want Malformed_chunk"
+            (Body.error_to_string e))
 
 (* F013: an unknown-length request body (content_length=-1, no explicit TE) must
    auto-select chunked framing (transfer.go:96 shouldSendChunkedRequestBody), so
@@ -588,7 +619,7 @@ let test_chunked_auto_select_get_empty () =
     "GET empty body -> no chunking" [] tw.Transfer.tw_transfer_encoding;
   Alcotest.(check bool)
     "GET empty body -> body cleared" true
-    (tw.Transfer.tw_body = Body.Empty)
+    (fst (Body.is_empty tw.Transfer.tw_body))
 
 (* A body-lacking method (GET) with a NON-empty body is probed and chunked, the
    probed chunk re-prepended so the whole body still goes out. *)

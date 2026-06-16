@@ -1,8 +1,13 @@
 (* Port of go/src/net/http/internal/http2/pipe.go *)
 
-(* errClosedPipeWrite / errUninitializedPipeWrite mirror Go's package errors. *)
-exception Closed_pipe_write
-exception Uninitialized_pipe_write
+(* Mirrors Go's package errors errClosedPipeWrite / errUninitializedPipeWrite,
+   threaded as a [result] instead of raised. [Closed] = write on a
+   closed/broken pipe; [Uninitialized] = write before [set_buffer]. *)
+type error = Closed | Uninitialized
+
+let error_to_string = function
+  | Closed -> "write on closed buffer"
+  | Uninitialized -> "write on uninitialized buffer"
 
 (* A fiber-safe Reader/Writer pair (Go's sync.Cond-guarded pipe). A blocked
    [read] awaits [cond]; [write]/[close]/[break] broadcast it. The pipe lives in
@@ -47,7 +52,12 @@ let rec read p (max : int) : string =
   | Some e -> raise e
   | None -> (
       match p.b with
-      | Some b when H2_databuffer.len b > 0 -> H2_databuffer.read_string b max
+      | Some b when H2_databuffer.len b > 0 -> (
+          (* len > 0 guarantees [read_string] returns [Some]; [None] (empty
+             buffer) is unreachable here, so loop back to the wait path. *)
+          match H2_databuffer.read_string b max with
+          | Some s -> s
+          | None -> read p max)
       | _ -> (
           match p.err with
           | Some e ->
@@ -63,16 +73,18 @@ let rec read p (max : int) : string =
               Eio.Condition.await_no_mutex p.cond;
               read p max))
 
-(* Write copies bytes into the buffer and wakes a reader. It is an error to
-   write more data than the buffer can hold. Returns the number written. *)
-let write p (d : string) : int =
+(* Write copies bytes into the buffer and wakes a reader. Returns
+   [Ok n] with the number written, [Error Closed] on a closed/broken pipe, or
+   [Error Uninitialized] when no buffer was set. *)
+let write p (d : string) : (int, error) result =
   Fun.protect
     ~finally:(fun () -> Eio.Condition.broadcast p.cond)
     (fun () ->
-      if p.err <> None || p.break_err <> None then raise Closed_pipe_write;
-      match p.b with
-      | None -> raise Uninitialized_pipe_write
-      | Some b -> H2_databuffer.write_string b d)
+      if p.err <> None || p.break_err <> None then Error Closed
+      else
+        match p.b with
+        | None -> Error Uninitialized
+        | Some b -> Ok (H2_databuffer.write_string b d))
 
 (* resolves done if present and unresolved. *)
 let close_done p =

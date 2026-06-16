@@ -1,25 +1,14 @@
 (* Port of go/src/net/http/transfer.go and
    go/src/net/http/internal/chunked.go: HTTP/1.x wire framing. *)
 
-exception Err_line_too_long
-(** internal.ErrLineTooLong: a chunk header / line exceeded [max_line_length].
-    Retained for the {b mid-stream} body thunk (which keeps raising on a framing
-    error discovered after {!read_transfer} returned [Ok]); the handleable
-    boundary error is {!error} below. *)
-
-exception Chunk_error of string
-(** A malformed-chunk or framing error, carrying Go's message text. Retained for
-    the {b mid-stream} body thunk (see {!error}). *)
-
-(** Handleable framing error at the {b header / initial-parse} boundary
-    (Result-migration Ticket 4). The exceptions above are the {b mid-stream}
-    analogue: errors discovered inside a {!Body.t} [Stream] thunk {b after}
-    {!read_transfer} returned [Ok] keep {b raising} (the faithful analogue of
-    Go's "a later [Read] returns an error" — see {!read_transfer}). Only the
-    initial-parse boundary returns [result]. *)
+(** Typed framing error. Returned as [Error] at the {b header / initial-parse}
+    boundary (from {!read_transfer} and the {!Private} helpers); mid-stream, a
+    framing failure discovered while pulling the {!Body.t} surfaces as a
+    terminal {!Body.error} element of the body's result-seq (mapped from this
+    type by the read path), never a raise. *)
 type error =
   | Line_too_long
-  | Chunk of string  (** from {!Chunk_error} (malformed chunk / framing) *)
+  | Chunk of string  (** malformed chunk / framing (Go's message) *)
   | Bad_content_length of string
       (** invalid / conflicting Content-Length value *)
   | Unsupported_transfer_encoding of string
@@ -40,10 +29,12 @@ val parse_hex_uint : string -> (int64, error) result
 (** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] /
     [Error Line_too_long] on bad input (header/initial-parse boundary). *)
 
-val new_chunked_reader : Eio.Buf_read.t -> unit -> string option
-(** [internal.NewChunkedReader]: a pull function returning successive decoded
-    chunk payloads and finally [None] at the terminating 0-length chunk. Raises
-    {!Chunk_error} / {!Err_line_too_long} on malformed input. *)
+val new_chunked_reader :
+  Eio.Buf_read.t -> unit -> (string, error) result option
+(** [internal.NewChunkedReader]: a result-yielding pull function returning
+    successive decoded chunk payloads ([Some (Ok data)]) and finally [None] at
+    the terminating 0-length chunk. Malformed input surfaces as a terminal
+    [Some (Error e)] element, never a raise. *)
 
 val chunked_writer_write : Eio.Buf_write.t -> string -> unit
 (** [internal.chunkedWriter.Write]: write [data] as one chunk. Empty [data]
@@ -92,6 +83,10 @@ type message = {
 
 type result = {
   body : Body.t;
+  streaming : bool;
+      (** whether [body] is a live stream reader (vs a statically-empty body):
+          the read paths interpose the chunked-trailer adapter only on a
+          streaming body *)
   content_length : int64;
   is_chunked : bool;
   result_close : bool;
@@ -106,10 +101,10 @@ val read_transfer : message -> Eio.Buf_read.t -> (result, error) Stdlib.result
     the body reader and derived fields.
 
     Header / initial-parse framing errors short-circuit as [Error error].
-    {b Mid-stream policy (Resolution #1):} the returned {!result.body}, a
-    {!Body.t} [Stream], {b raises} {!Chunk_error} / {!Err_line_too_long} on a
-    malformed body discovered {b after} this returned [Ok] — the faithful
-    analogue of Go's later-[Read]-error model. *)
+    {b Mid-stream policy:} the returned {!result.body} is a {!Body.t} whose
+    stream surfaces a malformed body discovered {b after} this returned [Ok] as
+    a terminal {!Body.error} element (typed data) — the faithful analogue of
+    Go's later-[Read]-error model, never a raise. *)
 
 (* --- write_body. --- *)
 
@@ -160,8 +155,10 @@ val has_token : string -> string -> bool
 
 val write_body : Eio.Buf_write.t -> transfer_writer -> unit
 (** [transferWriter.writeBody]: write the body (chunked, fixed content-length,
-    or unknown-length) and any trailers. Raises {!Chunk_error} on a
-    ContentLength/body-length mismatch. *)
+    or unknown-length) and any trailers. A ContentLength/body-length mismatch,
+    or a mid-stream failure of the caller-supplied write-side body, is a caller
+    contract violation and raises [Invalid_argument] (an unhandleable bug, per
+    AGENTS.md rule 5 — not a modeled wire-read [error]). *)
 
 module Private : sig
   (** Helpers exposed only for the ported white-box tests; not part of the

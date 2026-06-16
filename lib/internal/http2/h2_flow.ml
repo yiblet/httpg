@@ -32,20 +32,22 @@ let inflow_add f n =
        octets." (RFC 7540 6.9.1). Go panics here (flow.go:42), because the
        returned window is bounded by what [inflow_take] previously permitted,
        so a conformant peer can never trip it. We surface a modeled
-       [FLOW_CONTROL_ERROR] connection error instead of an [invalid_arg] so
-       that, should it ever fire, it rides the serve loop's existing
+       [FLOW_CONTROL_ERROR] connection error as a typed [Error] so that,
+       should it ever fire, it rides the serve loop's existing
        Conn_error -> GOAWAY path rather than crashing the connection fiber. *)
-    raise (H2_error.Connection_error H2_error.FlowControlError);
-  f.unsent <- Int64.to_int32 unsent;
-  if f.unsent < Int32.of_int inflow_min_refresh && f.unsent < f.avail then
-    (* If there aren't at least inflowMinRefresh bytes of window to send,
-       and this update won't at least double the window, buffer the update
-       for later. *)
-    0l
+    Error H2_error.FlowControlError
   else begin
-    f.avail <- Int32.add f.avail f.unsent;
-    f.unsent <- 0l;
-    Int64.to_int32 unsent
+    f.unsent <- Int64.to_int32 unsent;
+    if f.unsent < Int32.of_int inflow_min_refresh && f.unsent < f.avail then
+      (* If there aren't at least inflowMinRefresh bytes of window to send,
+         and this update won't at least double the window, buffer the update
+         for later. *)
+      Ok 0l
+    else begin
+      f.avail <- Int32.add f.avail f.unsent;
+      f.unsent <- 0l;
+      Ok (Int64.to_int32 unsent)
+    end
   end
 
 (* take attempts to take n bytes from the peer's flow control window.

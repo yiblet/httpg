@@ -1,8 +1,5 @@
 (* Port of go/src/net/http/internal/http2/databuffer.go *)
 
-(* errReadEmpty is returned by Read when no data is available. *)
-exception Read_empty
-
 (* Buffer chunks come in a few size classes to minimize overhead for servers
    that typically receive very small request bodies. Go allocates these from
    sync.Pools; OCaml is GC-managed so we just allocate fresh chunks of the
@@ -45,11 +42,12 @@ let bytes_from_first_chunk b =
   if Array.length b.chunks = 1 then (b.r, b.w)
   else (b.r, Bytes.length b.chunks.(0))
 
-(* Read copies bytes from the buffer into p. It is an error to read when no
-   data is available. Returns the number of bytes copied; raises Read_empty
-   when the buffer is empty. *)
-let read b (p : bytes) (off : int) (plen : int) : int =
-  if b.size = 0 then raise Read_empty;
+(* Read copies bytes from the buffer into p. Returns [Some n] with the number
+   of bytes copied, or [None] when the buffer is empty (Go's errReadEmpty
+   sentinel). *)
+let read b (p : bytes) (off : int) (plen : int) : int option =
+  if b.size = 0 then None
+  else begin
   let ntotal = ref 0 in
   let remaining = ref plen in
   let dst = ref off in
@@ -70,7 +68,8 @@ let read b (p : bytes) (off : int) (plen : int) : int =
       b.r <- 0
     end
   done;
-  !ntotal
+  Some !ntotal
+  end
 
 (* lastChunkOrAlloc returns the current last chunk if it has room, else
    allocates a new chunk of an appropriate size class and appends it. *)
@@ -113,9 +112,10 @@ let write b (p : bytes) (off : int) (plen : int) : int =
 let write_string b (s : string) : int =
   write b (Bytes.unsafe_of_string s) 0 (String.length s)
 
-(* read up to n bytes, returning them as a string. Raises Read_empty when
-   the buffer is empty (mirrors Go's Read returning errReadEmpty). *)
-let read_string b (n : int) : string =
+(* read up to n bytes, returning [Some s], or [None] when the buffer is empty
+   (mirrors Go's Read returning errReadEmpty). *)
+let read_string b (n : int) : string option =
   let buf = Bytes.create n in
-  let got = read b buf 0 n in
-  Bytes.sub_string buf 0 got
+  match read b buf 0 n with
+  | None -> None
+  | Some got -> Some (Bytes.sub_string buf 0 got)

@@ -78,13 +78,18 @@ val encode_headers : Hpack.encoder -> Api.Header.t -> string list option -> unit
     names and values, and only emits [transfer-encoding: trailers]. Mirrors Go's
     [encodeHeaders]. *)
 
-val write_frame : enc:Hpack.encoder -> Eio.Buf_write.t -> write_framer -> unit
+val write_frame :
+  enc:Hpack.encoder ->
+  Eio.Buf_write.t ->
+  write_framer ->
+  (unit, H2_error.t) result
 (** [write_frame ~enc oc w] serializes [w] to the channel [oc] using the
     {!H2_frame} writers, encoding any header block with [enc]. Header writers
     split large blocks into a HEADERS/PUSH_PROMISE frame plus CONTINUATION
     frames so each fragment fits the minimum max-frame-size (16384). Mirrors the
     [writeFrame] methods in write.go (with [splitHeaderBlock]). [enc] is only
-    consulted by the header-writing variants. *)
+    consulted by the header-writing variants. Returns [Error] with the
+    underlying {!H2_frame} frame-build invariant rather than raising. *)
 
 val split_max_frame_size : int
 (** The fixed fragment size used by {!write_frame} when splitting header blocks.

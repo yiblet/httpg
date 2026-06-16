@@ -83,11 +83,13 @@ type error =
   | Invalid_semicolon_separator
   | Invalid_escape of string
   | Too_large
+  | Body of Body.error
 
 let error_to_string = function
   | Invalid_semicolon_separator -> "invalid semicolon separator in query"
   | Invalid_escape s -> Printf.sprintf "invalid URL escape %S" s
   | Too_large -> "http: POST too large"
+  | Body e -> Body.error_to_string e
 
 (* ParseQuery(query): build a {!t} from a query string, returning it together
    with the first decode error (if any). Semicolon separators are invalid (Go
@@ -144,8 +146,10 @@ let of_string (s : string) : (t, error) result =
   Option.fold ~none:(Ok m) ~some:(fun e -> Error e) res
 
 let of_body (body : Body.t) : (t, error) result =
-  let s, remainder = Body.read_until body max_form_size in
-  if Option.is_some remainder then Error Too_large else of_string s
+  match Body.read_until body max_form_size with
+  | Error e -> Error (Body e)
+  | Ok (s, remainder) ->
+    if Option.is_some remainder then Error Too_large else of_string s
 
 let to_body (v : t) =
   Body.of_lazy_string (Lazy.from_fun (fun () -> to_string v))

@@ -18,11 +18,15 @@ let with_pipe (writer : Eio.Buf_write.t -> unit) (reader : Eio.Buf_read.t -> 'a)
 let read_frame_ok r =
   match F.read_frame r with
   | Ok f -> f
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 let write_one w oc =
   let enc = Hpack.new_encoder () in
-  W.write_frame ~enc oc w
+  (* write_frame threads the frame-build invariant as a result (ticket 013);
+     these tests use valid values, so unwrap [Ok] (re-raise on a regression). *)
+  match W.write_frame ~enc oc w with
+  | Ok () -> ()
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 let test_settings () =
   let settings = [ { H2.id = H2.Max_frame_size; value = 16384l } ] in
@@ -104,9 +108,9 @@ let read_meta r =
       let dec = Hpack.new_decoder H2.initial_header_table_size (fun _ -> ()) in
       match F.read_meta_headers dec (fh, h) r with
       | Ok mf -> mf
-      | Error e -> raise (H2_error.to_exception e))
+      | Error _ -> failwith "test: unexpected h2 frame-build invariant")
   | Ok _ -> failwith "expected HEADERS"
-  | Error e -> raise (H2_error.to_exception e)
+  | Error _ -> failwith "test: unexpected h2 frame-build invariant"
 
 let field_value (m : F.meta_headers_frame) name =
   match

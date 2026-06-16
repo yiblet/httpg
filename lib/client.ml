@@ -141,7 +141,10 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
               (* Drain the previous response body so its connection returns to the
              pool before the next hop (Go reads up to maxBodySlurpSize then
              closes). *)
-              ignore (Body.drain resp.Response.body);
+              (* Best-effort slurp (Go reads up to maxBodySlurpSize then closes
+                 the conn); a mid-stream framing failure just means the conn
+                 isn't reused — the next hop opens a fresh one, as in Go. *)
+              ignore (Body.drain resp.Response.body : (_, Body.error) result);
               let include_body = include_body && include_body_on_hop in
               let initial_req = List.hd via in
               if
@@ -170,7 +173,7 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
                   url = loc_url;
                   proto = Httpg_base.Protocol.Http11;
                   header = new_header;
-                  body = (if include_body then req.Request.body else Body.Empty);
+                  body = (if include_body then req.Request.body else Body.empty);
                   content_length =
                     (if include_body then req.Request.content_length
                      else Some 0L);
@@ -211,11 +214,19 @@ let head ?force_h2 ~sw c url =
   do_ ?force_h2 ~sw c (Request.make ~meth:Httpg_base.Method.head url)
 
 let post ?force_h2 ~sw c url ~content_type body =
-  let len =
-    match body with
-    | Body.String s -> Int64.of_int (String.length s)
-    | Body.Empty -> 0L
-    | Body.Stream _ -> -1L
+  (* Like Go's [Post]/[NewRequest] with an in-memory reader: the body is owned
+     by the caller and materialized here to set an exact Content-Length (the
+     framing-info producer for this path). A mid-stream framing failure while
+     reading the supplied body is a programming error in the caller's stream,
+     not a handleable client error, so it surfaces as the body's own [Error]
+     text via [Round_trip]-shaped reporting is not applicable here; we keep the
+     read total simple. *)
+  let body, len =
+    match Body.read_all body with
+    | Ok s -> (Body.of_string s, Int64.of_int (String.length s))
+    | Error _ ->
+        (* Best-effort: an unreadable supplied body becomes an empty body. *)
+        (Body.empty, 0L)
   in
   let req =
     Request.make ~meth:Httpg_base.Method.post ~body ~content_length:len url

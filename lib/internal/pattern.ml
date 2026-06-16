@@ -170,103 +170,124 @@ let error_to_string = function
   | Duplicate_wildcard (off, name) ->
       Printf.sprintf "at offset %d: duplicate wildcard name %S" off name
 
-exception Parse_error of error
-
+(* Go's [parsePattern] returns [(_ *pattern, err error)] with early
+   [return nil, err] at each malformed-input check. We thread the same as a
+   [result]: an [error ref] records the first failure and the segment loop's
+   [break] ref short-circuits, after which we fold the recorded error (if any)
+   into the [Error] case. No error-propagation exception is used. *)
 let parse s : (t, error) result =
   if String.length s = 0 then Error Empty_pattern
   else begin
     let off = ref 0 in
-    let fail e = raise (Parse_error e) in
-    try
-      let method_, rest, found =
-        let i = index_any s " \t" in
-        if i >= 0 then
-          ( String.sub s 0 i,
-            Httpg_base.Textproto.trim_left ~chars:" \t"
-              (String.sub s (i + 1) (String.length s - i - 1)),
-            true )
-        else (s, "", false)
-      in
-      let method_, rest =
-        if not found then ("", method_) else (method_, rest)
-      in
-      if method_ <> "" && not (valid_method method_) then
-        fail (Invalid_method method_);
-      if found then off := String.length method_ + 1;
-      let i = index_byte rest '/' in
-      if i < 0 then fail (Missing_path !off);
-      let host = String.sub rest 0 i in
-      let rest = ref (String.sub rest i (String.length rest - i)) in
-      let j = index_byte host '{' in
-      if j >= 0 then begin
-        off := !off + j;
-        fail (Host_has_brace !off)
-      end;
-      off := !off + i;
-      (* An unclean path with a method other than CONNECT can never match. *)
-      if method_ <> "" && method_ <> "CONNECT" && !rest <> path_clean !rest then
-        fail (Unclean_path !off);
-      let segments = ref [] in
-      let push seg = segments := seg :: !segments in
-      let seen_names = Hashtbl.create 8 in
-      let break = ref false in
-      while (not !break) && String.length !rest > 0 do
-        (* Invariant: rest.[0] = '/'. *)
-        rest := String.sub !rest 1 (String.length !rest - 1);
-        off := String.length s - String.length !rest;
-        if String.length !rest = 0 then begin
-          push { s = ""; wild = true; multi = true };
-          break := true
+    let err = ref None in
+    let fail e = err := Some e in
+    let method_, rest, found =
+      let i = index_any s " \t" in
+      if i >= 0 then
+        ( String.sub s 0 i,
+          Httpg_base.Textproto.trim_left ~chars:" \t"
+            (String.sub s (i + 1) (String.length s - i - 1)),
+          true )
+      else (s, "", false)
+    in
+    let method_, rest = if not found then ("", method_) else (method_, rest) in
+    if method_ <> "" && not (valid_method method_) then
+      fail (Invalid_method method_);
+    if found then off := String.length method_ + 1;
+    (* [host]/[rest] are only meaningful once the leading checks pass; guard the
+       remaining parse on [!err = None] to mirror Go's early returns. *)
+    let host = ref "" in
+    let rest = ref rest in
+    if !err = None then begin
+      let i = index_byte !rest '/' in
+      if i < 0 then fail (Missing_path !off)
+      else begin
+        host := String.sub !rest 0 i;
+        rest := String.sub !rest i (String.length !rest - i);
+        let j = index_byte !host '{' in
+        if j >= 0 then begin
+          off := !off + j;
+          fail (Host_has_brace !off)
         end
         else begin
-          let i = index_byte !rest '/' in
-          let i = if i < 0 then String.length !rest else i in
-          let seg = String.sub !rest 0 i in
-          rest := String.sub !rest i (String.length !rest - i);
-          let bi = index_byte seg '{' in
-          if bi < 0 then
-            push { s = path_unescape seg; wild = false; multi = false }
+          off := !off + i;
+          (* An unclean path with a method other than CONNECT can never match. *)
+          if
+            method_ <> "" && method_ <> "CONNECT"
+            && !rest <> path_clean !rest
+          then fail (Unclean_path !off)
+        end
+      end
+    end;
+    let segments = ref [] in
+    let push seg = segments := seg :: !segments in
+    let seen_names = Hashtbl.create 8 in
+    let break = ref false in
+    while !err = None && (not !break) && String.length !rest > 0 do
+      (* Invariant: rest.[0] = '/'. *)
+      rest := String.sub !rest 1 (String.length !rest - 1);
+      off := String.length s - String.length !rest;
+      if String.length !rest = 0 then begin
+        push { s = ""; wild = true; multi = true };
+        break := true
+      end
+      else begin
+        let i = index_byte !rest '/' in
+        let i = if i < 0 then String.length !rest else i in
+        let seg = String.sub !rest 0 i in
+        rest := String.sub !rest i (String.length !rest - i);
+        let bi = index_byte seg '{' in
+        if bi < 0 then
+          push { s = path_unescape seg; wild = false; multi = false }
+        else begin
+          (* Wildcard. *)
+          if bi <> 0 then
+            fail
+              (Bad_wildcard
+                 (!off, "bad wildcard segment (must start with '{')"))
+          else if seg.[String.length seg - 1] <> '}' then
+            fail
+              (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"))
           else begin
-            (* Wildcard. *)
-            if bi <> 0 then
-              fail
-                (Bad_wildcard
-                   (!off, "bad wildcard segment (must start with '{')"));
-            if seg.[String.length seg - 1] <> '}' then
-              fail
-                (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"));
             let name = String.sub seg 1 (String.length seg - 2) in
-            if name = "$" then begin
+            if name = "$" then
               if String.length !rest <> 0 then
-                fail (Bad_wildcard (!off, "{$} not at end"));
-              push { s = "/"; wild = false; multi = false };
-              break := true
-            end
+                fail (Bad_wildcard (!off, "{$} not at end"))
+              else begin
+                push { s = "/"; wild = false; multi = false };
+                break := true
+              end
             else begin
               let name, multi = cut_suffix name "..." in
               if multi && String.length !rest <> 0 then
-                fail (Bad_wildcard (!off, "{...} wildcard not at end"));
-              if name = "" then fail (Bad_wildcard (!off, "empty wildcard"));
-              if not (is_valid_wildcard_name name) then
+                fail (Bad_wildcard (!off, "{...} wildcard not at end"))
+              else if name = "" then
+                fail (Bad_wildcard (!off, "empty wildcard"))
+              else if not (is_valid_wildcard_name name) then
                 fail
                   (Bad_wildcard
-                     (!off, Printf.sprintf "bad wildcard name %S" name));
-              if Hashtbl.mem seen_names name then
-                fail (Duplicate_wildcard (!off, name));
-              Hashtbl.replace seen_names name ();
-              push { s = name; wild = true; multi }
+                     (!off, Printf.sprintf "bad wildcard name %S" name))
+              else if Hashtbl.mem seen_names name then
+                fail (Duplicate_wildcard (!off, name))
+              else begin
+                Hashtbl.replace seen_names name ();
+                push { s = name; wild = true; multi }
+              end
             end
           end
         end
-      done;
-      Ok
-        {
-          str = s;
-          method_ = Httpg_base.Method.of_string method_;
-          host;
-          segments = List.rev !segments;
-        }
-    with Parse_error e -> Error e
+      end
+    done;
+    match !err with
+    | Some e -> Error e
+    | None ->
+        Ok
+          {
+            str = s;
+            method_ = Httpg_base.Method.of_string method_;
+            host = !host;
+            segments = List.rev !segments;
+          }
   end
 
 (* --- relationships --- *)

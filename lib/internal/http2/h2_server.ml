@@ -12,6 +12,15 @@ type handler = Api.handler
    Out_of_memory) and Eio fiber cancellation must propagate, never be recovered.
    Used to narrow the broad recover()-style catch-alls below so they only swallow
    genuinely-handleable handler failures (Go's runHandler recover()), not bugs. *)
+(* Module-private cause attached to the request-body pipe when a stream is
+   closed by the peer (RST_STREAM) or by the response-complete RST_STREAM
+   NO_ERROR. {!H2_pipe} carries the close cause as an [exn]; on the next body
+   read in the handler fiber it is raised, signalling "this request body was
+   reset" with its {!H2_error.stream_error}. It crosses the serve-loop ->
+   handler-fiber boundary only through the pipe (an Eio-style channel); it is
+   never declared in the .mli. *)
+exception Stream_closed of H2_error.stream_error
+
 let reraise_unhandleable : exn -> unit = function
   | ( Assert_failure _ | Match_failure _ | Invalid_argument _ | Stack_overflow
     | Out_of_memory | Eio.Cancel.Cancelled _ ) as e ->
@@ -80,7 +89,12 @@ type frame_write_req = {
 type event =
   | Read_frame of H2_frame.frame
   | Read_meta of H2_frame.meta_headers_frame
-  | Read_error of exn
+  | Read_error of H2_error.t
+      (* a modeled framing error from the reader: GOAWAY (connection) or
+         RST_STREAM (stream). Carries the typed value, never an exception. *)
+  | Read_done
+      (* the reader fiber ended without a modeled error (EOF / client gone): the
+         serve loop stops serving with no GOAWAY. *)
   | Want_write_frame of frame_write_req
   | Body_read of stream * int (* handler read n bytes of stream body *)
   | Handler_done
@@ -235,6 +249,15 @@ let reply_to_writer sc (w : H2_write.write_framer) (r : write_result) =
       Eio.Stream.add c r
   | None -> ()
 
+(* The control-frame writers used directly below ([write_goaway]/
+   [write_settings]/[write_settings_ack]) build a fixed, stream-0, in-range
+   frame, so the {!H2_frame} frame-build invariant is unreachable; treat any
+   [Error] as the programming bug it would be (not a modeled, handleable error). *)
+let must_write : (unit, H2_error.t) result -> unit = function
+  | Ok () -> ()
+  | Error _ ->
+      invalid_arg "H2_server: control-frame build invariant violated (bug)"
+
 (* Go's serverConn.writeFrame: push onto the scheduler (unless writing to a
    closed stream), then drive scheduleFrameWrite. *)
 let rec write_frame sc (req : frame_write_req) =
@@ -284,13 +307,14 @@ let rec write_frame sc (req : frame_write_req) =
 and schedule_frame_write sc : unit =
   if sc.need_to_send_goaway then begin
     sc.need_to_send_goaway <- false;
-    H2_frame.write_goaway sc.w sc.max_client_stream_id sc.goaway_code "";
+    must_write
+      (H2_frame.write_goaway sc.w sc.max_client_stream_id sc.goaway_code "");
     Eio.Buf_write.flush sc.w;
     schedule_frame_write sc
   end
   else if sc.need_to_send_settings_ack then begin
     sc.need_to_send_settings_ack <- false;
-    H2_frame.write_settings_ack sc.w;
+    must_write (H2_frame.write_settings_ack sc.w);
     Eio.Buf_write.flush sc.w;
     schedule_frame_write sc
   end
@@ -309,8 +333,16 @@ and schedule_frame_write sc : unit =
 and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit =
   let result =
     try
-      H2_write.write_frame ~enc:sc.enc sc.w wr.write;
-      Ok ()
+      match H2_write.write_frame ~enc:sc.enc sc.w wr.write with
+      | Ok () -> Ok ()
+      | Error _ ->
+          (* A frame-build invariant here would be a server bug (its own frames
+             are well-formed and in-range), so it is unreachable in practice. If
+             it ever fired it is fatal to the conn: stop serving and report a
+             generic fatal write error on the reply channel (server.go forwards a
+             write err). Not a modeled, handleable error. *)
+          sc.serving_done <- true;
+          Error (Failure "H2_server: frame-build invariant violated (bug)")
     with exn ->
       (* server.go: a write err is fatal to the conn (forwarded); bug-class
          exns / Cancelled propagate rather than being repackaged as a result. *)
@@ -332,7 +364,7 @@ and start_frame_write sc (wr : H2_writesched.frame_write_request) : unit =
              | State_half_closed_remote ->
                  close_stream sc st
                    (Some
-                      (H2_error.Stream_error
+                      (Stream_closed
                          (H2_error.stream_error st.st_id H2_error.NoError)))
              | _ -> ())
          | None -> ())
@@ -374,45 +406,60 @@ and close_stream sc (st : stream) (err : exn option) =
      | _ -> ());
   (match st.body with
   | Some p ->
-      (* return buffered unread conn-level flow control *)
+      (* return buffered unread conn-level flow control. This gives back at
+         most what [inflow_take] previously permitted, so [inflow_add] cannot
+         overflow here; the [Error] arm is unreachable (Go would have panicked),
+         and dropping it merely skips a WINDOW_UPDATE. *)
       let n = H2_pipe.len p in
-      if n > 0 then send_window_update_conn sc n;
+      (if n > 0 then match send_window_update_conn sc n with _ -> ());
       let e = match err with Some e -> e | None -> End_of_file in
       H2_pipe.close_with_error p e
   | None -> ());
   st.close_err <- err;
   H2_writesched.close_stream sc.write_sched st.st_id
 
-(* sendWindowUpdate for the connection-level inflow. *)
-and send_window_update_conn sc n =
-  let send = H2_flow.inflow_add sc.conn_inflow n in
-  if Int32.compare send 0l <> 0 then begin
-    let wr : H2_writesched.frame_write_request =
-      {
-        write =
-          H2_write.Write_window_update { stream_id = 0; n = Int32.to_int send };
-        stream = None;
-      }
-    in
-    H2_writesched.push sc.write_sched wr;
-    sc.queued_control_frames <- sc.queued_control_frames + 1
-  end
+(* sendWindowUpdate for the connection-level inflow. Returns the modeled
+   connection error by value (ticket 009): [inflow_add] yields a [result] and
+   the server's frame-processing pipeline threads it through to the serve loop's
+   Conn_error -> GOAWAY path, so no exception is raised internally. *)
+and send_window_update_conn sc n : (unit, H2_error.err_code) result =
+  match H2_flow.inflow_add sc.conn_inflow n with
+  | Error code -> Error code
+  | Ok send ->
+      if Int32.compare send 0l <> 0 then begin
+        let wr : H2_writesched.frame_write_request =
+          {
+            write =
+              H2_write.Write_window_update
+                { stream_id = 0; n = Int32.to_int send };
+            stream = None;
+          }
+        in
+        H2_writesched.push sc.write_sched wr;
+        sc.queued_control_frames <- sc.queued_control_frames + 1
+      end;
+      Ok ()
 
-(* sendWindowUpdate for a stream-level inflow. *)
-let send_window_update_stream sc (st : stream) n =
-  let send = H2_flow.inflow_add st.inflow n in
-  if Int32.compare send 0l <> 0 then begin
-    let wr : H2_writesched.frame_write_request =
-      {
-        write =
-          H2_write.Write_window_update
-            { stream_id = st.st_id; n = Int32.to_int send };
-        stream = Some st.sched;
-      }
-    in
-    H2_writesched.push sc.write_sched wr;
-    sc.queued_control_frames <- sc.queued_control_frames + 1
-  end
+(* sendWindowUpdate for a stream-level inflow. Returns the modeled connection
+   error by value (see [send_window_update_conn]). *)
+let send_window_update_stream sc (st : stream) n :
+    (unit, H2_error.err_code) result =
+  match H2_flow.inflow_add st.inflow n with
+  | Error code -> Error code
+  | Ok send ->
+      if Int32.compare send 0l <> 0 then begin
+        let wr : H2_writesched.frame_write_request =
+          {
+            write =
+              H2_write.Write_window_update
+                { stream_id = st.st_id; n = Int32.to_int send };
+            stream = Some st.sched;
+          }
+        in
+        H2_writesched.push sc.write_sched wr;
+        sc.queued_control_frames <- sc.queued_control_frames + 1
+      end;
+      Ok ()
 
 (* goAway (server.go:1339): if already in GOAWAY, only upgrade a prior NO_ERROR
    (graceful) to the new error code; otherwise begin the GOAWAY. *)
@@ -900,6 +947,10 @@ let end_stream (st : stream) =
   | None -> ());
   st.state <- State_half_closed_remote
 
+(* Thread the connection-error [result] of the frame-processing family
+   (ticket 009): [send_window_update_*] now return [(unit, err_code) result]. *)
+let ( let* ) = Result.bind
+
 let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
     (unit, H2_error.err_code) result =
   let id = fh.stream_id in
@@ -914,7 +965,7 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
         if not (H2_flow.inflow_take sc.conn_inflow length) then
           Error H2_error.FlowControlError
         else begin
-          send_window_update_conn sc length;
+          let* () = send_window_update_conn sc length in
           let wr : H2_writesched.frame_write_request =
             {
               write =
@@ -932,7 +983,7 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
           if not (H2_flow.inflow_take sc.conn_inflow length) then
             Error H2_error.FlowControlError
           else begin
-            send_window_update_conn sc length;
+            let* () = send_window_update_conn sc length in
             if st.reset_queued then Ok ()
             else begin
               reset_stream sc st H2_error.StreamClosed;
@@ -951,7 +1002,7 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
             if not (H2_flow.inflow_take sc.conn_inflow length) then
               Error H2_error.FlowControlError
             else begin
-              send_window_update_conn sc length;
+              let* () = send_window_update_conn sc length in
               (match st.body with
               | Some p ->
                   H2_pipe.close_with_error p
@@ -971,15 +1022,22 @@ let process_data sc (fh : H2_frame.frame_header) (df : H2_frame.data_frame) :
                   st.body_bytes <-
                     Int64.add st.body_bytes (Int64.of_int (String.length data));
                   match st.body with
-                  | Some p -> ignore (H2_pipe.write p data)
+                  | Some p -> (
+                      (* A write error (handler closed the body) is non-fatal
+                         here; preserve the prior behavior of discarding it. *)
+                      match H2_pipe.write p data with
+                      | Ok _ | Error _ -> ())
                   | None -> ()
                 end;
                 (* return padding-only flow control immediately *)
                 let pad = length - String.length data in
-                if pad > 0 then begin
-                  send_window_update_conn sc pad;
-                  send_window_update_stream sc st pad
-                end;
+                let* () =
+                  if pad > 0 then begin
+                    let* () = send_window_update_conn sc pad in
+                    send_window_update_stream sc st pad
+                  end
+                  else Ok ()
+                in
                 if df.end_stream then end_stream st;
                 Ok ()
               end
@@ -1080,9 +1138,7 @@ let process_reset_stream sc (fh : H2_frame.frame_header)
     (match st_opt with
     | Some st ->
         close_stream sc st
-          (Some
-             (H2_error.Stream_error
-                (H2_error.stream_error fh.stream_id _rf.error_code)))
+          (Some (Stream_closed (H2_error.stream_error fh.stream_id _rf.error_code)))
     | None -> ());
     Ok ()
   end
@@ -1110,12 +1166,17 @@ let discard_after_goaway sc (f : H2_frame.frame) : frame_outcome option =
     && (sc.goaway_code <> H2_error.NoError
        || fh.stream_id > sc.max_client_stream_id)
   then begin
-    (match f with
-    | H2_frame.Data (fh, _) ->
-        if H2_flow.inflow_take sc.conn_inflow fh.length then
-          send_window_update_conn sc fh.length
-    | _ -> ());
-    Some Ok_frame
+    let r =
+      match f with
+      | H2_frame.Data (fh, _) ->
+          if H2_flow.inflow_take sc.conn_inflow fh.length then
+            send_window_update_conn sc fh.length
+          else Ok ()
+      | _ -> Ok ()
+    in
+    match r with
+    | Ok () -> Some Ok_frame
+    | Error code -> Some (Conn_error code)
   end
   else None
 
@@ -1156,41 +1217,43 @@ let process_frame sc (f : H2_frame.frame) : frame_outcome =
 
 (* Reads frames from the wire, assembling HEADERS+CONTINUATION into a
    meta-headers frame (Go's readFrames + readMetaFrame). Posts events, then stops
-   the daemon. The boundary returns [result]; the loop converts [Error] to the
-   raising exception (posted as [Read_error]). A Buf_read [Buffer_limit_exceeded]
-   (a frame larger than the buffer cap can hold) is mapped to a FRAME_SIZE
-   connection error rather than escaping unmapped (F019; in practice [read_frame]
-   rejects an over-[max_size] frame first). Runs as a daemon fiber so it is
-   auto-cancelled when the serve loop finishes. *)
+   the daemon. The framing boundaries return a [result]; a modeled [Error] is
+   posted as a [Read_error] event carrying the typed {!H2_error.t} value (no
+   raise/re-catch round trip). A clean [End_of_file] (client gone) posts
+   [Read_done]. A Buf_read [Buffer_limit_exceeded] (a frame larger than the
+   buffer cap can hold) is mapped to a FRAME_SIZE connection error rather than
+   escaping unmapped (F019; in practice [read_frame] rejects an over-[max_size]
+   frame first). Runs as a daemon fiber so it is auto-cancelled when the serve
+   loop finishes. *)
 let read_loop sc : [ `Stop_daemon ] =
-  let unwrap = function
-    | Ok x -> x
-    | Error e -> raise (H2_error.to_exception e)
-  in
   let rec loop () =
-    let f =
-      unwrap (H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.r)
-    in
-    (match f with
-    | H2_frame.Headers (fh, hf) ->
-        let mf =
-          unwrap
-            (H2_frame.read_meta_headers
-               ~max_header_list_size:sc.adv_max_header_list_size sc.dec (fh, hf)
-               sc.r)
-        in
-        push sc (Read_meta mf)
-    | _ -> push sc (Read_frame f));
-    loop ()
+    match H2_frame.read_frame ~max_size:H2.default_max_read_frame_size sc.r with
+    | Error e -> push sc (Read_error e)
+    | Ok (H2_frame.Headers (fh, hf)) -> (
+        match
+          H2_frame.read_meta_headers
+            ~max_header_list_size:sc.adv_max_header_list_size sc.dec (fh, hf)
+            sc.r
+        with
+        | Error e -> push sc (Read_error e)
+        | Ok mf ->
+            push sc (Read_meta mf);
+            loop ())
+    | Ok f ->
+        push sc (Read_frame f);
+        loop ()
   in
+  (* Eio-boundary catches only: [End_of_file] is the normal "client gone"
+     termination (posts [Read_done]); a [Buffer_limit_exceeded] from an over-cap
+     frame maps to a FRAME_SIZE connection error; bug-class exns / Cancelled
+     propagate out of the daemon fiber (Go's reader has no panic recovery). *)
   (try loop () with
+  | End_of_file -> push sc Read_done
   | Eio.Buf_read.Buffer_limit_exceeded ->
-      push sc (Read_error H2_frame.Frame_too_large)
-  (* server.go:692-711: forward the framer err as a connection read error; but
-     bug-class exns / Cancelled propagate (Go's reader has no panic recovery). *)
+      push sc (Read_error H2_error.Frame_too_large)
   | exn ->
       reraise_unhandleable exn;
-      push sc (Read_error exn));
+      push sc Read_done);
   `Stop_daemon
 
 (* ---- serve loop ---- *)
@@ -1243,15 +1306,20 @@ let rec serve_loop sc : unit =
   else begin
     let keep_serving =
       match Eio.Stream.take sc.events with
-      | Read_error exn -> (
-          match exn with
-          | H2_frame.Frame_too_large ->
+      | Read_done ->
+          (* reader ended without a modeled error (EOF / client gone): stop
+             serving with no GOAWAY. *)
+          sc.serving_done <- true;
+          false
+      | Read_error e -> (
+          match e with
+          | H2_error.Frame_too_large ->
               go_away sc H2_error.FrameSizeError;
               true
-          | H2_error.Connection_error code ->
+          | H2_error.Connection code ->
               go_away sc code;
               true
-          | H2_error.Stream_error se ->
+          | H2_error.Stream se ->
               (match Hashtbl.find_opt sc.streams se.stream_id with
               | Some st -> reset_stream sc st se.code
               | None ->
@@ -1266,8 +1334,12 @@ let rec serve_loop sc : unit =
                   H2_writesched.push sc.write_sched wr;
                   sc.queued_control_frames <- sc.queued_control_frames + 1);
               true
-          | _ ->
-              (* EOF / client gone *)
+          | H2_error.Compression _ | H2_error.Invalid_stream_id
+          | H2_error.Invalid_dep_stream_id | H2_error.Pad_length_too_large ->
+              (* Preserve the prior behaviour: these never reached the GOAWAY
+                 dispatch (the old [_] arm dropped them) — stop serving without a
+                 GOAWAY. [Compression] (HPACK decode failure) and the write-side
+                 build invariants are not produced on this server's read path. *)
               sc.serving_done <- true;
               false)
       | Read_frame f -> (
@@ -1275,13 +1347,9 @@ let rec serve_loop sc : unit =
           (match sc.read_timer with
           | Some t when sc.read_timeout > 0. -> timer_reset sc t sc.read_timeout
           | _ -> ());
-          (* A synchronous flow-control overflow in inflow_add raises a modeled
-             Connection_error; route it to GOAWAY rather than crashing. *)
-          let outcome =
-            try process_frame sc f
-            with H2_error.Connection_error code -> Conn_error code
-          in
-          match outcome with
+          (* A flow-control overflow in inflow_add is threaded as a [Conn_error]
+             by value through process_frame; route it to GOAWAY. *)
+          match process_frame sc f with
           | Ok_frame -> true
           | Conn_error code ->
               go_away sc code;
@@ -1300,19 +1368,17 @@ let rec serve_loop sc : unit =
           true
       | Body_read (st, n) -> (
           (* noteBodyRead: conn-level window update, and stream-level unless
-             half-closed/closed. An inflow_add overflow routes to GOAWAY. *)
-          let outcome =
-            try
-              send_window_update_conn sc n;
-              if
-                st.state <> State_half_closed_remote && st.state <> State_closed
-              then send_window_update_stream sc st n;
-              Ok_frame
-            with H2_error.Connection_error code -> Conn_error code
+             half-closed/closed. An inflow_add overflow is returned by value and
+             routes to GOAWAY. *)
+          let r =
+            let* () = send_window_update_conn sc n in
+            if st.state <> State_half_closed_remote && st.state <> State_closed
+            then send_window_update_stream sc st n
+            else Ok ()
           in
-          match outcome with
-          | Ok_frame -> true
-          | Conn_error code ->
+          match r with
+          | Ok () -> true
+          | Error code ->
               go_away sc code;
               true)
       | Handler_done ->
@@ -1353,6 +1419,8 @@ let rec serve_loop sc : unit =
 let read_preface sc : bool =
   match Eio.Buf_read.take H2.client_preface_len sc.r with
   | s -> s = H2.client_preface
+  (* Eio-boundary: a short read / closed connection before the full preface
+     ([End_of_file] / [Buffer_limit_exceeded]) is just "no valid preface". *)
   | exception _ -> false
 
 let serve ?(max_concurrent_streams = default_max_concurrent_streams)
@@ -1435,7 +1503,7 @@ let serve ?(max_concurrent_streams = default_max_concurrent_streams)
       };
     ]
   in
-  H2_frame.write_settings sc.w settings;
+  must_write (H2_frame.write_settings sc.w settings);
   Eio.Buf_write.flush sc.w;
   sc.unacked_settings <- sc.unacked_settings + 1;
   (* readPreface under prefaceTimeout (server.go:798,:1029); no clock -> unbounded. *)

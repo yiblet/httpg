@@ -234,7 +234,11 @@ let multipart_to_body_roundtrip () =
         };
       ]
   in
-  let wire = Body.read_all (Multipart.to_body ~boundary:"bnd" parts) in
+  let wire =
+    match Body.read_all (Multipart.to_body ~boundary:"bnd" parts) with
+    | Ok s -> s
+    | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
+  in
   match collect ~boundary:"bnd" wire with
   | [ f1; f2 ] ->
       Alcotest.(check (option string)) "f1 name" (Some "field1") f1.name;

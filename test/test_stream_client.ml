@@ -34,11 +34,17 @@ let with_server ?(secs = 10.0) handler client =
         (fun () -> client ~net ~sw ~clock ~port)
         ~finally:(fun () -> Server.close srv))
 
-(* Pull one chunk from a [Body.Stream], failing the test otherwise. *)
-let next_chunk = function
-  | Body.Stream next -> next ()
-  | Body.Empty -> None
-  | Body.String _ -> Alcotest.fail "expected a streaming body, got a String"
+(* Pull one chunk from a body, failing the test on a mid-stream error. *)
+let next_chunk b =
+  match Body.to_stream b () with
+  | Some (Ok s) -> Some s
+  | Some (Error e) -> Alcotest.failf "body: %s" (Body.error_to_string e)
+  | None -> None
+
+let read_body b =
+  match Body.read_all b with
+  | Ok s -> s
+  | Error e -> Alcotest.failf "body: %s" (Body.error_to_string e)
 
 (* ---- Stream.client_body_streamed ---- *)
 (* The handler flushes a first chunk, then blocks on [released] which the test
@@ -74,7 +80,7 @@ let client_body_streamed () =
     let first = next_chunk resp.Response.body in
     let handler_done_early = Eio.Promise.is_resolved released in
     Eio.Promise.resolve release ();
-    let rest = Body.read_all resp.Response.body in
+    let rest = read_body resp.Response.body in
     (first, handler_done_early, rest)
   in
   let first, handler_done_early, rest = with_server handler client in
@@ -109,7 +115,7 @@ let reuse_after_drain () =
         (Transport.conn_key ~scheme:"http" ~host:"127.0.0.1" ~port)
     in
     let resp2 = ok_resp (Client.get ~sw c url) in
-    let b2 = Body.read_all resp2.Response.body in
+    let b2 = read_body resp2.Response.body in
     let dials_after_2 = Transport.dial_count transport in
     (dials_after_1, idle_after_1, b2, dials_after_2)
   in

@@ -72,25 +72,28 @@ let demo_stream ~net ~clock ~sw =
     (Httpg_base.Status.to_int resp.Response.status)
     (Httpg_base.Status.to_string resp.Response.status);
   (* Pull the streaming body one chunk at a time; we never call [read_all]. *)
-  match resp.Response.body with
-  | Body.Stream next ->
-      let rec loop n =
-        match next () with
-        | None -> Printf.printf "  [EOF after %d chunk(s)]\n" n
-        | Some chunk ->
-            Printf.printf "  [chunk %d arrived] %s" (n + 1) chunk;
-            loop (n + 1)
-      in
-      loop 0
-  | Body.String s -> Printf.printf "  [string body] %s" s
-  | Body.Empty -> Printf.printf "  [empty body]\n"
+  let next = Body.to_stream resp.Response.body in
+  let rec loop n =
+    match next () with
+    | None -> Printf.printf "  [EOF after %d chunk(s)]\n" n
+    | Some (Ok chunk) ->
+        Printf.printf "  [chunk %d arrived] %s" (n + 1) chunk;
+        loop (n + 1)
+    | Some (Error e) ->
+        Printf.printf "  [body error: %s]\n" (Body.error_to_string e)
+  in
+  loop 0
 
 (* Plaintext HTTP/1.1 round trip, body read whole. *)
 let demo_http ~net ~clock ~sw =
   let client = Client.create ~net ~clock () in
   with_server ~net ~clock ~sw ~tls:false "/demo" handler @@ fun url ->
   let resp = ok_resp (Client.get ~sw client url) in
-  let body = Body.read_all resp.Response.body in
+  let body =
+    match Body.read_all resp.Response.body with
+    | Ok s -> s
+    | Error e -> "<body error: " ^ Body.error_to_string e ^ ">"
+  in
   Printf.printf "GET %s\n-> %d %s\n%s" url
     (Httpg_base.Status.to_int resp.Response.status)
     (Httpg_base.Status.to_string resp.Response.status)
@@ -103,7 +106,11 @@ let demo_h2 ~net ~clock ~sw =
   let client = Client.create ~net ~clock ~transport () in
   with_server ~net ~clock ~sw ~tls:true "/h2-demo" handler @@ fun url ->
   let resp = ok_resp (Client.get ~sw client url) in
-  let body = Body.read_all resp.Response.body in
+  let body =
+    match Body.read_all resp.Response.body with
+    | Ok s -> s
+    | Error e -> "<body error: " ^ Body.error_to_string e ^ ">"
+  in
   Printf.printf "GET %s (h2 round trips: %d)\n-> %d %s\n%s" url
     (Transport.h2_round_trip_count transport)
     (Httpg.Status.to_int resp.Response.status)
@@ -126,7 +133,11 @@ let demo_google ~net ~clock ~sw =
     resp.Response.header;
 
   Printf.ksprintf add_buf "\n%d"
-    (Body.fold_left (fun acc s -> acc + String.length s) resp.Response.body 0);
+    (match
+       Body.fold_left (fun acc s -> acc + String.length s) resp.Response.body 0
+     with
+    | Ok n -> n
+    | Error _ -> -1);
   Printf.printf "%s" (Buffer.contents buf)
 
 let () =

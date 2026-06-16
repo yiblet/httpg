@@ -22,7 +22,7 @@ type t = {
 (** A response mirroring Go's [Response] struct. *)
 
 val create : unit -> t
-(** [create ()] is a fresh 200 response: empty header, [Body.Empty],
+(** [create ()] is a fresh 200 response: empty header, empty body,
     [content_length = Some 0L], HTTP/1.1. The base for the builder. *)
 
 val with_status : Httpg_base.Status.t -> t -> t
@@ -37,12 +37,15 @@ val with_set_header : string -> string -> t -> t
     [value] (copy-on-write). *)
 
 val with_body : Body.t -> t -> t
-(** [with_body body r] returns [r] carrying [body], with [content_length]
-    derived from it ([String] → [Some] its length, [Empty] → [Some 0L], [Stream]
-    → [None] = unknown). *)
+(** [with_body body r] returns [r] carrying [body] with [content_length = None]
+    (unknown / streaming): the flat {!Body.t} no longer encodes length in its
+    shape, so a streaming body is framed unknown-length unless the caller sets
+    [content_length] explicitly afterwards (e.g. the file server's byte ranges).
+    For an in-memory body, prefer {!with_body_string}. *)
 
 val with_body_string : string -> t -> t
-(** [with_body_string s r] is [with_body (Body.String s) r]. *)
+(** [with_body_string s r] returns [r] with body [Body.of_string s] and
+    [content_length = Some (String.length s)]. *)
 
 val with_trailer : Header.t -> t -> t
 (** [with_trailer t r] returns [r] with its trailer set to [t]. *)

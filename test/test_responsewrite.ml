@@ -13,7 +13,7 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
       Option.get
         (Httpg_base.Protocol.of_string (Printf.sprintf "HTTP/1.%d" proto_minor));
     header = Httpg.Header.create ();
-    body = Httpg.Body.Empty;
+    body = Httpg.Body.empty;
     content_length = Some 0L;
     transfer_encoding = [];
     close = false;
@@ -29,7 +29,7 @@ let header pairs =
     (Httpg.Header.create ()) pairs
 
 let resp ~status_code ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.Empty)
+    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false) ?request
     () : Httpg.Response.t =
   {

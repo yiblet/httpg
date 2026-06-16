@@ -129,14 +129,6 @@ val error_to_string : error -> string
 (** Human-readable rendering of an {!error} (recurses into the embedded lower
     error), for logging / test failures. *)
 
-val error_to_exn : error -> exn
-(** [error_to_exn e] is the exception that {!error} arm corresponds to, for the
-    {!Client} bridge to re-raise while the client verbs still raise:
-    [Net (Dial s)] -> {!Net.Dial_error}; [Net (Tls s)] -> {!Net.Tls_error};
-    [Io e] -> {!Io.Protocol_error}; [H2 e] ->
-    {!Httpg_http2.H2_transport.error_to_exn}; [No_host] -> {!Io.Protocol_error}
-    ["http: no Host in request URL"]. *)
-
 val round_trip : ?force_h2:bool -> t -> Request.t -> (Response.t, error) result
 (** [round_trip t req] is Go's [Transport.RoundTrip] (HTTP/1.x path): pick
     scheme/host/port from [req.url] (TLS when the scheme is ["https"]), reuse an

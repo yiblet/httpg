@@ -57,13 +57,16 @@ type error =
   | Invalid_semicolon_separator
   | Invalid_escape of string
   | Too_large
+  | Body of Body.error
       (** A handleable form-parse failure.
           - {!Invalid_semicolon_separator}/{!Invalid_escape}: Go's [ParseQuery]
             error cases (the latter carries the offending fragment; declared for
             fidelity, though the [uri]-backed [query_unescape] does not
             currently surface bad-escape errors).
           - {!Too_large}: an urlencoded body over [max_form_size] ({!of_body}
-            only). *)
+            only).
+          - {!Body}: a mid-stream body-framing failure while reading the
+            urlencoded body ({!of_body} only). *)
 
 val error_to_string : error -> string
 (** Render an {!error} as Go's faithful message. *)
