@@ -49,12 +49,22 @@ let streaming_handler =
 let with_server ~net ~clock ~sw ~tls path handler body =
   let srv, port, serve_loop =
     if tls then
-      Server.listen_and_serve_tls_started ~net ~clock
-        ~certificates:(Net.test_server_certificate ())
-        ~sw ~addr:"127.0.0.1" ~port:0 handler
+      match
+        Server.listen_and_serve_tls_started ~net ~clock
+          ~certificates:(Net.test_server_certificate ())
+          ~sw ~addr:"127.0.0.1" ~port:0 handler
+      with
+      | Ok v -> v
+      | Error e ->
+          failwith ("listen_and_serve_tls_started: " ^ Net.error_to_string e)
     else
-      Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1" ~port:0
-        handler
+      match
+        Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
+          ~port:0 handler
+      with
+      | Ok v -> v
+      | Error e ->
+          failwith ("listen_and_serve_started: " ^ Net.error_to_string e)
   in
   Eio.Fiber.fork ~sw serve_loop;
   let scheme = if tls then "https" else "http" in

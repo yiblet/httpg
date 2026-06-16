@@ -63,7 +63,9 @@ module Semideq = struct
   let to_seq = function
     | Empty -> Seq.empty
     | One x -> Seq.return x
-    | Many (x, xs) -> Seq.cons x (xs |> List.rev |> List.to_seq)
+    | Many (x, xs) ->
+        let rest () = (xs |> List.rev |> List.to_seq) () in
+        fun () -> Seq.Cons (x, rest)
 
   let map f = function
     | Empty -> Empty
@@ -124,6 +126,15 @@ let canonical_header_key = Httpg_base.Textproto.canonical_mime_header_key
 
 (* Lookup helper operating on already-canonical keys. *)
 let find_opt (h : t) key = M.find_opt key h
+let filter_key f (h : t) = M.filter (fun k _ -> f (Canonical.to_string k)) h
+
+let filter f (h : t) =
+  M.filter
+    (fun k vs ->
+      let k = Canonical.to_string k in
+      let vs = Semideq.to_list vs in
+      f k vs)
+    h
 
 (* MIMEHeader.Add: appends to any existing values associated with the canonical
    key. *)

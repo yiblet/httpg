@@ -40,7 +40,7 @@ val make :
   ?trailer:Header.t option ->
   ?request_uri:string ->
   ?remote_addr:string ->
-  string ->
+  Uri.t ->
   t
 (** [make url] builds a request for [url] (Go's [NewRequest]). [meth] defaults
     to [GET]; [host] defaults to the URL's host (pass [~host] to override).

@@ -11,13 +11,6 @@ type file_info = {
   fi_is_dir : bool;
 }
 
-type file = {
-  stat : unit -> file_info;
-  read_window : off:int64 -> len:int -> string;
-  readdir : unit -> file_info list;
-  close : unit -> unit;
-}
-
 type error =
   | Invalid_unsafe_path
   | Not_exist
@@ -25,6 +18,13 @@ type error =
   | Other of string
   | No_overlap
   | Invalid_range of string
+
+type file = {
+  stat : unit -> file_info;
+  read_window : off:int64 -> len:int -> string;
+  readdir : unit -> (file_info list, error) result;
+  close : unit -> unit;
+}
 
 let error_to_string = function
   | Invalid_unsafe_path -> "http: invalid or unsafe file path"
@@ -128,12 +128,16 @@ let file_of_path ~sw (path : _ Eio.Path.t) base : (file, error) result =
     let info = file_info_of_stat base st in
     if info.fi_is_dir then begin
       let readdir () =
-        Eio.Path.read_dir path
-        |> List.filter_map (fun name ->
-            match Eio.Path.stat ~follow:true Eio.Path.(path / name) with
-            | st -> Some (file_info_of_stat name st)
-            (* like os.File.Readdir: skip entries that vanish. *)
-            | exception _ -> None)
+        match Eio.Path.read_dir path with
+        | entries ->
+            Ok
+              (entries
+              |> List.filter_map (fun name ->
+                  match Eio.Path.stat ~follow:true Eio.Path.(path / name) with
+                  | st -> Some (file_info_of_stat name st)
+                  (* like os.File.Readdir: skip entries that vanish. *)
+                  | exception _ -> None))
+        | exception e -> Error (error_of_exn e)
       in
       Ok
         {
@@ -174,7 +178,7 @@ let file_of_path ~sw (path : _ Eio.Path.t) base : (file, error) result =
         {
           stat = (fun () -> info);
           read_window;
-          readdir = (fun () -> failwith "not a directory");
+          readdir = (fun () -> Error (Other "not a directory"));
           close;
         }
     end
@@ -237,10 +241,10 @@ let html_escape s =
 
 let dir_list (_r : Request.t) (f : file) : Response.t =
   match f.readdir () with
-  | exception _ ->
+  | Error _ ->
       Server.error "Error reading directory"
         Httpg_base.Status.InternalServerError
-  | entries ->
+  | Ok entries ->
       let entries =
         List.sort (fun a b -> compare a.fi_name b.fi_name) entries
       in
@@ -261,8 +265,7 @@ let dir_list (_r : Request.t) (f : file) : Response.t =
         Header.set (Header.create ()) "Content-Type" "text/html; charset=utf-8"
       in
       let body = Buffer.contents buf in
-      respond ~header:h
-        ~body:(Body.of_string body)
+      respond ~header:h ~body:(Body.of_string body)
         ~content_length:(Int64.of_int (String.length body))
         Httpg_base.Status.Ok
 

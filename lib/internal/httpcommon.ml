@@ -11,7 +11,7 @@
    [Invalid_request] carries Go's message text verbatim. *)
 type error =
   | Invalid_request of string
-  | Header_list_size  (* Go ErrRequestHeaderListSize. *)
+  | Header_list_size (* Go ErrRequestHeaderListSize. *)
 
 let error_to_string = function
   | Invalid_request s -> s
@@ -165,7 +165,8 @@ let comma_separated_trailers ~canonical trailer =
       keys
   in
   match bad with
-  | Some k -> Error (Invalid_request (Printf.sprintf "invalid Trailer key %S" k))
+  | Some k ->
+      Error (Invalid_request (Printf.sprintf "invalid Trailer key %S" k))
   | None -> (
       match keys with
       | [] -> Ok ""
@@ -221,7 +222,8 @@ let encode_headers ~canonical param headerf =
             (Invalid_request
                (Printf.sprintf "invalid request :path %S from URL.Opaque = %S" p
                   req.url_opaque))
-        else Error (Invalid_request (Printf.sprintf "invalid request :path %S" p))
+        else
+          Error (Invalid_request (Printf.sprintf "invalid request :path %S" p))
       end
     end
   in
@@ -294,7 +296,10 @@ let encode_headers ~canonical param headerf =
       let name, ascii = lower_header name in
       if ascii then headerf name value);
   Ok
-    { has_body = req.actual_content_length <> 0L; has_trailers = trailers <> "" }
+    {
+      has_body = req.actual_content_length <> 0L;
+      has_trailers = trailers <> "";
+    }
 
 let header_values_contains_token vv token =
   List.exists

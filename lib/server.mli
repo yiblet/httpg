@@ -47,11 +47,11 @@ type t
 exception Shutdown
 (** Fiber-control cancellation signal, not a modeled error. {!close} threads it
     through [Eio.Switch.fail] to cancel the accept switches (loop 0 and every
-    forked domain's accept loop + in-flight connection fibers); the shared accept
-    loop in {!serve} (also used by the TLS entry points) swallows it so a clean
-    shutdown returns normally. It is a sibling to [Eio.Cancel] — it rides
-    [Eio.Switch.fail], which requires an [exn] and cannot carry a [result] — so it
-    legitimately stays an [exception] under the philosophy's fiber-control
+    forked domain's accept loop + in-flight connection fibers); the shared
+    accept loop in {!serve} (also used by the TLS entry points) swallows it so a
+    clean shutdown returns normally. It is a sibling to [Eio.Cancel] — it rides
+    [Eio.Switch.fail], which requires an [exn] and cannot carry a [result] — so
+    it legitimately stays an [exception] under the philosophy's fiber-control
     exemption (see AGENTS.md "Exception philosophy"), rather than being a
     failure modeled as a typed [error]. *)
 
@@ -139,12 +139,14 @@ val listen_and_serve :
   addr:string ->
   port:int ->
   handler ->
-  unit
+  (unit, Net.error) result
 (** Go's [ListenAndServe]: bind [addr]:[port] (under an internal switch) and
     serve [handler] until the listener is torn down. Pass [?domain_mgr] (with an
     optional [?domains] count) to serve across OS cores; see {!serve}. The four
     duration knobs, [max_header_bytes] and [force_h2] (serve cleartext h2c; see
-    {!create}) are forwarded to {!create}. *)
+    {!create}) are forwarded to {!create}. Returns [Error (Net.Dial _)] if
+    [addr]:[port] cannot be resolved or bound (e.g. the port is in use);
+    otherwise it blocks until shutdown and returns [Ok ()]. *)
 
 val listen_and_serve_started :
   ?read_timeout:float ->
@@ -161,14 +163,16 @@ val listen_and_serve_started :
   addr:string ->
   port:int ->
   handler ->
-  t * int * (unit -> unit)
+  (t * int * (unit -> unit), Net.error) result
 (** Like {!listen_and_serve} but binds the listener under the caller's [sw]
     first and returns the running [Server.t], the bound port (useful when
     [port = 0] selects an ephemeral port) and a thunk that runs the accept pool
     — so tests can read the port, fork the accept thunk, connect and {!close}.
     The four duration knobs, [max_header_bytes] and [force_h2] (serve cleartext
     h2c; see {!create}) are forwarded to {!create}; [?domain_mgr]/[?domains]
-    enable the multicore accept pool (see {!serve}). *)
+    enable the multicore accept pool (see {!serve}). Returns
+    [Error (Net.Dial _)] if [addr]:[port] cannot be resolved or bound (e.g. the
+    port is in use). *)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 
@@ -191,7 +195,7 @@ val listen_and_serve_tls :
   addr:string ->
   port:int ->
   handler ->
-  unit
+  (unit, Net.error) result
 (** Go's [ListenAndServeTLS]: bind [addr]:[port] with server-side TLS carrying
     [certificates] and advertising the ALPN protocols [alpn] (default
     {!default_alpn_protocols}), then serve [handler] over each accepted
@@ -200,7 +204,9 @@ val listen_and_serve_tls :
     Go's http2.go); otherwise the HTTP/1.x serve loop runs over the TLS
     channels. The four duration knobs and [max_header_bytes] are forwarded to
     {!create} (Go keeps these on the single [Server] struct shared by
-    [ListenAndServe] and [ListenAndServeTLS]). *)
+    [ListenAndServe] and [ListenAndServeTLS]). Returns [Error (Net.Tls _)] if
+    the caller-supplied TLS certificate/ALPN config is invalid; otherwise it
+    blocks until shutdown and returns [Ok ()]. *)
 
 val listen_and_serve_tls_started :
   ?read_timeout:float ->
@@ -218,9 +224,10 @@ val listen_and_serve_tls_started :
   addr:string ->
   port:int ->
   handler ->
-  t * int * (unit -> unit)
+  (t * int * (unit -> unit), Net.error) result
 (** Like {!listen_and_serve_tls} but binds the listener under [sw] first and
     returns the running [Server.t], the bound port (useful with an ephemeral
     [port = 0]) and the accept-loop thunk — so tests can connect over TLS and
-    {!close}. The four duration knobs and [max_header_bytes] are forwarded to
-    {!create}. *)
+    {!close}. Returns [Error (Net.Tls _)] if the caller-supplied TLS
+    certificate/ALPN config is invalid. The four duration knobs and
+    [max_header_bytes] are forwarded to {!create}. *)

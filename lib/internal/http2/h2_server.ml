@@ -90,10 +90,10 @@ type event =
   | Read_frame of H2_frame.frame
   | Read_meta of H2_frame.meta_headers_frame
   | Read_error of H2_error.t
-      (* a modeled framing error from the reader: GOAWAY (connection) or
+    (* a modeled framing error from the reader: GOAWAY (connection) or
          RST_STREAM (stream). Carries the typed value, never an exception. *)
   | Read_done
-      (* the reader fiber ended without a modeled error (EOF / client gone): the
+    (* the reader fiber ended without a modeled error (EOF / client gone): the
          serve loop stops serving with no GOAWAY. *)
   | Want_write_frame of frame_write_req
   | Body_read of stream * int (* handler read n bytes of stream body *)
@@ -1138,7 +1138,8 @@ let process_reset_stream sc (fh : H2_frame.frame_header)
     (match st_opt with
     | Some st ->
         close_stream sc st
-          (Some (Stream_closed (H2_error.stream_error fh.stream_id _rf.error_code)))
+          (Some
+             (Stream_closed (H2_error.stream_error fh.stream_id _rf.error_code)))
     | None -> ());
     Ok ()
   end
@@ -1174,9 +1175,7 @@ let discard_after_goaway sc (f : H2_frame.frame) : frame_outcome option =
           else Ok ()
       | _ -> Ok ()
     in
-    match r with
-    | Ok () -> Some Ok_frame
-    | Error code -> Some (Conn_error code)
+    match r with Ok () -> Some Ok_frame | Error code -> Some (Conn_error code)
   end
   else None
 

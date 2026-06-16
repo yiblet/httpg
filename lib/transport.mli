@@ -97,13 +97,13 @@ val run : t -> sw:Eio.Switch.t -> (unit -> 'a) -> 'a
       belongs to the domain that created it, so a per-domain switch is
       mandatory, not optional.
 
-    {!round_trip} (and {!Client.do_}, which calls [run] for you with the client
+    {!round_trip} (and {!Client.send}, which calls [run] for you with the client
     session's switch) requires the current domain to have an established pool;
     calling {!round_trip} on a domain with no [run] raises [Invalid_argument].
 
     {b Top-level transport:} a freshly {!create}d transport has no switch until
     first used under a [run]. Establish it once at the top level — e.g. wrap the
-    application body in [Transport.run t ~sw] (or use {!Client.do_}, which
+    application body in [Transport.run t ~sw] (or use {!Client.send}, which
     scopes it to the client's [sw]) — so its pool lives for that scope rather
     than dying with a transient per-request switch. *)
 

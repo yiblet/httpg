@@ -115,10 +115,7 @@ module Private : sig
       first byte are left zero (the caller ORs in any flag). *)
 
   val read_var_int :
-    int ->
-    string ->
-    int ->
-    [ `Ok of int * int | `Error of error | `Need_more ]
+    int -> string -> int -> [ `Ok of int * int | `Error of error | `Need_more ]
   (** [read_var_int n s pos] decodes an [n]-bit prefix integer at offset [pos]
       of [s]. Returns [`Ok (value, next_pos)], [`Error Var_int_overflow], or
       [`Need_more] when [s] is truncated. [`Need_more] is an internal

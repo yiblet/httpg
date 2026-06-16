@@ -23,9 +23,13 @@ let with_tls_pair ~server_alpn ~client_alpn ~server ~client () =
   Eio.Switch.run @@ fun sw ->
   let certificates = Net.test_server_certificate () in
   let srv =
-    Net.listen_tls ~sw ~certificates ~alpn:server_alpn net "127.0.0.1" 0
+    match
+      Net.listen_tls ~sw ~certificates ~alpn:server_alpn net "127.0.0.1" 0
+    with
+    | Ok s -> s
+    | Error e -> Alcotest.failf "listen_tls: %s" (Net.error_to_string e)
   in
-  let port = Net.bound_port (Net.tls_listen_sock srv) in
+  let port = Option.get (Net.bound_port (Net.tls_listen_sock srv)) in
   let cres = ref None and sres = ref None in
   let server_fiber () =
     let flow, _peer = Net.accept ~sw (Net.tls_listen_sock srv) in

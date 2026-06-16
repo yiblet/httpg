@@ -48,27 +48,27 @@ let bytes_from_first_chunk b =
 let read b (p : bytes) (off : int) (plen : int) : int option =
   if b.size = 0 then None
   else begin
-  let ntotal = ref 0 in
-  let remaining = ref plen in
-  let dst = ref off in
-  while !remaining > 0 && b.size > 0 do
-    let from_off, from_lim = bytes_from_first_chunk b in
-    let avail = from_lim - from_off in
-    let n = min !remaining avail in
-    Bytes.blit b.chunks.(0) from_off p !dst n;
-    dst := !dst + n;
-    remaining := !remaining - n;
-    ntotal := !ntotal + n;
-    b.r <- b.r + n;
-    b.size <- b.size - n;
-    (* If the first chunk has been consumed, advance to the next chunk. *)
-    if b.r = Bytes.length b.chunks.(0) then begin
-      let n_chunks = Array.length b.chunks in
-      b.chunks <- Array.sub b.chunks 1 (n_chunks - 1);
-      b.r <- 0
-    end
-  done;
-  Some !ntotal
+    let ntotal = ref 0 in
+    let remaining = ref plen in
+    let dst = ref off in
+    while !remaining > 0 && b.size > 0 do
+      let from_off, from_lim = bytes_from_first_chunk b in
+      let avail = from_lim - from_off in
+      let n = min !remaining avail in
+      Bytes.blit b.chunks.(0) from_off p !dst n;
+      dst := !dst + n;
+      remaining := !remaining - n;
+      ntotal := !ntotal + n;
+      b.r <- b.r + n;
+      b.size <- b.size - n;
+      (* If the first chunk has been consumed, advance to the next chunk. *)
+      if b.r = Bytes.length b.chunks.(0) then begin
+        let n_chunks = Array.length b.chunks in
+        b.chunks <- Array.sub b.chunks 1 (n_chunks - 1);
+        b.r <- 0
+      end
+    done;
+    Some !ntotal
   end
 
 (* lastChunkOrAlloc returns the current last chunk if it has room, else

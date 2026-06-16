@@ -21,8 +21,12 @@ let with_h2_raw ?max_concurrent_streams ?max_header_bytes ?(timeout = 15.)
   let clock = Eio.Stdenv.clock env in
   Eio.Time.with_timeout_exn clock timeout @@ fun () ->
   Eio.Switch.run @@ fun sw ->
-  let lsock = Net.listen ~sw net "127.0.0.1" 0 in
-  let port = Net.bound_port lsock in
+  let lsock =
+    match Net.listen ~sw net "127.0.0.1" 0 with
+    | Ok l -> l
+    | Error e -> failwith (Net.error_to_string e)
+  in
+  let port = Option.get (Net.bound_port lsock) in
   (* Run the client body and the server concurrently; once the client returns,
      [Fiber.first] cancels the still-blocked server fiber. *)
   Eio.Fiber.first

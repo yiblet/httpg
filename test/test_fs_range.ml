@@ -35,12 +35,12 @@ let write_file dir name contents =
   Eio.Path.save ~create:(`Exclusive 0o644) Eio.Path.(dir / name) contents
 
 (* Send a GET with extra headers, return (status, body, headers). 206/416 are
-   not redirects, so [Client.do_] returns them directly. *)
+   not redirects, so [Client.send] returns them directly. *)
 let request_with_headers ~sw c url headers =
-  let req = Request.make ~meth:Httpg_base.Method.Get url in
+  let req = Request.make ~meth:Httpg_base.Method.Get (Uri.of_string url) in
   req.Request.header <-
     List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
-  let resp = ok_resp (Client.do_ ~sw c req) in
+  let resp = ok_resp (Client.send ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     read_body resp.Response.body,
     resp.Response.header )

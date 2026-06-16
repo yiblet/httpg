@@ -49,20 +49,30 @@ let with_header key value (r : t) : t =
 let with_set_header key value (r : t) : t =
   { r with header = Header.set r.header key value }
 
-(* A body set via {!with_body} is treated as unknown-length (streaming): the
-   flat [Body.t] no longer encodes "empty"/"in-memory" in its shape, so the
-   producer declares the length explicitly. {!with_body_string} is the
-   known-length path; a caller with a known-length stream sets [content_length]
-   afterwards. *)
-let with_body (body : Body.t) (r : t) : t =
-  { r with body; content_length = None }
+(* Inherit the body's known length when it has one (a string/in-memory body or
+   a concatenation of known-length bodies); a streaming body of unknown length
+   ([Body.content_length = None]) stays unknown and is framed chunked. A caller
+   with a known-length stream can still set [content_length] explicitly
+   afterwards (e.g. the file server's byte ranges). *)
+let with_body ?content_type ?content_length (body : Body.t) (r : t) : t =
+  let r =
+    {
+      r with
+      body;
+      content_length =
+        (match content_length with
+        | None -> Body.content_length body
+        | Some n when n < 0L -> Body.content_length body
+        | Some n -> Some n);
+    }
+  in
+  match content_type with
+  | None -> r
+  | Some ct -> with_header "Content-Type" ct r
 
-let with_body_string s (r : t) : t =
-  {
-    r with
-    body = Body.of_string s;
-    content_length = Some (Int64.of_int (String.length s));
-  }
+let with_body_string ?content_type ?content_length s (r : t) : t =
+  with_body ?content_length ?content_type (Body.of_string s) r
+
 let with_trailer t (r : t) : t = { r with trailer = Some t }
 
 (* Response.Cookies. *)

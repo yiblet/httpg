@@ -18,8 +18,12 @@ open Httpg
 let loopback_roundtrip () =
   let echoed =
     Test_harness.with_env ~secs:5. (fun ~net ~clock:_ ~sw ->
-        let listener = Net.listen ~sw net "127.0.0.1" 0 in
-        let port = Net.bound_port listener in
+        let listener =
+          match Net.listen ~sw net "127.0.0.1" 0 with
+          | Ok l -> l
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+        in
+        let port = Option.get (Net.bound_port listener) in
         (* Server fiber: accept one connection, read a line, echo it back. *)
         let server () =
           let flow, _peer = Net.accept ~sw listener in
@@ -79,8 +83,12 @@ let tls_spin_guard () =
     Test_harness.with_env ~secs:10. (fun ~net ~clock ~sw ->
         Net.ensure_rng ();
         let certificates = Net.test_server_certificate () in
-        let listener = Net.listen ~sw net "127.0.0.1" 0 in
-        let port = Net.bound_port listener in
+        let listener =
+          match Net.listen ~sw net "127.0.0.1" 0 with
+          | Ok l -> l
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+        in
+        let port = Option.get (Net.bound_port listener) in
         let caught = ref None in
         let server () =
           let flow, _peer = Net.accept ~sw listener in

@@ -83,8 +83,12 @@ let multicore_parallel () =
         let n = cores in
         (* Serve across all cores. *)
         let srv, port, serve_loop =
-          Server.listen_and_serve_started ~net ~clock ~domain_mgr ~sw
-            ~addr:"127.0.0.1" ~port:0 handler
+          match
+            Server.listen_and_serve_started ~net ~clock ~domain_mgr ~sw
+              ~addr:"127.0.0.1" ~port:0 handler
+          with
+          | Ok v -> v
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw serve_loop;
         let url = Printf.sprintf "http://127.0.0.1:%d/" port in
@@ -125,8 +129,12 @@ let single_domain_serves () =
         Response.create () |> Response.with_body_string "ok"
       in
       let srv, port, serve_loop =
-        Server.listen_and_serve_started ~net ~clock ~domain_mgr ~domains:1 ~sw
-          ~addr:"127.0.0.1" ~port:0 handler
+        match
+          Server.listen_and_serve_started ~net ~clock ~domain_mgr ~domains:1 ~sw
+            ~addr:"127.0.0.1" ~port:0 handler
+        with
+        | Ok v -> v
+        | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
       in
       Eio.Fiber.fork ~sw serve_loop;
       let url = Printf.sprintf "http://127.0.0.1:%d/" port in
@@ -144,8 +152,12 @@ let close_then_reserve () =
       in
       let serve_once () =
         let srv, port, serve_loop =
-          Server.listen_and_serve_started ~net ~clock ~domain_mgr ~sw
-            ~addr:"127.0.0.1" ~port:0 handler
+          match
+            Server.listen_and_serve_started ~net ~clock ~domain_mgr ~sw
+              ~addr:"127.0.0.1" ~port:0 handler
+          with
+          | Ok v -> v
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw serve_loop;
         let url = Printf.sprintf "http://127.0.0.1:%d/" port in
@@ -171,9 +183,15 @@ let multicore_tls () =
       in
       let certificates = Net.test_server_certificate () in
       let srv, port, serve_loop =
-        Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr
-          ~certificates ~alpn:[ "http/1.1" ] ~sw ~addr:"127.0.0.1" ~port:0
-          handler
+        match
+          Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr
+            ~certificates ~alpn:[ "http/1.1" ] ~sw ~addr:"127.0.0.1" ~port:0
+            handler
+        with
+        | Ok v -> v
+        | Error e ->
+            Alcotest.failf "listen_and_serve_tls_started: %s"
+              (Net.error_to_string e)
       in
       Eio.Fiber.fork ~sw serve_loop;
       let n = max 4 (Domain.recommended_domain_count ()) in
@@ -226,14 +244,24 @@ let multicore_client () =
            io_uring, so we keep the total domain count bounded by RLIMIT_MEMLOCK
            (servers single-domain; client capped below). *)
         let srv1, p1, loop1 =
-          Server.listen_and_serve_started ~net ~clock ~domain_mgr ~domains:1 ~sw
-            ~addr:"127.0.0.1" ~port:0 h1
+          match
+            Server.listen_and_serve_started ~net ~clock ~domain_mgr ~domains:1
+              ~sw ~addr:"127.0.0.1" ~port:0 h1
+          with
+          | Ok v -> v
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
         in
         let certificates = Net.test_server_certificate () in
         let srv2, p2, loop2 =
-          Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr ~domains:1
-            ~certificates ~alpn:[ "h2"; "http/1.1" ] ~sw ~addr:"127.0.0.1"
-            ~port:0 h2
+          match
+            Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr
+              ~domains:1 ~certificates ~alpn:[ "h2"; "http/1.1" ] ~sw
+              ~addr:"127.0.0.1" ~port:0 h2
+          with
+          | Ok v -> v
+          | Error e ->
+              Alcotest.failf "listen_and_serve_tls_started: %s"
+                (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw loop1;
         Eio.Fiber.fork ~sw loop2;
@@ -331,8 +359,15 @@ let multicore_client_parallel_tls () =
         in
         let certificates = Net.test_server_certificate () in
         let srv, port, loop =
-          Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr ~domains:1
-            ~certificates ~alpn:[ "http/1.1" ] ~sw ~addr:"127.0.0.1" ~port:0 h
+          match
+            Server.listen_and_serve_tls_started ~net ~clock ~domain_mgr
+              ~domains:1 ~certificates ~alpn:[ "http/1.1" ] ~sw
+              ~addr:"127.0.0.1" ~port:0 h
+          with
+          | Ok v -> v
+          | Error e ->
+              Alcotest.failf "listen_and_serve_tls_started: %s"
+                (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw loop;
         let url = Printf.sprintf "https://127.0.0.1:%d/" port in

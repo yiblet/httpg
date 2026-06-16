@@ -38,8 +38,14 @@ let with_tls_server ?(handler = test_handler) ~alpn body =
   Eio.Switch.run @@ fun sw ->
   let certificates = Net.test_server_certificate () in
   let srv, port, serve_loop =
-    Server.listen_and_serve_tls_started ~net ~clock ~certificates ~alpn ~sw
-      ~addr:"127.0.0.1" ~port:0 handler
+    match
+      Server.listen_and_serve_tls_started ~net ~clock ~certificates ~alpn ~sw
+        ~addr:"127.0.0.1" ~port:0 handler
+    with
+    | Ok v -> v
+    | Error e ->
+        Alcotest.failf "listen_and_serve_tls_started: %s"
+          (Net.error_to_string e)
   in
   Eio.Fiber.fork ~sw serve_loop;
   Fun.protect
@@ -206,11 +212,15 @@ let with_tls_h2_server ~max_concurrent_streams ~handler body =
   Eio.Switch.run @@ fun sw ->
   let certificates = Net.test_server_certificate () in
   let tls_srv =
-    Net.listen_tls ~sw ~certificates ~alpn:[ "h2"; "http/1.1" ] net "127.0.0.1"
-      0
+    match
+      Net.listen_tls ~sw ~certificates ~alpn:[ "h2"; "http/1.1" ] net
+        "127.0.0.1" 0
+    with
+    | Ok s -> s
+    | Error e -> Alcotest.failf "listen_tls: %s" (Net.error_to_string e)
   in
   let listen_sock = Net.tls_listen_sock tls_srv in
-  let port = Net.bound_port listen_sock in
+  let port = Option.get (Net.bound_port listen_sock) in
   (* Accept loop + per-conn serve fibers run as DAEMONS under [srv_sw]: each conn
      handshakes via accept_tls then runs H2_server.serve with the small advertised
      limit. Because they are daemons, [body] returning lets [Switch.run srv_sw]

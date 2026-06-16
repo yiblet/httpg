@@ -36,15 +36,18 @@ val with_set_header : string -> string -> t -> t
 (** [with_set_header key value r] returns [r] with [key]'s values replaced by
     [value] (copy-on-write). *)
 
-val with_body : Body.t -> t -> t
-(** [with_body body r] returns [r] carrying [body] with [content_length = None]
-    (unknown / streaming): the flat {!Body.t} no longer encodes length in its
-    shape, so a streaming body is framed unknown-length unless the caller sets
-    [content_length] explicitly afterwards (e.g. the file server's byte ranges).
-    For an in-memory body, prefer {!with_body_string}. *)
+val with_body :
+  ?content_type:string -> ?content_length:int64 -> Body.t -> t -> t
+(** [with_body body r] returns [r] carrying [body], inheriting the body's known
+    length ([Body.content_length body]) as [content_length]: an in-memory or
+    otherwise known-length body is framed with a Content-Length, a streaming
+    body of unknown length ([None]) is framed unknown-length. A caller with a
+    known-length stream can still set [content_length] explicitly afterwards
+    (e.g. the file server's byte ranges). *)
 
-val with_body_string : string -> t -> t
-(** [with_body_string s r] returns [r] with body [Body.of_string s] and
+val with_body_string :
+  ?content_type:string -> ?content_length:int64 -> string -> t -> t
+(** [with_body_string s r] is [with_body (Body.of_string s) r] —
     [content_length = Some (String.length s)]. *)
 
 val with_trailer : Header.t -> t -> t

@@ -212,9 +212,7 @@ let parse s : (t, error) result =
         else begin
           off := !off + i;
           (* An unclean path with a method other than CONNECT can never match. *)
-          if
-            method_ <> "" && method_ <> "CONNECT"
-            && !rest <> path_clean !rest
+          if method_ <> "" && method_ <> "CONNECT" && !rest <> path_clean !rest
           then fail (Unclean_path !off)
         end
       end
@@ -243,8 +241,7 @@ let parse s : (t, error) result =
           (* Wildcard. *)
           if bi <> 0 then
             fail
-              (Bad_wildcard
-                 (!off, "bad wildcard segment (must start with '{')"))
+              (Bad_wildcard (!off, "bad wildcard segment (must start with '{')"))
           else if seg.[String.length seg - 1] <> '}' then
             fail
               (Bad_wildcard (!off, "bad wildcard segment (must end with '}')"))

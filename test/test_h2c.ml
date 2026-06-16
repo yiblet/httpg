@@ -6,7 +6,7 @@
    prior-knowledge shape: a {b plaintext} listener declared h2c via
    [Server.listen_and_serve_started ~force_h2:true] hands each connection
    straight to the HTTP/2 server (which reads the client preface itself), and the
-   client opts in via [Client.get ~force_h2:true] over an ["http"] URL — no TLS,
+   client opts in via [Client.send ~force_h2:true] over an ["http"] URL — no TLS,
    no ALPN, no [Upgrade:].
 
    The roundtrip case performs a GET and a POST over a single multiplexed h2c
@@ -46,8 +46,12 @@ let with_h2c_server ?(handler = test_handler) body =
   Eio.Time.with_timeout_exn clock 30. @@ fun () ->
   Eio.Switch.run @@ fun sw ->
   let srv, port, serve_loop =
-    Server.listen_and_serve_started ~net ~clock ~force_h2:true ~sw
-      ~addr:"127.0.0.1" ~port:0 handler
+    match
+      Server.listen_and_serve_started ~net ~clock ~force_h2:true ~sw
+        ~addr:"127.0.0.1" ~port:0 handler
+    with
+    | Ok v -> v
+    | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
   in
   Eio.Fiber.fork ~sw serve_loop;
   Fun.protect
@@ -64,14 +68,21 @@ let test_h2c_roundtrip () =
         let base = Printf.sprintf "http://127.0.0.1:%d" port in
         (* GET *)
         let get_resp =
-          ok_resp (Client.get ~force_h2:true ~sw client (base ^ "/hello"))
+          ok_resp
+            (Client.send ~force_h2:true ~sw client
+               (Request.make ~meth:Httpg_base.Method.get
+                  (Uri.of_string (base ^ "/hello"))))
         in
         let get_body = read_body get_resp.Response.body in
         (* POST, reusing the same h2c connection from the pool. *)
         let post_resp =
           ok_resp
-            (Client.post ~force_h2:true ~sw client (base ^ "/echo")
-               ~content_type:"text/plain" (Body.of_string "ping-pong"))
+            (Client.send ~force_h2:true ~sw client
+               (Request.make ~meth:Httpg_base.Method.post
+                  ~header:
+                    (Header.of_list [ ("Content-Type", [ "text/plain" ]) ])
+                  ~body:(Body.of_string "ping-pong")
+                  (Uri.of_string (base ^ "/echo"))))
         in
         let post_body = read_body post_resp.Response.body in
         ( Httpg_base.Status.to_int get_resp.Response.status,

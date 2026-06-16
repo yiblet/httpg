@@ -75,13 +75,13 @@ let etag_file_handler ~dir ~name ~etag =
       Fs.serve_content ~header r ~name:d.Fs.fi_name ~modtime:d.Fs.fi_mod_time
         ~size:d.Fs.fi_size ~read_window:f.Fs.read_window
 
-(* Build a GET to [url] with extra headers, send via [Client.do_] (304/412 are
-   not redirects, so do_ returns them directly), read its body. *)
+(* Build a GET to [url] with extra headers, send via [Client.send] (304/412 are
+   not redirects, so send returns them directly), read its body. *)
 let request_with_headers ~sw c url headers =
-  let req = Request.make ~meth:Httpg_base.Method.Get url in
+  let req = Request.make ~meth:Httpg_base.Method.Get (Uri.of_string url) in
   req.Request.header <-
     List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
-  let resp = ok_resp (Client.do_ ~sw c req) in
+  let resp = ok_resp (Client.send ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     read_body resp.Response.body,
     resp.Response.header )

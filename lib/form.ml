@@ -149,7 +149,7 @@ let of_body (body : Body.t) : (t, error) result =
   match Body.read_until body max_form_size with
   | Error e -> Error (Body e)
   | Ok (s, remainder) ->
-    if Option.is_some remainder then Error Too_large else of_string s
+      if Option.is_some remainder then Error Too_large else of_string s
 
 let to_body (v : t) =
   Body.of_lazy_string (Lazy.from_fun (fun () -> to_string v))

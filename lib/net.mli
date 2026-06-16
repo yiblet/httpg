@@ -40,17 +40,16 @@ val listen :
   [> ([> `Generic ] as 'tag) Eio.Net.ty ] Eio.Resource.t ->
   string ->
   int ->
-  'tag Eio.Net.listening_socket_ty Eio.Resource.t
+  ('tag Eio.Net.listening_socket_ty Eio.Resource.t, error) result
 (** [listen ?backlog ~sw net host port] resolves [host]/[port], binds a TCP
     socket with [SO_REUSEADDR] and listens. [host] is used as given (e.g.
     ["0.0.0.0"] or ["127.0.0.1"]); [port = 0] selects an ephemeral port,
     recoverable with {!bound_port}. [backlog] defaults to 128 (Go's [net.Listen]
-    default). The socket is closed when [sw] finishes.
+    default). The socket is closed when [sw] finishes. The socket is always
+    bound to a TCP address, so {!bound_port} on it is always [Some].
 
-    This is a [result]-free startup contract: if [host]/[port] cannot be
-    resolved it raises an exception internal to [Net] (it never crosses the
-    public surface as a typed value — a bad bind address is a startup config
-    error, akin to {!bound_port}'s [Failure]). *)
+    Returns [Error (Dial _)] if [host]/[port] cannot be resolved or bound (e.g.
+    the port is already in use). *)
 
 val accept :
   sw:Eio.Switch.t ->
@@ -163,13 +162,14 @@ val listen_tls :
   [> ([> `Generic ] as 'tag) Eio.Net.ty ] Eio.Resource.t ->
   string ->
   int ->
-  'tag tls_server
+  ('tag tls_server, error) result
 (** [listen_tls ?backlog ~sw ~certificates ~alpn net host port] is {!listen}
     plus a server-side TLS configuration carrying [certificates] (one cert chain
     \+ key) and advertising the ALPN protocols [alpn] in descending preference
     (e.g. [["h2"; "http/1.1"]]; [[]] disables ALPN). During the handshake the
-    server selects the first advertised protocol the client also offers. Raises
-    [Failure] if the resulting TLS server config is invalid (a setup bug). *)
+    server selects the first advertised protocol the client also offers. Returns
+    [Error (Tls _)] if the caller-supplied certificate/ALPN combination yields
+    an invalid TLS server config. *)
 
 val tls_listen_sock :
   'tag tls_server -> 'tag Eio.Net.listening_socket_ty Eio.Resource.t
@@ -198,10 +198,11 @@ val accept_tls :
 
 (** {1 Address helpers} *)
 
-val bound_port : _ Eio.Net.listening_socket -> int
-(** [bound_port sock] is the locally bound TCP port of a listening socket (handy
-    for ephemeral [listen]ers bound on port 0). Raises [Failure] if [sock] is
-    not bound to a TCP address. *)
+val bound_port : _ Eio.Net.listening_socket -> int option
+(** [bound_port sock] is [Some] the locally bound TCP port of a listening socket
+    (handy for ephemeral [listen]ers bound on port 0), or [None] if [sock] is
+    not bound to a TCP address (e.g. a Unix-domain socket). Total: it never
+    raises. *)
 
 val sockaddr_to_string : Eio.Net.Sockaddr.stream -> string
 (** [sockaddr_to_string sa] renders [sa] as Go's [host:port] form (used for
@@ -223,10 +224,10 @@ val null_authenticator : X509.Authenticator.t
     [tls.Config.InsecureSkipVerify = true]), selected by [?insecure:true]. NOT
     used by default. *)
 
-val default_authenticator : unit -> X509.Authenticator.t
+val default_authenticator : unit -> (X509.Authenticator.t, error) result
 (** [default_authenticator ()] builds the SECURE default [X509] authenticator
     from the OS trust store via [ca-certs] (it also checks expiry and, at
     handshake time with a [host], the certificate name). This is what the TLS
     client entry points use unless overridden, mirroring Go's [http.Client]
-    verifying against the system roots. Raises [Failure] if the trust store
-    cannot be loaded. *)
+    verifying against the system roots. Returns [Error (Tls _)] if the system
+    trust store cannot be loaded. *)

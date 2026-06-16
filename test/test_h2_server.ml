@@ -308,8 +308,12 @@ let with_serve ?clock ?idle_timeout ?read_timeout ?graceful ~handler client =
   let real_clock = Eio.Stdenv.clock env in
   Eio.Time.with_timeout_exn real_clock 15. @@ fun () ->
   Eio.Switch.run @@ fun sw ->
-  let lsock = Net.listen ~sw net "127.0.0.1" 0 in
-  let port = Net.bound_port lsock in
+  let lsock =
+    match Net.listen ~sw net "127.0.0.1" 0 with
+    | Ok l -> l
+    | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+  in
+  let port = Option.get (Net.bound_port lsock) in
   let server_done, server_done_u = Eio.Promise.create () in
   Eio.Fiber.fork ~sw (fun () ->
       (try
@@ -443,8 +447,12 @@ let test_read_timeout_closes_idle_peer () =
     let clock = Eio.Stdenv.clock env in
     Eio.Time.with_timeout_exn clock 15. @@ fun () ->
     Eio.Switch.run @@ fun sw ->
-    let lsock = Net.listen ~sw net "127.0.0.1" 0 in
-    let port = Net.bound_port lsock in
+    let lsock =
+      match Net.listen ~sw net "127.0.0.1" 0 with
+      | Ok l -> l
+      | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+    in
+    let port = Option.get (Net.bound_port lsock) in
     let server_done, server_done_u = Eio.Promise.create () in
     Eio.Fiber.fork ~sw (fun () ->
         (try
@@ -500,8 +508,12 @@ let test_idle_timeout_goaway () =
     let clock = Eio.Stdenv.clock env in
     Eio.Time.with_timeout_exn clock 15. @@ fun () ->
     Eio.Switch.run @@ fun sw ->
-    let lsock = Net.listen ~sw net "127.0.0.1" 0 in
-    let port = Net.bound_port lsock in
+    let lsock =
+      match Net.listen ~sw net "127.0.0.1" 0 with
+      | Ok l -> l
+      | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+    in
+    let port = Option.get (Net.bound_port lsock) in
     let server_done, server_done_u = Eio.Promise.create () in
     Eio.Fiber.fork ~sw (fun () ->
         (try

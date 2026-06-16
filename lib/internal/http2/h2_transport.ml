@@ -13,8 +13,7 @@ module Header = Api.Header
    be (and lets the control-frame call sites stay unit-typed). *)
 let must_write : (unit, H2_error.t) result -> unit = function
   | Ok () -> ()
-  | Error _ ->
-      invalid_arg "H2_transport: frame-build invariant violated (bug)"
+  | Error _ -> invalid_arg "H2_transport: frame-build invariant violated (bug)"
 
 (* Handleable failures surfaced by [round_trip] as an [Error] arm (the external
    boundary of the decoupled h2 client). These are produced and carried as
@@ -359,12 +358,14 @@ let build_response cc cs (mf : F.meta_headers_frame) ~stream_ended :
       else Header.add header (Header.canonical_header_key hf.name) hf.value)
     mf.fields;
   let* status_code =
-    if !status = "" then Error (Malformed_response "missing status pseudo header")
+    if !status = "" then
+      Error (Malformed_response "missing status pseudo header")
     else
       match int_of_string_opt !status with
       | Some n -> Ok n
       | None ->
-          Error (Malformed_response "malformed non-numeric status pseudo header")
+          Error
+            (Malformed_response "malformed non-numeric status pseudo header")
   in
   let content_length =
     match Header.values header "Content-Length" with
@@ -448,8 +449,7 @@ let process_headers cc (mf : F.meta_headers_frame) : unit =
   | None -> () (* canceled/unknown stream; ignore *)
   | Some cs ->
       if cs.read_closed then
-        end_stream_error cc cs
-          (Malformed_response "headers after END_STREAM")
+        end_stream_error cc cs (Malformed_response "headers after END_STREAM")
       else if mf.truncated then
         end_stream_error cc cs
           (Malformed_response "response header list too large")
@@ -648,9 +648,7 @@ let process_goaway cc (gf : F.goaway_frame) : unit =
       (fun sid cs acc -> if sid > last then cs :: acc else acc)
       cc.streams []
   in
-  List.iter
-    (fun cs -> abort_stream cc cs (Got_goaway gf.error_code))
-    victims
+  List.iter (fun cs -> abort_stream cc cs (Got_goaway gf.error_code)) victims
 
 (* mark the conn closed, record the reader error (an [error] value; [None] =
    clean EOF), abort pending streams. *)
@@ -821,8 +819,8 @@ let new_client_conn ~sw r w : client_conn =
      out of the daemon (the residual floor). *)
   Eio.Fiber.fork_daemon ~sw (fun () ->
       (try read_loop cc with
-      | (Eio.Cancel.Cancelled _ | Assert_failure _ | Match_failure _
-        | Invalid_argument _ | Stack_overflow | Out_of_memory) as e ->
+      | ( Eio.Cancel.Cancelled _ | Assert_failure _ | Match_failure _
+        | Invalid_argument _ | Stack_overflow | Out_of_memory ) as e ->
           raise e
       | _ -> signal_reader_done cc (Some Conn_closed));
       `Stop_daemon);
@@ -881,7 +879,8 @@ let await_response cc cs : (Api.client_response, error) result =
         | Some err -> Error err
         | None ->
             if cc.closed then
-              Error (match cc.reader_err with Some e -> e | None -> Conn_closed)
+              Error
+                (match cc.reader_err with Some e -> e | None -> Conn_closed)
             else (
               Eio.Condition.await_no_mutex cc.cond;
               loop ()))
@@ -959,7 +958,8 @@ let round_trip ?sw cc (req : Api.client_request) :
                  cancel still forgets it (transport.go:1217). *)
               (match sw with
               | Some s ->
-                  Eio.Switch.on_release s (fun () -> cleanup_write_request cc cs)
+                  Eio.Switch.on_release s (fun () ->
+                      cleanup_write_request cc cs)
               | None -> ());
               match encode_request_headers cc req acl with
               | Error e ->

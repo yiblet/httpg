@@ -149,7 +149,8 @@ let invalid_trailer_key_is_error () =
                sent := true;
                Some "x"
              end))
-      ~content_length:(-1L) ~trailer:(Some trailer) "http://example.com/"
+      ~content_length:(-1L) ~trailer:(Some trailer)
+      (Uri.of_string "http://example.com/")
   in
   let w = Eio.Buf_write.create 256 in
   match Httpg.Io.write_request w r with

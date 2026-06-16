@@ -1,16 +1,17 @@
 (* A concrete HTTP message body, the analogue of Go's [io.ReadCloser]. *)
 
-(** A body is a lazy sequence of result-typed chunks. Each forced element is
+(** A body is an abstract handle over a lazy sequence of result-typed chunks
+    together with an optionally-known byte length. Each forced chunk is
     [Ok chunk] (more data) or a terminal [Error e] (a mid-stream framing
     failure); the sequence ends after an [Error]. An empty body is the empty
     sequence; an in-memory body is a single-element sequence; a read-path body
     streams lazily from the connection. Mid-stream failure is data — never a
     raise from a pull thunk.
 
-    The old [Empty | String | Stream] distinction is gone; the "known length vs
-    streaming" framing decision now lives in the [content_length] field on
-    Request/Response. A body produced by a {b read path} (see
-    {!Io.read_request}/{!Io.read_response}) pulls bytes lazily from the
+    The old [Empty | String | Stream] distinction is gone. A body carries its
+    own {!content_length} when known (e.g. an in-memory string); a streaming
+    body of unknown length reports [None]. A body produced by a {b read path}
+    (see {!Io.read_request}/{!Io.read_response}) pulls bytes lazily from the
     underlying connection; it is never materialized up front. Such a body must
     be consumed to EOF (via {!read_all} or {!drain}) to free the connection:
     reaching the end runs the on-EOF action that reads any chunked trailer and
@@ -18,19 +19,21 @@
 
 type error =
   | Malformed_chunk of string  (** malformed chunked framing (Go's message) *)
-  | Line_too_long  (** chunk line exceeded the limit (internal.ErrLineTooLong) *)
+  | Line_too_long
+      (** chunk line exceeded the limit (internal.ErrLineTooLong) *)
   | Trailer_too_large  (** suspiciously long trailer after a chunked body *)
   | Unexpected_eof  (** stream ended before the declared length *)
   | Protocol of string  (** other mid-stream protocol failure (message text) *)
 
 val error_to_string : error -> string
 
-type t = (string, error) result Seq.t
+type t
 
 val empty : t
 
 val of_string : string -> t
-(** [of_string s] is the empty body when [s = ""], else a single [Ok s] chunk. *)
+(** [of_string s] is the empty body when [s = ""], else a single [Ok s] chunk.
+*)
 
 val of_stream : (unit -> string option) -> t
 (** [of_stream next] is a streaming body whose chunks come from [next] until it
@@ -50,11 +53,21 @@ val to_stream : t -> stream
 (** Adapt a body to a pull stream: each call forces the next element, [None] at
     EOF. The dual of {!of_stream_result}. *)
 
-val of_seq : string Seq.t -> t
-(** [of_seq s] wraps each plain chunk of [s] as [Ok]. *)
+val of_seq : (string, error) result Seq.t -> t
+(** [of_seq s] is a body of unknown length over the result-seq [s]. *)
 
-val to_seq : t -> t
-(** The body as its underlying result-seq (the identity). *)
+val of_string_seq : string Seq.t -> t
+(** [of_string_seq s] is a body of unknown length whose chunks are the plain
+    strings of [s], each wrapped [Ok]. *)
+
+val to_seq : t -> (string, error) result Seq.t
+(** [to_seq b] is the body's underlying result-seq, dropping the known length.
+*)
+
+val content_length : t -> int64 option
+(** [content_length b] is the body's byte length when known (e.g. an in-memory
+    string or the concatenation of known-length bodies), or [None] for a
+    streaming body of unknown size. *)
 
 val of_flow : ?chunk:int -> _ Eio.Flow.source -> t
 (** [of_flow src] is a streaming body that reads [src] in chunks (up to [chunk]
@@ -74,6 +87,12 @@ val concat : t list -> t
 (** [concat bs] yields every body in [bs] in order, streaming. Used to assemble
     a composite body (e.g. the file server's multipart/byteranges output)
     without materializing it. *)
+
+val on_complete : t -> (unit -> unit) -> t
+(** [on_complete b f] is [b] with [f] scheduled to run once when the body is
+    read to clean EOF, passing chunks through unchanged and preserving the known
+    length. [f] does {b not} run if the body terminates on a mid-stream [Error]
+    (the analogue of releasing a connection only after a clean body read). *)
 
 val peek : t -> (string, error) result option * t
 (** [peek b] forces the first element, returning it (or [None] at EOF) together
@@ -106,8 +125,8 @@ val iter : (string -> unit) -> t -> (unit, error) result
     streaming without materializing, short-circuiting on the first [Error]. *)
 
 val fold_left : ('a -> string -> 'a) -> t -> 'a -> ('a, error) result
-(** [fold_left f b init] folds [f] over each successive [Ok] chunk in order until
-    EOF, streaming, short-circuiting on the first [Error]. *)
+(** [fold_left f b init] folds [f] over each successive [Ok] chunk in order
+    until EOF, streaming, short-circuiting on the first [Error]. *)
 
 val write : Eio.Buf_write.t -> t -> (unit, error) result
 (** [write w b] writes the raw body bytes to [w] with no transfer framing,

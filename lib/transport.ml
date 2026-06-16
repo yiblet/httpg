@@ -290,14 +290,7 @@ let exchange t pool key ~max_header_bytes ~released r w pc (req : Request.t) :
           (match resp.Response.content_length with
           | Some 0L -> on_eof ()
           | _ ->
-              let rec wrap seq () =
-                match seq () with
-                | Seq.Nil ->
-                    on_eof ();
-                    Seq.Nil
-                | Seq.Cons (x, rest) -> Seq.Cons (x, wrap rest)
-              in
-              resp.Response.body <- wrap resp.Response.body);
+              resp.Response.body <- Body.on_complete resp.Response.body on_eof);
           Ok resp)
 
 (* The per-connection fiber (Go's persistConn loops). Holds the channels open,
@@ -443,7 +436,10 @@ let api_body_of_body (b : Body.t) : Api.Body.t =
   else
     let pull = Body.to_stream b in
     Api.Body.Stream
-      (fun () -> match pull () with Some (Ok s) -> Some s | Some (Error _) | None -> None)
+      (fun () ->
+        match pull () with
+        | Some (Ok s) -> Some s
+        | Some (Error _) | None -> None)
 
 let body_of_api_body (b : Api.Body.t) : Body.t =
   match b with

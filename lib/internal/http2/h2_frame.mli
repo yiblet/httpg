@@ -149,9 +149,11 @@ val write_headers :
 
 val write_rst_stream :
   Eio.Buf_write.t -> int -> H2_error.err_code -> (unit, H2_error.t) result
-(** Mirrors Go's [WriteRSTStream]. [Error Invalid_stream_id] on a bad stream id. *)
+(** Mirrors Go's [WriteRSTStream]. [Error Invalid_stream_id] on a bad stream id.
+*)
 
-val write_settings : Eio.Buf_write.t -> H2.setting list -> (unit, H2_error.t) result
+val write_settings :
+  Eio.Buf_write.t -> H2.setting list -> (unit, H2_error.t) result
 (** Mirrors Go's [WriteSettings] (ACK bit clear). *)
 
 val write_settings_ack : Eio.Buf_write.t -> (unit, H2_error.t) result
@@ -168,13 +170,15 @@ val write_goaway :
   (unit, H2_error.t) result
 (** Mirrors Go's [WriteGoAway]. *)
 
-val write_window_update : Eio.Buf_write.t -> int -> int -> (unit, H2_error.t) result
-(** Mirrors Go's [WriteWindowUpdate]; [incr] must be in 1..2^31-1 (an out-of-range
-    [incr] is a programmer error — [Invalid_argument]). *)
+val write_window_update :
+  Eio.Buf_write.t -> int -> int -> (unit, H2_error.t) result
+(** Mirrors Go's [WriteWindowUpdate]; [incr] must be in 1..2^31-1 (an
+    out-of-range [incr] is a programmer error — [Invalid_argument]). *)
 
 val write_continuation :
   Eio.Buf_write.t -> int -> bool -> string -> (unit, H2_error.t) result
-(** Mirrors Go's [WriteContinuation]. [Error Invalid_stream_id] on a bad stream id. *)
+(** Mirrors Go's [WriteContinuation]. [Error Invalid_stream_id] on a bad stream
+    id. *)
 
 val write_push_promise :
   Eio.Buf_write.t ->
@@ -184,14 +188,15 @@ val write_push_promise :
   ?pad_length:int ->
   string ->
   (unit, H2_error.t) result
-(** Mirrors Go's [WritePushPromise] / [PushPromiseParam]. [Error Invalid_stream_id]
-    on a bad stream / promise id. *)
+(** Mirrors Go's [WritePushPromise] / [PushPromiseParam].
+    [Error Invalid_stream_id] on a bad stream / promise id. *)
 
 val write_raw :
   Eio.Buf_write.t -> int -> int -> int -> string -> (unit, H2_error.t) result
 (** Mirrors Go's [WriteRawFrame]: write an arbitrary frame type with the given
-    flags, stream id and payload, with no stream-id validation; [Error
-    Frame_too_large] only if the payload exceeds the 24-bit length field. *)
+    flags, stream id and payload, with no stream-id validation;
+    [Error Frame_too_large] only if the payload exceeds the 24-bit length field.
+*)
 
 (* ---- meta headers (HEADERS + CONTINUATION assembly) ---- *)
 

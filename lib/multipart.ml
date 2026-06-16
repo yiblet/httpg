@@ -237,4 +237,5 @@ let encode_part ~boundary (p : part) : string =
 let to_body ~boundary (parts : part Seq.t) : Body.t =
   (* Stream a chunk per part, then the closing delimiter. *)
   let closing = Seq.return ("--" ^ boundary ^ "--\r\n") in
-  Body.of_seq (Seq.append (Seq.map (encode_part ~boundary) parts) closing)
+  Body.of_string_seq
+    (Seq.append (Seq.map (encode_part ~boundary) parts) closing)

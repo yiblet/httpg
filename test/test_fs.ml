@@ -140,7 +140,7 @@ let dir_redirect () =
                 Transport.run tr ~sw (fun () ->
                     let req =
                       Request.make ~meth:Httpg_base.Method.Get
-                        (Ts.url s ^ "/sub")
+                        (Uri.of_string (Ts.url s ^ "/sub"))
                     in
                     let resp =
                       match Transport.round_trip tr req with

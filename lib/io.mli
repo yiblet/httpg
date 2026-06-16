@@ -39,8 +39,8 @@ type error =
           transfer.go:934). The trailer is read {b mid-stream} (when the body
           reaches EOF), so the form callers observe is {!Body.Trailer_too_large}
           — a terminal [Error] element of the body's result-seq, not a boundary
-          [Error] from {!read_request}/{!read_response}. This arm is retained for
-          callers that classify a boundary {!error} alongside that case. *)
+          [Error] from {!read_request}/{!read_response}. This arm is retained
+          for callers that classify a boundary {!error} alongside that case. *)
   | Malformed_host
       (** {!read_request}: the single inbound [Host] header value contained a
           byte outside Go's lenient host byte set ([httpguts.ValidHostHeader],
@@ -68,10 +68,9 @@ val read_request :
   ?max_header_bytes:int -> Eio.Buf_read.t -> (Request.t, error) result
 (** [read_request ?max_header_bytes r] is [ReadRequest]: parse the request line,
     headers (Host promoted to [host] and deleted from the header map), and body
-    framing from [ic]. The body is a streaming {!Body.t} reading lazily
-    from [ic]; it is not buffered. Consume it to EOF
-    ({!Body.read_all}/{!Body.drain}) to reach the next message boundary and
-    populate any chunked trailer.
+    framing from [ic]. The body is a streaming {!Body.t} reading lazily from
+    [ic]; it is not buffered. Consume it to EOF ({!Body.read_all}/{!Body.drain})
+    to reach the next message boundary and populate any chunked trailer.
 
     [max_header_bytes] bounds the request line + header block cumulatively
     against [max_header_bytes + 4096] bytes (Go's [initialReadLimitSize], the
@@ -95,9 +94,9 @@ val read_response :
 (** [read_response ?request ?max_header_bytes r] is [ReadResponse]: parse the
     status line, headers and body framing. [request] optionally supplies the
     corresponding request (for HEAD body suppression); a GET is assumed
-    otherwise. The body is a streaming {!Body.t} reading lazily from [ic]
-    (not buffered); consume it to EOF to reach the next message boundary and
-    read any chunked trailer.
+    otherwise. The body is a streaming {!Body.t} reading lazily from [ic] (not
+    buffered); consume it to EOF to reach the next message boundary and read any
+    chunked trailer.
 
     [max_header_bytes] bounds the status line + header block cumulatively
     against [max_header_bytes + 4096] bytes — the client-side mirror of

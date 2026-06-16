@@ -64,9 +64,7 @@ let trailer_undeclared_after_drain () =
     ^ "0\r\n" ^ "X-Late: yes\r\n" ^ "\r\n"
   in
   let r = read_response_ok (r_of_string raw) in
-  Alcotest.(check string)
-    "body" "foo"
-    (read_body r.Httpg.Response.body);
+  Alcotest.(check string) "body" "foo" (read_body r.Httpg.Response.body);
   match r.Httpg.Response.trailer with
   | Some t ->
       Alcotest.(check (option string))

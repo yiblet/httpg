@@ -26,8 +26,12 @@ let ok_resp = function
 let with_server ?(secs = 10.0) handler client =
   Test_harness.with_env ~secs (fun ~net ~clock ~sw ->
       let srv, port, serve_loop =
-        Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
-          ~port:0 handler
+        match
+          Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
+            ~port:0 handler
+        with
+        | Ok v -> v
+        | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
       in
       Eio.Fiber.fork ~sw serve_loop;
       Fun.protect
@@ -80,17 +84,18 @@ let client_body_streamed () =
     let first = next_chunk resp.Response.body in
     let handler_done_early = Eio.Promise.is_resolved released in
     Eio.Promise.resolve release ();
-    let rest = read_body resp.Response.body in
-    (first, handler_done_early, rest)
+    (* The body is a persistent, replayable seq: forcing the first chunk above
+       was non-destructive, so reading it in full here yields the whole body
+       (including the first chunk), not just the remainder. *)
+    let full = read_body resp.Response.body in
+    (first, handler_done_early, full)
   in
-  let first, handler_done_early, rest = with_server handler client in
+  let first, handler_done_early, full = with_server handler client in
   Alcotest.(check bool)
     "first chunk readable" true
     (first <> None && first <> Some "");
   Alcotest.(check bool)
     "first chunk arrived before handler completed" false handler_done_early;
-  let first_s = match first with Some s -> s | None -> "" in
-  let full = first_s ^ rest in
   let expected =
     "FIRST" ^ String.concat "" (List.init n_more (fun _ -> more_chunk))
   in
@@ -152,8 +157,12 @@ let cancel_mid_body () =
           Response.create () |> Response.with_body (Body.of_stream next)
         in
         let srv, port, serve_loop =
-          Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
-            ~port:0 handler
+          match
+            Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
+              ~port:0 handler
+          with
+          | Ok v -> v
+          | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw serve_loop;
         Fun.protect

@@ -786,6 +786,8 @@ let serve ?domains srv listen_sock =
       serve_conn ~clock ~graceful:srv.graceful ~timeouts ~max_header_bytes
         ~force_h2:srv.force_h2 srv.handler flow peer)
 
+let ( let* ) = Result.bind
+
 (* Go's ListenAndServe: bind addr:port and serve until the listener is torn
    down. With [?domain_mgr] + [?domains] (default all cores) the accept pool
    runs across domains; without [?domain_mgr] it stays single-domain. *)
@@ -798,10 +800,11 @@ let listen_and_serve ?read_timeout ?read_header_timeout ?write_timeout
       handler
   in
   Eio.Switch.run @@ fun sw ->
-  let listen_sock =
+  let* listen_sock =
     Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
   in
-  serve ?domains srv listen_sock
+  serve ?domains srv listen_sock;
+  Ok ()
 
 (* Like listen_and_serve but binds first and hands the running server, the bound
    port and a thunk that runs the accept pool to [fn] — so tests can connect to
@@ -814,11 +817,15 @@ let listen_and_serve_started ?read_timeout ?read_header_timeout ?write_timeout
       ?write_timeout ?idle_timeout ?max_header_bytes ?force_h2 ~addr ~port
       handler
   in
-  let listen_sock =
+  let* listen_sock =
     Net.listen ~sw net (if addr = "" then "0.0.0.0" else addr) port
   in
-  let bound = Net.bound_port listen_sock in
-  (srv, bound, fun () -> serve ?domains srv listen_sock)
+  let bound =
+    match Net.bound_port listen_sock with
+    | Some p -> p
+    | None -> assert false (* Net.listen always binds TCP *)
+  in
+  Ok (srv, bound, fun () -> serve ?domains srv listen_sock)
 
 (* ---- HTTP/2 over TLS (ALPN dispatch) ---- *)
 
@@ -870,12 +877,13 @@ let listen_and_serve_tls ?read_timeout ?read_header_timeout ?write_timeout
       ?write_timeout ?idle_timeout ?max_header_bytes ~addr ~port handler
   in
   Eio.Switch.run @@ fun sw ->
-  let tls_srv =
+  let* tls_srv =
     Net.listen_tls ~sw ~certificates ~alpn net
       (if addr = "" then "0.0.0.0" else addr)
       port
   in
-  serve_tls ?domains srv tls_srv
+  serve_tls ?domains srv tls_srv;
+  Ok ()
 
 (* Like listen_and_serve_tls but binds first and returns the running server, the
    bound port and the accept-pool thunk, so tests can connect over an ephemeral
@@ -888,10 +896,14 @@ let listen_and_serve_tls_started ?read_timeout ?read_header_timeout
     create ~net ?clock ?domain_mgr ?read_timeout ?read_header_timeout
       ?write_timeout ?idle_timeout ?max_header_bytes ~addr ~port handler
   in
-  let tls_srv =
+  let* tls_srv =
     Net.listen_tls ~sw ~certificates ~alpn net
       (if addr = "" then "0.0.0.0" else addr)
       port
   in
-  let bound = Net.bound_port (Net.tls_listen_sock tls_srv) in
-  (srv, bound, fun () -> serve_tls ?domains srv tls_srv)
+  let bound =
+    match Net.bound_port (Net.tls_listen_sock tls_srv) with
+    | Some p -> p
+    | None -> assert false (* Net.listen_tls always binds TCP *)
+  in
+  Ok (srv, bound, fun () -> serve_tls ?domains srv tls_srv)

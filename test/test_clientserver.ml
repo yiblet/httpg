@@ -24,8 +24,12 @@ let read_body b =
 let with_server handler client =
   Test_harness.with_env (fun ~net ~clock ~sw ->
       let srv, port, serve_loop =
-        Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
-          ~port:0 handler
+        match
+          Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
+            ~port:0 handler
+        with
+        | Ok v -> v
+        | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
       in
       Eio.Fiber.fork ~sw serve_loop;
       Fun.protect
@@ -48,8 +52,7 @@ let get_roundtrip () =
   let client ~net ~sw ~clock ~port =
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = ok_resp (Client.get ~sw (Client.create ~net ~clock ()) url) in
-    ( Httpg_base.Status.to_int resp.Response.status,
-      read_body resp.Response.body )
+    (Httpg_base.Status.to_int resp.Response.status, read_body resp.Response.body)
   in
   let status, body = with_server hello_handler client in
   Alcotest.(check int) "status 200" 200 status;
@@ -66,8 +69,7 @@ let post_body () =
            (Client.create ~net ~clock ())
            url ~content_type:"text/plain" (Body.of_string payload))
     in
-    ( Httpg_base.Status.to_int resp.Response.status,
-      read_body resp.Response.body )
+    (Httpg_base.Status.to_int resp.Response.status, read_body resp.Response.body)
   in
   let status, body = with_server echo_handler client in
   Alcotest.(check int) "status 200" 200 status;
@@ -139,7 +141,7 @@ let round_trip_no_host_is_error () =
   Test_harness.with_env (fun ~net ~clock ~sw ->
       let transport = Transport.create ~net ~clock () in
       Transport.run transport ~sw (fun () ->
-          let req = Request.make "/path-only-no-host" in
+          let req = Request.make (Uri.of_string "/path-only-no-host") in
           match Transport.round_trip transport req with
           | Error Transport.No_host -> ()
           | Error e ->
@@ -159,7 +161,7 @@ let round_trip_tls_failure_is_error () =
         (fun () ->
           let transport = Transport.create ~net ~clock () in
           Transport.run transport ~sw (fun () ->
-              let req = Request.make url in
+              let req = Request.make (Uri.of_string url) in
               match Transport.round_trip transport req with
               | Error (Transport.Net (Net.Tls _)) -> ()
               | Error e ->

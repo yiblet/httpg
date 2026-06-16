@@ -80,7 +80,7 @@ let add_cookie () =
 
 let make () =
   (* defaults + host derived from the URL *)
-  let r = Httpg.Request.make "http://example.com/path" in
+  let r = Httpg.Request.make (Uri.of_string "http://example.com/path") in
   Alcotest.(check bool)
     "meth GET" true
     (r.Httpg.Request.meth = Httpg_base.Method.Get);
@@ -94,7 +94,7 @@ let make () =
   (* explicit host overrides the URL-derived one; meth honored *)
   let r2 =
     Httpg.Request.make ~meth:Httpg_base.Method.Post ~host:"override.example"
-      "http://example.com/"
+      (Uri.of_string "http://example.com/")
   in
   Alcotest.(check (option string))
     "host override" (Some "override.example") r2.Httpg.Request.host;

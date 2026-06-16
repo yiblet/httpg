@@ -376,8 +376,8 @@ let malformed_raw_server r w =
     (* HEADERS with END_HEADERS|END_STREAM but no :status pseudo-header. *)
     let block = encode_block [ ("content-type", "text/plain") ] in
     ok
-      (F.write_headers w ~stream_id:!stream_id ~end_stream:true ~end_headers:true
-         block);
+      (F.write_headers w ~stream_id:!stream_id ~end_stream:true
+         ~end_headers:true block);
     Eio.Buf_write.flush w);
   Eio.Fiber.await_cancel ()
 
@@ -387,8 +387,12 @@ let test_malformed_response_missing_status () =
   let clock = Eio.Stdenv.clock env in
   Eio.Time.with_timeout_exn clock 15. @@ fun () ->
   Eio.Switch.run @@ fun sw ->
-  let lsock = Httpg.Net.listen ~sw net "127.0.0.1" 0 in
-  let port = Httpg.Net.bound_port lsock in
+  let lsock =
+    match Httpg.Net.listen ~sw net "127.0.0.1" 0 with
+    | Ok l -> l
+    | Error e -> failwith (Httpg.Net.error_to_string e)
+  in
+  let port = Option.get (Httpg.Net.bound_port lsock) in
   Eio.Fiber.first
     (fun () ->
       let flow =

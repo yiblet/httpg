@@ -27,6 +27,14 @@ val canonical_header_key : string -> string
     contains a space or an invalid header field byte, it is returned unchanged.
 *)
 
+val filter : (string -> string list -> bool) -> t -> t
+(** [filter f h] returns a new header with all keys [k] for which
+    [f k (values h k)] is [true]. *)
+
+val filter_key : (string -> bool) -> t -> t
+(** [filter_key f h] returns a new header with all keys [k] for which [f k] is
+    [true]. *)
+
 val add : t -> string -> string -> t
 (** [add h key value] returns [h] with [value] appended to any existing values
     for the canonicalized key (Go's [Header.Add]). *)

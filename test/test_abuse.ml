@@ -53,9 +53,13 @@ let with_started ~secs mk_server fn =
 let start ?read_timeout ?read_header_timeout ?write_timeout ?idle_timeout
     ?max_header_bytes handler ~net ~clock ~sw =
   let srv, port, serve_loop =
-    Server.listen_and_serve_started ?read_timeout ?read_header_timeout
-      ?write_timeout ?idle_timeout ?max_header_bytes ~net ~clock ~sw
-      ~addr:"127.0.0.1" ~port:0 handler
+    match
+      Server.listen_and_serve_started ?read_timeout ?read_header_timeout
+        ?write_timeout ?idle_timeout ?max_header_bytes ~net ~clock ~sw
+        ~addr:"127.0.0.1" ~port:0 handler
+    with
+    | Ok v -> v
+    | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
   in
   Eio.Fiber.fork ~sw serve_loop;
   (srv, port)
@@ -140,8 +144,14 @@ let slowloris_header_timeout_tls () =
     Test_harness.with_env ~secs:3. (fun ~net ~clock ~sw ->
         let certificates = Net.test_server_certificate () in
         let srv, port, serve_loop =
-          Server.listen_and_serve_tls_started ~read_header_timeout:0.2 ~net
-            ~clock ~certificates ~sw ~addr:"127.0.0.1" ~port:0 hello_handler
+          match
+            Server.listen_and_serve_tls_started ~read_header_timeout:0.2 ~net
+              ~clock ~certificates ~sw ~addr:"127.0.0.1" ~port:0 hello_handler
+          with
+          | Ok v -> v
+          | Error e ->
+              Alcotest.failf "listen_and_serve_tls_started: %s"
+                (Net.error_to_string e)
         in
         Eio.Fiber.fork ~sw serve_loop;
         Fun.protect
@@ -337,8 +347,7 @@ let accepts_valid_host_and_headers () =
 let expect_100_continue () =
   let handler =
    fun ~sw:_ r ->
-    Response.create ()
-    |> Response.with_body_string (read_body r.Request.body)
+    Response.create () |> Response.with_body_string (read_body r.Request.body)
   in
   let interim, rest =
     with_started ~secs:5.
@@ -392,8 +401,12 @@ let expect_unknown () =
    then run [client ~net ~sw ~clock ~port], bounded. *)
 let with_raw_server ~secs ~serve client =
   Test_harness.with_env ~secs (fun ~net ~clock ~sw ->
-      let listener = Net.listen ~sw net "127.0.0.1" 0 in
-      let port = Net.bound_port listener in
+      let listener =
+        match Net.listen ~sw net "127.0.0.1" 0 with
+        | Ok l -> l
+        | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
+      in
+      let port = Option.get (Net.bound_port listener) in
       Eio.Fiber.fork ~sw (fun () ->
           try
             let flow, _addr = Net.accept ~sw listener in
@@ -447,8 +460,7 @@ let response_header_under_limit_ok () =
     let c = Client.create ~net ~clock ~transport () in
     let url = Printf.sprintf "http://127.0.0.1:%d/" port in
     let resp = ok_resp (Client.get ~sw c url) in
-    ( Httpg_base.Status.to_int resp.Response.status,
-      read_body resp.Response.body )
+    (Httpg_base.Status.to_int resp.Response.status, read_body resp.Response.body)
   in
   let code, b = with_raw_server ~secs:5. ~serve client in
   Alcotest.(check int) "status 200" 200 code;
@@ -489,7 +501,9 @@ let drive_redirects ~start:start_url ~routes ~init_headers =
         | None -> Ok (stub_response req ())
       in
       let c = Client.create ~net () in
-      let req = Request.make ~meth:Httpg_base.Method.Get start_url in
+      let req =
+        Request.make ~meth:Httpg_base.Method.Get (Uri.of_string start_url)
+      in
       req.Request.header <-
         List.fold_left
           (fun h (k, v) -> Header.set h k v)
@@ -518,7 +532,10 @@ let redirect_strip_sticky_on_bounce_back () =
           | _ -> Ok (stub_response req ())
         in
         let c = Client.create ~net () in
-        let req = Request.make ~meth:Httpg_base.Method.Get "http://a.com/" in
+        let req =
+          Request.make ~meth:Httpg_base.Method.Get
+            (Uri.of_string "http://a.com/")
+        in
         req.Request.header <-
           Header.set req.Request.header "Authorization" "Bearer secret";
         let resp = ok_resp (Client.Private.do_one ~round_trip c req) in
@@ -585,7 +602,10 @@ let redirect_cap_is_error () =
              ())
       in
       let c = Client.create ~net () in
-      let req = Request.make ~meth:Httpg_base.Method.Get "http://loop.com/0" in
+      let req =
+        Request.make ~meth:Httpg_base.Method.Get
+          (Uri.of_string "http://loop.com/0")
+      in
       match Client.Private.do_one ~round_trip c req with
       | Error (Client.Redirect msg) ->
           Alcotest.(check bool)
@@ -606,7 +626,9 @@ let redirect_round_trip_error_is_error () =
         Error Transport.No_host
       in
       let c = Client.create ~net () in
-      let req = Request.make ~meth:Httpg_base.Method.Get "http://x.com/" in
+      let req =
+        Request.make ~meth:Httpg_base.Method.Get (Uri.of_string "http://x.com/")
+      in
       match Client.Private.do_one ~round_trip c req with
       | Error (Client.Round_trip Transport.No_host) -> ()
       | Error e ->

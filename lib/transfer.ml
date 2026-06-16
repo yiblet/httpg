@@ -514,7 +514,11 @@ let probe_request_body (body : Body.t ref) : bool =
      first element is the whole point). Skip leading empty [Ok ""] chunks the
      way Go skips zero-length reads; a terminal [Error] is treated as
      content-present (left in place for the consumer to surface). *)
-  let rec peek (s : Body.t) : bool =
+  (* [Body.of_seq] is size-neutral here: this probe only runs on the unknown
+     content-length path (see {!should_send_chunked_request_body}), so the body's
+     length is already [None], and skipping leading empty [Ok ""] chunks removes
+     zero bytes. *)
+  let rec peek (s : (string, Body.error) Stdlib.result Seq.t) : bool =
     match Seq.uncons s with
     | None ->
         body := Body.empty;
@@ -522,14 +526,14 @@ let probe_request_body (body : Body.t ref) : bool =
     | Some (Ok "", rest) -> peek rest
     | Some ((Ok _ as elem), rest) ->
         (* Re-prepend the peeked chunk so the body still reads in full. *)
-        body := Seq.cons elem rest;
+        body := Body.of_seq (Seq.cons elem rest);
         true
     | Some ((Error _ as elem), rest) ->
         (* Surface the failure to the eventual consumer; treat as present. *)
-        body := Seq.cons elem rest;
+        body := Body.of_seq (Seq.cons elem rest);
         true
   in
-  peek !body
+  peek (Body.to_seq !body)
 
 (* shouldSendChunkedRequestBody (transfer.go:152): only for cl<0, non-CONNECT.
    Body-lacking methods (GET/HEAD/...) are probed so a content-less ReadCloser

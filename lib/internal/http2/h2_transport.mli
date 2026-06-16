@@ -29,9 +29,9 @@
 (** Handleable failures surfaced by {!round_trip} as an [Error] arm — the
     external boundary of the decoupled h2 client. They mirror Go's [(T, error)]
     for the round-trip path. These are carried as VALUES across the
-    per-connection fibers (the read-loop / body-pump / cleanup fibers set them on
-    the per-stream / per-conn error slots; the request fiber reads them back —
-    see {!round_trip}); no carrier exception is threaded across the fiber
+    per-connection fibers (the read-loop / body-pump / cleanup fibers set them
+    on the per-stream / per-conn error slots; the request fiber reads them back
+    — see {!round_trip}); no carrier exception is threaded across the fiber
     boundary. *)
 type error =
   | Conn_closed  (** Go's [errClientConnClosed]: the conn closed under us. *)
@@ -102,12 +102,12 @@ val round_trip :
     a framing violation in / reset of the response ([Malformed_response]), or an
     abandoned request ([Request_canceled]). The cause is set as an [error] VALUE
     on the per-stream [abort_err] / per-conn [reader_err] by whichever fiber
-    detects it (read loop / body pump / cleanup); [await_response] in the request
-    fiber reads that value back and returns it — no carrier exception crosses the
-    fiber boundary (ticket 014). The only things that still propagate as
-    exceptions are the residual floor of bugs and Eio-boundary control:
-    [Eio.Cancel] (a cancelled request scope), asserts, [invalid_arg], and the
-    {!H2_pipe}/{!H2_databuffer} guards. *)
+    detects it (read loop / body pump / cleanup); [await_response] in the
+    request fiber reads that value back and returns it — no carrier exception
+    crosses the fiber boundary (ticket 014). The only things that still
+    propagate as exceptions are the residual floor of bugs and Eio-boundary
+    control: [Eio.Cancel] (a cancelled request scope), asserts, [invalid_arg],
+    and the {!H2_pipe}/{!H2_databuffer} guards. *)
 
 val reserve_new_request : client_conn -> bool
 (** [reserve_new_request cc] reserves a concurrency slot on [cc] (incrementing

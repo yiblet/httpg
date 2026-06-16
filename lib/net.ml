@@ -14,17 +14,15 @@ module Buf_write = Eio.Buf_write
    {!error} variant threaded as [(_, error) result] by the client entry points
    ([connect]/[connect_tls]/[connect_alpn]) — those have no [exception] at all.
    These two exceptions exist solely for the handful of internal call sites that
-   honor non-[result] signatures forced on us by Eio and the startup contracts,
-   and the raise is converted/swallowed before it could ever escape [Net] as a
-   public contract:
+   honor non-[result] signatures forced on us by Eio (the mid-stream
+   [Flow.SOURCE.read] and the per-connection [accept_tls] contract), and the
+   raise is converted/swallowed before it could ever escape [Net] as a public
+   contract:
 
    - [Tls_flow.single_read] / [raise_tls]: Eio's [Flow.SOURCE.read] cannot return
      a [result], so a mid-stream modeled TLS failure re-raises [Internal_tls_error]
      here; the [connect_*] boundary's [run_buffered_result] catches it and maps it
      back to [Error (Tls _)] (see there). It never escapes [Net].
-   - [listen] (resolve/bind failure): a [result]-free startup contract; a bad bind
-     address re-raises [Internal_dial_error] (a startup config error, like
-     {!bound_port}'s [Failure]).
    - [accept_tls] (per-connection handshake failure): a [result]-free
      per-connection contract; re-raises [Internal_tls_error], which the server's
      per-conn [on_error] swallows (one failed handshake must not kill the accept
@@ -83,8 +81,8 @@ let sockaddr_to_string : Eio.Net.Sockaddr.stream -> string = function
 
 let bound_port sock =
   match Eio.Net.listening_addr sock with
-  | `Tcp (_, port) -> port
-  | `Unix _ -> failwith "Net.bound_port: not a TCP socket"
+  | `Tcp (_, port) -> Some port
+  | `Unix _ -> None
 
 (* ----- Plain buffered wrapping ----- *)
 
@@ -97,15 +95,11 @@ let with_buffered (flow : _ Eio.Flow.two_way) fn =
 
 (* ----- TCP ----- *)
 
+let ( let* ) = Result.bind
+
 let listen ?(backlog = default_backlog) ~sw net host port =
-  (* [listen] is a [result]-free startup contract; [resolve] threads a [result],
-     so on an unresolvable bind address re-raise the INTERNAL exception (a
-     startup config error that never crosses the public surface — see the
-     exception block above). *)
-  match resolve net host port with
-  | Ok addr -> Eio.Net.listen ~reuse_addr:true ~backlog ~sw net addr
-  | Error (Dial s) -> raise (Internal_dial_error s)
-  | Error (Tls s) -> raise (Internal_tls_error s)
+  let* addr = resolve net host port in
+  Ok (Eio.Net.listen ~reuse_addr:true ~backlog ~sw net addr)
 
 let accept ~sw listen_sock = Eio.Net.accept ~sw listen_sock
 
@@ -113,8 +107,6 @@ let accept ~sw listen_sock = Eio.Net.accept ~sw listen_sock
    accepted socket closed when [fn] returns (defer c.close()). *)
 let accept_fork ~sw ~on_error listen_sock fn =
   Eio.Net.accept_fork ~sw ~on_error listen_sock fn
-
-let ( let* ) = Result.bind
 
 let connect ~sw net ~host ~port =
   let* addr = resolve net host port in
@@ -308,21 +300,24 @@ let null_authenticator : X509.Authenticator.t = fun ?ip:_ ~host:_ _ -> Ok None
 (* SECURE default authenticator from the OS trust store via ca-certs (checks
    expiry and, with ~host at handshake time, the certificate name) -- the
    analogue of Go's http.Client verifying against the system roots. *)
-let default_authenticator () : X509.Authenticator.t =
+let default_authenticator () : (X509.Authenticator.t, error) result =
   match Ca_certs.authenticator () with
-  | Ok auth -> auth
+  | Ok auth -> Ok auth
   | Error (`Msg m) ->
-      failwith
-        (Printf.sprintf
-           "Net: cannot load the system trust store for TLS verification: %s" m)
+      Error
+        (Tls
+           (Printf.sprintf
+              "Net: cannot load the system trust store for TLS verification: %s"
+              m))
 
 (* Precedence (mirroring Go's tls.Config): explicit [?authenticator] wins;
    else [~insecure:true] selects the null authenticator; else the secure
    system-trust default. *)
-let resolve_authenticator ?authenticator ?(insecure = false) () =
+let resolve_authenticator ?authenticator ?(insecure = false) () :
+    (X509.Authenticator.t, error) result =
   match authenticator with
-  | Some a -> a
-  | None -> if insecure then null_authenticator else default_authenticator ()
+  | Some a -> Ok a
+  | None -> if insecure then Ok null_authenticator else default_authenticator ()
 
 let host_to_domain_name host =
   match Domain_name.of_string host with
@@ -330,13 +325,14 @@ let host_to_domain_name host =
       match Domain_name.host dn with Ok h -> Some h | Error _ -> None)
   | Error _ -> None
 
-let client_config ?(alpn = []) ?authenticator ?insecure ~peer_name () =
+let client_config ?(alpn = []) ?authenticator ?insecure ~peer_name () :
+    (Tls.Config.client, error) result =
   let alpn_protocols = match alpn with [] -> None | l -> Some l in
-  let authenticator = resolve_authenticator ?authenticator ?insecure () in
+  let* authenticator = resolve_authenticator ?authenticator ?insecure () in
   match Tls.Config.client ~authenticator ?peer_name ?alpn_protocols () with
-  | Ok c -> c
+  | Ok c -> Ok c
   | Error (`Msg m) ->
-      failwith (Printf.sprintf "Net.connect: bad TLS config: %s" m)
+      Error (Tls (Printf.sprintf "Net.connect: bad TLS config: %s" m))
 
 (* ----- Client connect ----- *)
 
@@ -370,7 +366,7 @@ let connect_alpn ~sw net ~host ~port ?(tls = false) ?(alpn = []) ?authenticator
   else begin
     ensure_rng ();
     let peer_name = host_to_domain_name host in
-    let cfg = client_config ~alpn ?authenticator ?insecure ~peer_name () in
+    let* cfg = client_config ~alpn ?authenticator ?insecure ~peer_name () in
     let state, first = Tls.Engine.client cfg in
     (* The client's initial hello must hit the wire before we read. *)
     Eio.Flow.write flow [ Cstruct.of_string first ];
@@ -444,16 +440,13 @@ let listen_tls ?(backlog = default_backlog) ~sw ~certificates ~alpn net host
     port =
   ensure_rng ();
   let alpn_protocols = match alpn with [] -> None | l -> Some l in
-  let config =
-    match
-      Tls.Config.server ~certificates:(`Single certificates) ?alpn_protocols ()
-    with
-    | Ok c -> c
-    | Error (`Msg m) ->
-        failwith (Printf.sprintf "Net.listen_tls: bad TLS config: %s" m)
-  in
-  let listen_sock = listen ~backlog ~sw net host port in
-  { listen_sock; config }
+  match
+    Tls.Config.server ~certificates:(`Single certificates) ?alpn_protocols ()
+  with
+  | Error (`Msg m) -> Error (Tls m)
+  | Ok config ->
+      let* listen_sock = listen ~backlog ~sw net host port in
+      Ok { listen_sock; config }
 
 let tls_listen_sock s = s.listen_sock
 

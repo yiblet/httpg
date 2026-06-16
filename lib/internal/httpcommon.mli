@@ -14,9 +14,7 @@
      carries Go's message text verbatim);
    - [Header_list_size]: Go's ErrRequestHeaderListSize (the encoded header list
      exceeds the peer's advertised limit). *)
-type error =
-  | Invalid_request of string
-  | Header_list_size
+type error = Invalid_request of string | Header_list_size
 
 val error_to_string : error -> string
 

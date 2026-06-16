@@ -27,20 +27,6 @@ type file_info = {
 (** Go's [fs.FileInfo] subset that this port needs: the bits [serveFile] reads
     off a [Stat]. *)
 
-type file = {
-  stat : unit -> file_info;  (** Go [File.Stat]. *)
-  read_window : off:int64 -> len:int -> string;
-      (** Read up to [len] bytes starting at byte offset [off] by [pread]ing the
-          single open handle (Go's [Seek]+[Read]). Returns fewer bytes only at
-          EOF. Valid until {!close}. *)
-  readdir : unit -> file_info list;
-      (** Go [File.Readdir(-1)]: all directory entries. *)
-  close : unit -> unit;  (** Go [File.Close]. *)
-}
-(** Go's [http.File]: a file returned by a {!file_system}'s open, served by the
-    [FileServer]. Models the [io.Closer]/[io.Reader]/[io.Seeker] + [Readdir] +
-    [Stat] interface over the underlying OS file. *)
-
 (** A handleable file-serving error. Covers the open/stat failures
     {!to_http_error} maps to an HTTP status ({!Invalid_unsafe_path}/{!Not_exist}
     → 404, {!Permission} → 403, {!Other} → 500) and the {!parse_range} failures
@@ -56,6 +42,22 @@ type error =
       (** Go's [errNoOverlap]: no requested range overlaps the content. *)
   | Invalid_range of string
       (** Go's ["invalid range"]: malformed Range header. *)
+
+type file = {
+  stat : unit -> file_info;  (** Go [File.Stat]. *)
+  read_window : off:int64 -> len:int -> string;
+      (** Read up to [len] bytes starting at byte offset [off] by [pread]ing the
+          single open handle (Go's [Seek]+[Read]). Returns fewer bytes only at
+          EOF. Valid until {!close}. *)
+  readdir : unit -> (file_info list, error) result;
+      (** Go [File.Readdir(-1)]: all directory entries, or an {!error} (e.g.
+          {!Other} ["not a directory"] when called on a regular file, mirroring
+          Go's [os.File.Readdir] returning an error rather than panicking). *)
+  close : unit -> unit;  (** Go [File.Close]. *)
+}
+(** Go's [http.File]: a file returned by a {!file_system}'s open, served by the
+    [FileServer]. Models the [io.Closer]/[io.Reader]/[io.Seeker] + [Readdir] +
+    [Stat] interface over the underlying OS file. *)
 
 val error_to_string : error -> string
 (** Render an {!error} as its Go message text. *)

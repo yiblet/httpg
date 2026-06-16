@@ -485,12 +485,11 @@ let test_read_transfer_chunked () =
   let r = buf_read_of_string body_bytes in
   let got =
     match Transfer.read_transfer msg r with
-    | Ok res ->
+    | Ok res -> (
         Alcotest.(check bool) "is_chunked" true res.Transfer.is_chunked;
-        (match Body.read_all res.Transfer.body with
+        match Body.read_all res.Transfer.body with
         | Ok s -> s
-        | Error e ->
-            Alcotest.failf "body read: %s" (Body.error_to_string e))
+        | Error e -> Alcotest.failf "body read: %s" (Body.error_to_string e))
     | Error e ->
         Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)
   in
@@ -512,12 +511,11 @@ let test_read_transfer_content_length () =
   let r = buf_read_of_string "hello world" in
   let got =
     match Transfer.read_transfer msg r with
-    | Ok res ->
+    | Ok res -> (
         Alcotest.(check int64) "content_length" 5L res.Transfer.content_length;
-        (match Body.read_all res.Transfer.body with
+        match Body.read_all res.Transfer.body with
         | Ok s -> s
-        | Error e ->
-            Alcotest.failf "body read: %s" (Body.error_to_string e))
+        | Error e -> Alcotest.failf "body read: %s" (Body.error_to_string e))
     | Error e ->
         Alcotest.failf "read_transfer error %s" (Transfer.error_to_string e)
   in

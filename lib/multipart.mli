@@ -54,8 +54,8 @@ val of_body : boundary:string -> Body.t -> (part, error) result Seq.t
 val to_body : boundary:string -> t -> Body.t
 (** [to_body ~boundary parts] renders [parts] as a multipart/form-data {!Body.t}
     delimited by [boundary] (Go's [multipart.Writer]). The body {b streams}:
-    each part is encoded into its own chunk on demand (a {!Body.Stream} via
-    {!Body.of_seq}), followed by the closing delimiter. Each part's
+    each part is encoded into its own chunk on demand (an unknown-length stream
+    via {!Body.of_string_seq}), followed by the closing delimiter. Each part's
     Content-Disposition is synthesized from its [name]/[filename] (replacing any
     carried one); the remaining header fields (e.g. Content-Type) are written
     as-is, then the part [body]. The inverse of {!of_body}: parsing the result

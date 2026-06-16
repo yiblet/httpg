@@ -244,7 +244,8 @@ let parse_rst_stream fh p : (frame, H2_error.t) result =
   else if fh.stream_id = 0 then Error (conn_error H2_error.ProtocolError)
   else
     Ok
-      (RST_stream (fh, { error_code = H2_error.err_code_of_int (get_uint32 p 0) }))
+      (RST_stream
+         (fh, { error_code = H2_error.err_code_of_int (get_uint32 p 0) }))
 
 let parse_settings fh p : (frame, H2_error.t) result =
   if has fh.flags flag_settings_ack && fh.length > 0 then
@@ -266,7 +267,8 @@ let parse_settings fh p : (frame, H2_error.t) result =
       | Some H2.Initial_window_size ->
           (* compare as unsigned 32-bit against 2^31-1 *)
           let v = get_uint32 p ((idx * 6) + 2) in
-          if v > 0x7fffffff then err := Some (conn_error H2_error.FlowControlError)
+          if v > 0x7fffffff then
+            err := Some (conn_error H2_error.FlowControlError)
       | _ -> ());
       (match (!err, H2.setting_id_of_int id_int) with
       | None, Some id -> settings := { H2.id; value } :: !settings
@@ -509,8 +511,8 @@ let write_window_update oc stream_id incr : (unit, H2_error.t) result =
   put_uint32 buf incr;
   write_frame oc H2.Window_update 0 stream_id (Buffer.contents buf)
 
-let write_continuation oc stream_id end_headers frag :
-    (unit, H2_error.t) result =
+let write_continuation oc stream_id end_headers frag : (unit, H2_error.t) result
+    =
   if not (valid_stream_id stream_id) then Error H2_error.Invalid_stream_id
   else begin
     let flags = if end_headers then flag_continuation_end_headers else 0 in

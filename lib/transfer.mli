@@ -29,8 +29,7 @@ val parse_hex_uint : string -> (int64, error) result
 (** [parseHexUint]: parse a hex chunk length. Returns [Error (Chunk _)] /
     [Error Line_too_long] on bad input (header/initial-parse boundary). *)
 
-val new_chunked_reader :
-  Eio.Buf_read.t -> unit -> (string, error) result option
+val new_chunked_reader : Eio.Buf_read.t -> unit -> (string, error) result option
 (** [internal.NewChunkedReader]: a result-yielding pull function returning
     successive decoded chunk payloads ([Some (Ok data)]) and finally [None] at
     the terminating 0-length chunk. Malformed input surfaces as a terminal

@@ -262,7 +262,8 @@ let accepts_distinct_settings () =
               Alcotest.failf "hpack decode: %s" (Hpack.error_to_string e));
           (match Hpack.close_result dec with
           | Ok () -> ()
-          | Error e -> Alcotest.failf "hpack close: %s" (Hpack.error_to_string e));
+          | Error e ->
+              Alcotest.failf "hpack close: %s" (Hpack.error_to_string e));
           List.assoc_opt ":status" !fields
       | Ok (F.GoAway (_, gf)) ->
           Alcotest.failf "unexpected GOAWAY %s"

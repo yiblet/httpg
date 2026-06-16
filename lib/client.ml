@@ -14,7 +14,7 @@ type check_redirect = Request.t list -> (unit, string) result
    [Transport.round_trip] failed ([Round_trip], embedding the lower layer's
    typed error), or the whole exchange exceeded [Client.timeout] ([Timeout],
    Go's Client.Timeout). Returned as [Error _] from the result-typed public API
-   ([do_]/[get]/[head]/[post]); no exception boundary. *)
+   ([send]/[get]/[head]/[post]); no exception boundary. *)
 type error = Redirect of string | Round_trip of Transport.error | Timeout
 
 let error_to_string = function
@@ -74,15 +74,15 @@ let body_header k =
       true
   | _ -> false
 
-let copy_headers ~from ~into ~strip_sensitive ~strip_body =
-  Header.fold
-    (fun k vv into ->
-      if
-        (not (sensitive_header k && strip_sensitive))
-        && not (body_header k && strip_body)
-      then Header.set_values into k vv
-      else into)
-    from into
+let modify_headers ~strip_sensitive ~strip_body headers =
+  if strip_sensitive || strip_body then
+    Header.filter_key
+      (fun k ->
+        let sensitive = not (strip_sensitive && sensitive_header k) in
+        let body = not (strip_body && body_header k) in
+        sensitive && body)
+      headers
+  else headers
 
 let url_host (u : Uri.t) = match Uri.host u with Some h -> h | None -> ""
 
@@ -155,9 +155,8 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
                         ~initial:initial_req.Request.url ~dest:loc_url)
               then strip_sensitive := true;
               let new_header =
-                copy_headers ~from:initial_header ~into:(Header.create ())
-                  ~strip_sensitive:!strip_sensitive
-                  ~strip_body:(not include_body)
+                modify_headers ~strip_sensitive:!strip_sensitive
+                  ~strip_body:(not include_body) initial_header
               in
               let new_header =
                 match
@@ -192,7 +191,7 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
   in
   loop req [] true
 
-let do_ ?force_h2 ~sw c (req : Request.t) : (Response.t, error) result =
+let send ?force_h2 ~sw c (req : Request.t) : (Response.t, error) result =
   (* The client's [sw] (the session lifetime) owns the transport's pool, so
      pooled conns outlive each round trip but are reclaimed when the client
      session ends. *)
@@ -207,33 +206,36 @@ let do_ ?force_h2 ~sw c (req : Request.t) : (Response.t, error) result =
 
 (* ---- Request builders + convenience verbs (Go's NewRequest + Get/Post/Head). *)
 
-let get ?force_h2 ~sw c url =
-  do_ ?force_h2 ~sw c (Request.make ~meth:Httpg_base.Method.get url)
+(* A body-less verb (Go's [Get]/[Head]): build a request carrying only the
+   method and URL. The convenience verbs take the URL as a string (Go's
+   [Client.Get(url string)]); parse it to a {!Uri.t} for {!Request.make}. *)
+let bodyless ~meth ~sw c url =
+  send ~sw c (Request.make ~meth (Uri.of_string url))
 
-let head ?force_h2 ~sw c url =
-  do_ ?force_h2 ~sw c (Request.make ~meth:Httpg_base.Method.head url)
+(* A body-bearing verb (Go's [Post]): the supplied body's known length (if any —
+   e.g. a [Body.of_string]) flows through {!Request.make} as an exact
+   Content-Length via [Body.content_length]; an unknown-length stream is framed
+   chunked. No whole-body buffering on this path. *)
+let with_body ~meth ~sw c url ~content_type (body : Body.t) =
+  let header = Header.of_list [ ("Content-Type", [ content_type ]) ] in
+  let req = Request.make ~meth ~body ~header (Uri.of_string url) in
+  send ~sw c req
 
-let post ?force_h2 ~sw c url ~content_type body =
-  (* Like Go's [Post]/[NewRequest] with an in-memory reader: the body is owned
-     by the caller and materialized here to set an exact Content-Length (the
-     framing-info producer for this path). A mid-stream framing failure while
-     reading the supplied body is a programming error in the caller's stream,
-     not a handleable client error, so it surfaces as the body's own [Error]
-     text via [Round_trip]-shaped reporting is not applicable here; we keep the
-     read total simple. *)
-  let body, len =
-    match Body.read_all body with
-    | Ok s -> (Body.of_string s, Int64.of_int (String.length s))
-    | Error _ ->
-        (* Best-effort: an unreadable supplied body becomes an empty body. *)
-        (Body.empty, 0L)
-  in
-  let req =
-    Request.make ~meth:Httpg_base.Method.post ~body ~content_length:len url
-  in
-  req.Request.header <-
-    Header.set req.Request.header "Content-Type" content_type;
-  do_ ?force_h2 ~sw c req
+let get ~sw c url = bodyless ~meth:Httpg_base.Method.get ~sw c url
+let head ~sw c url = bodyless ~meth:Httpg_base.Method.head ~sw c url
+let delete ~sw c url = bodyless ~meth:Httpg_base.Method.delete ~sw c url
+let options ~sw c url = bodyless ~meth:Httpg_base.Method.options ~sw c url
+let trace ~sw c url = bodyless ~meth:Httpg_base.Method.trace ~sw c url
+let connect ~sw c url = bodyless ~meth:Httpg_base.Method.connect ~sw c url
+
+let post ~sw c url ~content_type body =
+  with_body ~meth:Httpg_base.Method.post ~sw c url ~content_type body
+
+let put ~sw c url ~content_type body =
+  with_body ~meth:Httpg_base.Method.put ~sw c url ~content_type body
+
+let patch ~sw c url ~content_type body =
+  with_body ~meth:Httpg_base.Method.patch ~sw c url ~content_type body
 
 module Private = struct
   let do_one = do_one

@@ -28,21 +28,27 @@ module Server = struct
 
   (* NewServer: bind 127.0.0.1:0, build the URL, serve in a fiber under [sw]. *)
   let new_server ~net ?clock ~sw (handler : Server.handler) : t =
-    let srv, port, serve_loop =
+    match
       Server.listen_and_serve_started ~net ?clock ~sw ~addr:"127.0.0.1" ~port:0
         handler
-    in
-    Eio.Fiber.fork ~sw serve_loop;
-    let url = Printf.sprintf "http://127.0.0.1:%d" port in
-    {
-      url;
-      port;
-      tls = false;
-      srv;
-      close = (fun () -> Server.close srv);
-      net = coerce_net net;
-      clock = coerce_clock clock;
-    }
+    with
+    (* The [Error] branch is unreachable here: an ephemeral [127.0.0.1:0] bind
+       cannot fail to resolve or bind. Mirroring Go's [httptest.NewServer],
+       which panics on a setup failure, keeps this constructor's no-error
+       [-> t] signature honest. *)
+    | Error e -> invalid_arg ("httptest: new_server: " ^ Net.error_to_string e)
+    | Ok (srv, port, serve_loop) ->
+        Eio.Fiber.fork ~sw serve_loop;
+        let url = Printf.sprintf "http://127.0.0.1:%d" port in
+        {
+          url;
+          port;
+          tls = false;
+          srv;
+          close = (fun () -> Server.close srv);
+          net = coerce_net net;
+          clock = coerce_clock clock;
+        }
 
   (* NewTLSServer: like [new_server] but over TLS with the self-signed
      [Net.test_server_certificate]; URL is "https://...". The matching [client]
@@ -51,21 +57,29 @@ module Server = struct
     let certificates = Net.test_server_certificate () in
     (* Advertise h2 + http/1.1 (Go's httptest StartTLS with HTTP/2 enabled) so
        ALPN can negotiate either. *)
-    let srv, port, serve_loop =
+    match
       Server.listen_and_serve_tls_started ~net ?clock ~certificates
         ~alpn:[ "h2"; "http/1.1" ] ~sw ~addr:"127.0.0.1" ~port:0 handler
-    in
-    Eio.Fiber.fork ~sw serve_loop;
-    let url = Printf.sprintf "https://127.0.0.1:%d" port in
-    {
-      url;
-      port;
-      tls = true;
-      srv;
-      close = (fun () -> Server.close srv);
-      net = coerce_net net;
-      clock = coerce_clock clock;
-    }
+    with
+    (* The [Error] branch is unreachable here: a fixed-valid
+       [test_server_certificate] cert + an ephemeral [127.0.0.1:0] bind cannot
+       produce an invalid TLS config. Mirroring Go's [httptest.NewServer], which
+       panics on a setup failure, keeps this constructor's no-error [-> t]
+       signature honest. *)
+    | Error e ->
+        invalid_arg ("httptest: new_tls_server: " ^ Net.error_to_string e)
+    | Ok (srv, port, serve_loop) ->
+        Eio.Fiber.fork ~sw serve_loop;
+        let url = Printf.sprintf "https://127.0.0.1:%d" port in
+        {
+          url;
+          port;
+          tls = true;
+          srv;
+          close = (fun () -> Server.close srv);
+          net = coerce_net net;
+          clock = coerce_clock clock;
+        }
 
   (* Server.Client: a client (capturing the same net/clock) configured to talk
      to this server. Go pre-loads the server's self-signed cert into the client's

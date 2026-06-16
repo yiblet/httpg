@@ -112,14 +112,21 @@ let unhandleable_allowlist =
     "h2_writesched";
     (* Failure: scheduler invariant *)
     "net";
-    (* Failure: bound_port + TLS/csr setup misuse (write-before-handshake, bad
-       config). Note: the handleable network failures are the typed [Net.error]
-       variant ([Dial]/[Tls]) threaded as [(_, error) result] by the client
-       entry points -- there is no public [exception] on [Net]. The only
-       surviving Net raises are INTERNAL ([Internal_tls_error]/
-       [Internal_dial_error], not in net.mli): the Eio-forced mid-stream
-       Flow.SOURCE read (mapped back to [Error] at the connect boundary) and the
-       [result]-free [listen]/[accept_tls] startup/per-conn contracts. *)
+    (* [bound_port] is now total: it returns [int option] ([None] for a non-TCP
+       socket), so it no longer raises [Invalid_argument].
+       Failure: genuine INTERNAL invariants -- the TLS write-before-handshake
+       state-machine guard (net.ml:267) and [test_server_certificate] csr/sign
+       on fixed valid inputs. The CLIENT trust-store load / bad-client-config
+       failures, the SERVER [listen_tls] bad-cert/config failure AND the plain
+       [listen]/[listen_tls] resolve-or-bind startup failure are all now typed
+       [Error (Dial _)]/[Error (Tls _)] results, not raises -- the WHOLE startup
+       surface returns a [result]. Note: the handleable network failures are the
+       typed [Net.error] variant ([Dial]/[Tls]) threaded as [(_, error) result]
+       by the client and startup entry points -- there is no public [exception]
+       on [Net]. The surviving Net raises are only: the INTERNAL Eio-forced
+       mid-stream Flow.SOURCE reads ([Internal_tls_error]/[Internal_dial_error],
+       not in net.mli, mapped back to [Error] at the connect boundary) and the
+       per-conn [accept_tls] contract. *)
     "hpack_tables";
     (* Invalid_argument: table-index invariant (evict_oldest) *)
     "hpack";
@@ -147,7 +154,7 @@ let unhandleable_allowlist =
     "h2_server";
     (* internal conn-loop control-flow (boundary-only conv) *)
     (* [client] is intentionally NOT here: its public API is fully resulty
-       ([do_]/[get]/[head]/[post] return [(Response.t, Client.error) result]);
+       ([send]/[get]/[head]/[post] return [(Response.t, Client.error) result]);
        the former [exception Aborted] was retired in favour of the
        [Error (Redirect _)] arm. *)
   ]

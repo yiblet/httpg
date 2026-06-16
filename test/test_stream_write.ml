@@ -63,8 +63,12 @@ let dechunk body =
 let with_raw_client handler fn =
   Test_harness.with_env (fun ~net ~clock ~sw ->
       let srv, port, serve_loop =
-        Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
-          ~port:0 handler
+        match
+          Server.listen_and_serve_started ~net ~clock ~sw ~addr:"127.0.0.1"
+            ~port:0 handler
+        with
+        | Ok v -> v
+        | Error e -> Alcotest.failf "net: %s" (Net.error_to_string e)
       in
       Eio.Fiber.fork ~sw serve_loop;
       Fun.protect

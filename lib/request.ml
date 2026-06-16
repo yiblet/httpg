@@ -27,18 +27,22 @@ let default_user_agent = "Go-http-client/1.1"
    optional field. [host] defaults to the URL's host (Go sets [req.Host] from the
    parsed URL); pass [~host] to override. No zero-value record to start from. *)
 let make ?(meth = Httpg_base.Method.Get) ?(proto = Httpg_base.Protocol.Http11)
-    ?(header = Header.create ()) ?(body = Body.empty) ?(content_length = 0L)
+    ?(header = Header.create ()) ?(body = Body.empty) ?content_length
     ?(transfer_encoding = []) ?(close = false) ?host ?(trailer = None)
     ?(request_uri = "") ?(remote_addr = "") url =
-  let url = Uri.of_string url in
   {
     meth;
     url;
     proto;
+    (* Like Go's [NewRequest]: an explicit [content_length] wins (negative means
+       unknown, Go's -1); otherwise inherit the body's known length when it has
+       one (a string/in-memory body), else leave it unknown. *)
+    content_length =
+      (match content_length with
+      | Some n -> if Int64.compare n 0L < 0 then None else Some n
+      | None -> Body.content_length body);
     header;
     body;
-    content_length =
-      (if Int64.compare content_length 0L < 0 then None else Some content_length);
     transfer_encoding;
     close;
     host = (match host with Some _ as h -> h | None -> Uri.host url);
