@@ -53,18 +53,18 @@ let add_child n key =
         c
 
 (* addSegments adds the given segments to the tree rooted at n. *)
-let rec add_segments n (segs : Pattern.segment list) p h =
+let rec add_segments n (segs : Pattern.Segment.t list) p h =
   match segs with
   | [] -> set n p h
-  | seg :: rest ->
-      if seg.Pattern.multi then begin
-        if rest <> [] then failwith "multi wildcard not last";
-        let c = make_node () in
-        n.multi_child <- Some c;
-        set c p h
-      end
-      else if seg.Pattern.wild then add_segments (add_child n "") rest p h
-      else add_segments (add_child n seg.Pattern.s) rest p h
+  | seg :: rest -> (
+      match seg with
+      | Pattern.Segment.Multi _ ->
+          if rest <> [] then failwith "multi wildcard not last";
+          let c = make_node () in
+          n.multi_child <- Some c;
+          set c p h
+      | Pattern.Segment.Wild _ -> add_segments (add_child n "") rest p h
+      | Pattern.Segment.Lit s -> add_segments (add_child n s) rest p h)
 
 (* addPattern: host -> method -> path. *)
 let add_pattern root (p : Pattern.t) h =
@@ -112,7 +112,8 @@ let rec match_path (n : 'h node option) path matches =
                     let matches =
                       match c.leaf with
                       | Some (p, _)
-                        when (Pattern.last_segment p).Pattern.s <> "" ->
+                        when Pattern.Segment.text (Pattern.last_segment p) <> ""
+                        ->
                           matches
                           @ [
                               Pattern.path_unescape

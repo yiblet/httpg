@@ -86,7 +86,7 @@ let handle mux pattern handler = register mux pattern handler
 (* Go's exactMatch. *)
 let exact_match (pat : Pattern.t) path =
   let last = Pattern.last_segment pat in
-  if not last.multi then true
+  if not (Pattern.Segment.is_multi last) then true
   else if String.length path > 0 && path.[String.length path - 1] <> '/' then
     false
   else begin

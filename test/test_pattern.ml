@@ -2,9 +2,9 @@
 
 module Pattern = Httpg_internal.Pattern
 
-let lit name = { Pattern.s = name; wild = false; multi = false }
-let wild name = { Pattern.s = name; wild = true; multi = false }
-let multi name = { Pattern.s = name; wild = true; multi = true }
+let lit name = Pattern.Segment.Lit name
+let wild name = Pattern.Segment.Wild name
+let multi name = Pattern.Segment.Multi name
 
 let must_parse s =
   match Pattern.parse s with
@@ -19,7 +19,10 @@ let pat_equal (p1 : Pattern.t) (p2 : Pattern.t) =
 let segs_str segs =
   String.concat ";"
     (List.map
-       (fun s -> Printf.sprintf "{%S w=%b m=%b}" s.Pattern.s s.wild s.multi)
+       (fun s ->
+         Printf.sprintf "{%S w=%b m=%b}" (Pattern.Segment.text s)
+           (Pattern.Segment.is_wild s)
+           (Pattern.Segment.is_multi s))
        segs)
 
 (* TestParsePattern. *)

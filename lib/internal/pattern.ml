@@ -2,13 +2,30 @@
 
    Pattern parsing and the conflict/precedence helpers used by ServeMux. *)
 
-type segment = { s : string; wild : bool; multi : bool }
+module Segment = struct
+  (* A pattern piece. Go models all three kinds with one {s; wild; multi}
+     struct (pattern.go); the variant rules out the impossible "multi but not
+     wild" state and the unenforced "multi implies wild" dependency.
+
+     - [Lit s] matches a literal path element, or, when [s = "/"], the trailing
+       slash from [{$}].
+     - [Wild name] matches a single path segment.
+     - [Multi name] matches all remaining path segments ([name] is [""] for a
+       trailing-"/" subtree). *)
+  type t = Lit of string | Wild of string | Multi of string
+
+  let is_wild = function Wild _ | Multi _ -> true | Lit _ -> false
+  let is_multi = function Multi _ -> true | Wild _ | Lit _ -> false
+
+  (* The carried string: literal text or wildcard name (Go's [segment.s]). *)
+  let text = function Lit s | Wild s | Multi s -> s
+end
 
 type t = {
   str : string;
   method_ : Httpg_base.Method.t;
   host : string;
-  segments : segment list;
+  segments : Segment.t list;
 }
 
 let to_string p = p.str
@@ -226,7 +243,7 @@ let parse s : (t, error) result =
       rest := String.sub !rest 1 (String.length !rest - 1);
       off := String.length s - String.length !rest;
       if String.length !rest = 0 then begin
-        push { s = ""; wild = true; multi = true };
+        push (Segment.Multi "");
         break := true
       end
       else begin
@@ -235,8 +252,7 @@ let parse s : (t, error) result =
         let seg = String.sub !rest 0 i in
         rest := String.sub !rest i (String.length !rest - i);
         let bi = index_byte seg '{' in
-        if bi < 0 then
-          push { s = path_unescape seg; wild = false; multi = false }
+        if bi < 0 then push (Segment.Lit (path_unescape seg))
         else begin
           (* Wildcard. *)
           if bi <> 0 then
@@ -251,7 +267,7 @@ let parse s : (t, error) result =
               if String.length !rest <> 0 then
                 fail (Bad_wildcard (!off, "{$} not at end"))
               else begin
-                push { s = "/"; wild = false; multi = false };
+                push (Segment.Lit "/");
                 break := true
               end
             else begin
@@ -268,7 +284,7 @@ let parse s : (t, error) result =
                 fail (Duplicate_wildcard (!off, name))
               else begin
                 Hashtbl.replace seen_names name ();
-                push { s = name; wild = true; multi }
+                push (if multi then Segment.Multi name else Segment.Wild name)
               end
             end
           end
@@ -328,20 +344,24 @@ let compare_methods p1 p2 =
   else if p2.method_ = Get && p1.method_ = Head then More_specific
   else Disjoint
 
-let compare_segments s1 s2 =
-  if s1.multi && s2.multi then Equivalent
-  else if s1.multi then More_general
-  else if s2.multi then More_specific
-  else if s1.wild && s2.wild then Equivalent
-  else if s1.wild then if s2.s = "/" then Disjoint else More_general
-  else if s2.wild then if s1.s = "/" then Disjoint else More_specific
-  else if s1.s = s2.s then Equivalent
+let compare_segments (s1 : Segment.t) (s2 : Segment.t) =
+  if Segment.is_multi s1 && Segment.is_multi s2 then Equivalent
+  else if Segment.is_multi s1 then More_general
+  else if Segment.is_multi s2 then More_specific
+  else if Segment.is_wild s1 && Segment.is_wild s2 then Equivalent
+  else if Segment.is_wild s1 then
+    if Segment.text s2 = "/" then Disjoint else More_general
+  else if Segment.is_wild s2 then
+    if Segment.text s1 = "/" then Disjoint else More_specific
+  else if Segment.text s1 = Segment.text s2 then Equivalent
   else Disjoint
 
 let compare_paths p1 p2 =
   let len1 = List.length p1.segments and len2 = List.length p2.segments in
   if
-    len1 <> len2 && (not (last_segment p1).multi) && not (last_segment p2).multi
+    len1 <> len2
+    && (not (Segment.is_multi (last_segment p1)))
+    && not (Segment.is_multi (last_segment p2))
   then Disjoint
   else begin
     (* Walk corresponding segments. *)
@@ -355,9 +375,13 @@ let compare_paths p1 p2 =
     let rel, segs1, segs2 = walk Equivalent p1.segments p2.segments in
     if rel = Disjoint then Disjoint
     else if segs1 = [] && segs2 = [] then rel
-    else if List.length segs1 < List.length segs2 && (last_segment p1).multi
+    else if
+      List.length segs1 < List.length segs2
+      && Segment.is_multi (last_segment p1)
     then combine_relationships rel More_general
-    else if List.length segs2 < List.length segs1 && (last_segment p2).multi
+    else if
+      List.length segs2 < List.length segs1
+      && Segment.is_multi (last_segment p2)
     then combine_relationships rel More_specific
     else Disjoint
   end
@@ -375,9 +399,11 @@ let conflicts_with p1 p2 =
 
 (* --- describeConflict / commonPath / differencePath --- *)
 
-let write_segment b s =
+let write_segment b (s : Segment.t) =
   Buffer.add_char b '/';
-  if (not s.multi) && s.s <> "/" then Buffer.add_string b s.s
+  match s with
+  | Segment.Lit "/" | Segment.Multi _ -> ()
+  | Segment.Lit str | Segment.Wild str -> Buffer.add_string b str
 
 let write_matching_path b segs = List.iter (fun s -> write_segment b s) segs
 
@@ -386,7 +412,7 @@ let common_path p1 p2 =
   let rec walk segs1 segs2 =
     match (segs1, segs2) with
     | s1 :: r1, s2 :: r2 ->
-        if s1.wild then write_segment b s2 else write_segment b s1;
+        if Segment.is_wild s1 then write_segment b s2 else write_segment b s1;
         walk r1 r2
     | _ -> (segs1, segs2)
   in
@@ -402,31 +428,37 @@ let difference_path p1 p2 =
      let rec walk segs1 segs2 =
        match (segs1, segs2) with
        | s1 :: r1, s2 :: r2 ->
-           if s1.multi && s2.multi then begin
+           if Segment.is_multi s1 && Segment.is_multi s2 then begin
              Buffer.add_char b '/';
              raise Done
            end;
-           if s1.multi && not s2.multi then begin
+           if Segment.is_multi s1 && not (Segment.is_multi s2) then begin
              Buffer.add_char b '/';
-             if s2.s = "/" then
-               if s1.s <> "" then Buffer.add_string b s1.s
+             if Segment.text s2 = "/" then
+               if Segment.text s1 <> "" then
+                 Buffer.add_string b (Segment.text s1)
                else Buffer.add_string b "x";
              raise Done
            end;
-           if (not s1.multi) && s2.multi then write_segment b s1
-           else if s1.wild && s2.wild then write_segment b s1
-           else if s1.wild && not s2.wild then begin
-             if s1.s <> s2.s then write_segment b s1
+           if (not (Segment.is_multi s1)) && Segment.is_multi s2 then
+             write_segment b s1
+           else if Segment.is_wild s1 && Segment.is_wild s2 then
+             write_segment b s1
+           else if Segment.is_wild s1 && not (Segment.is_wild s2) then begin
+             if Segment.text s1 <> Segment.text s2 then write_segment b s1
              else begin
                Buffer.add_char b '/';
-               Buffer.add_string b (s2.s ^ "x")
+               Buffer.add_string b (Segment.text s2 ^ "x")
              end
            end
-           else if (not s1.wild) && s2.wild then write_segment b s1
+           else if (not (Segment.is_wild s1)) && Segment.is_wild s2 then
+             write_segment b s1
            else begin
              (* both literals; precondition: same literal *)
-             if s1.s <> s2.s then
-               failwith (Printf.sprintf "literals differ: %S and %S" s1.s s2.s);
+             if Segment.text s1 <> Segment.text s2 then
+               failwith
+                 (Printf.sprintf "literals differ: %S and %S" (Segment.text s1)
+                    (Segment.text s2));
              write_segment b s1
            end;
            walk r1 r2

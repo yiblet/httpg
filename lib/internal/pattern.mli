@@ -4,27 +4,32 @@
    an optional host, and a path of slash-separated segments where each segment
    is a literal or a wildcard ([{name}], [{name...}], or [{$}]). *)
 
-(* A segment is a pattern piece that matches one or more path segments, or a
-   trailing slash.
+(** A segment is a pattern piece that matches one or more path segments, or a
+    trailing slash. Go uses a single [{s; wild; multi}] struct; the variant
+    rules out the impossible "multi but not wild" combination. *)
+module Segment : sig
+  type t =
+    | Lit of string  (** a literal element, or ["/"] for the ["/{$}"] end. *)
+    | Wild of string  (** [{name}]: matches one path segment. *)
+    | Multi of string
+        (** [{name...}]: matches all remaining segments ([""] for a trailing
+            slash). *)
 
-   - If [wild] is false it matches a literal segment, or, if [s = "/"], a
-     trailing slash.
-   - If [wild] is true and [multi] is false it matches a single path segment
-     ([s] is the wildcard name).
-   - If both [wild] and [multi] are true it matches all remaining path
-     segments ([s] is the wildcard name, possibly empty for a trailing
-     slash). *)
-type segment = {
-  s : string;  (** literal, or wildcard name, or "/" for ["/{$}"]. *)
-  wild : bool;
-  multi : bool;  (** "..." wildcard *)
-}
+  val is_wild : t -> bool
+  (** [true] for [Wild] and [Multi] (Go's [segment.wild]). *)
+
+  val is_multi : t -> bool
+  (** [true] only for [Multi] (Go's [segment.multi]). *)
+
+  val text : t -> string
+  (** The carried string — literal text or wildcard name (Go's [segment.s]). *)
+end
 
 type t = {
   str : string;  (** original string *)
   method_ : Httpg_base.Method.t;  (** [Custom ""] means "any method" *)
   host : string;
-  segments : segment list;
+  segments : Segment.t list;
 }
 
 (** A parse failure (Go's [parsePattern] error cases). The [int] in the
@@ -50,7 +55,7 @@ val parse : string -> (t, error) result
 val to_string : t -> string
 (** [to_string p] is the original pattern string (Go's [pattern.String]). *)
 
-val last_segment : t -> segment
+val last_segment : t -> Segment.t
 (** [last_segment p] returns the final segment. *)
 
 (* The relationship between two patterns p1 and p2. *)
