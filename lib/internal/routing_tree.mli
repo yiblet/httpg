@@ -7,10 +7,10 @@
 
 type 'h t
 
-val create : unit -> 'h t
-(** [create ()] returns an empty root node. *)
+val empty : 'h t
+(** [empty] is an empty root node. *)
 
-val add_pattern : 'h t -> Pattern.t -> 'h -> unit
+val add_pattern : Pattern.t -> 'h -> 'h t -> 'h t
 (** [add_pattern root p h] adds pattern [p] and its handler [h] to the tree
     (Go's [routingNode.addPattern]). *)
 

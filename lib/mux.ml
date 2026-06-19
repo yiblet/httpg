@@ -42,19 +42,16 @@ let strip_host_port h =
         then String.sub host 1 (String.length host - 2)
         else host
 
-type t = {
-  mutable tree : Server.handler Routing_tree.t;
-  mutable patterns : Pattern.t list;
-}
+type t = { tree : Server.handler Routing_tree.t; patterns : Pattern.t list }
 
-let create () = { tree = Routing_tree.create (); patterns = [] }
+let empty = { tree = Routing_tree.empty; patterns = [] }
 
 type error = Register of string
 
 let error_to_string = function Register s -> s
 
 (* Go's registerErr: parse, conflict-check, add to the tree. *)
-let register mux patstr handler : (unit, error) result =
+let register mux patstr handler : (t, error) result =
   if patstr = "" then Error (Register "http: invalid pattern")
   else
     match Pattern.parse patstr with
@@ -77,9 +74,9 @@ let register mux patstr handler : (unit, error) result =
                     (Pattern.to_string pat) (Pattern.to_string pat2)
                     (Pattern.describe_conflict pat pat2)))
         | None ->
-            Routing_tree.add_pattern mux.tree pat handler;
-            mux.patterns <- pat :: mux.patterns;
-            Ok ())
+            let tree = Routing_tree.add_pattern pat handler mux.tree in
+            let patterns = pat :: mux.patterns in
+            Ok { tree; patterns })
 
 let handle mux pattern handler = register mux pattern handler
 

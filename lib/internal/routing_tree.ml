@@ -43,16 +43,16 @@ let each_pair f m =
 
 type 'h node = {
   (* leaf fields *)
-  mutable leaf : (Pattern.t * 'h) option;
+  leaf : (Pattern.t * 'h) option;
   (* interior fields *)
-  mutable children : 'h node ChildKeyMap.t;
-  mutable multi_child : 'h node option; (* child with multi wildcard *)
-  mutable empty_child : 'h node option; (* optimization: child with key "" *)
+  children : 'h node ChildKeyMap.t;
+  multi_child : 'h node option; (* child with multi wildcard *)
+  empty_child : 'h node option; (* optimization: child with key "" *)
 }
 
 type 'h t = 'h node
 
-let make_node () =
+let make_node =
   {
     leaf = None;
     children = ChildKeyMap.empty;
@@ -60,12 +60,12 @@ let make_node () =
     empty_child = None;
   }
 
-let create = make_node
+let empty = make_node
 
 (* set sets the pattern and handler for n, which must be a leaf node. *)
-let set n p h =
+let set p h n : 'a t =
   if n.leaf <> None then failwith "non-nil leaf fields";
-  n.leaf <- Some (p, h)
+  { n with leaf = Some (p, h) }
 
 (* findChild returns the child with the given key, or None. *)
 let find_child n (key : ChildKey.t) =
@@ -73,43 +73,41 @@ let find_child n (key : ChildKey.t) =
   else ChildKeyMap.find_opt key n.children
 
 (* addChild adds a child node with the given key if absent, returns it. *)
-let add_child n (key : ChildKey.t) =
-  if key = ChildKey.Empty then (
-    match n.empty_child with
-    | Some c -> c
-    | None ->
-        let c = make_node () in
-        n.empty_child <- Some c;
-        c)
+let upsert_child (key : ChildKey.t) (update : 'a t -> 'a t) n =
+  (* helper function to convert None to make_node. *)
+  let node_opt = Option.value ~default:make_node in
+  if key = ChildKey.Empty then
+    { n with empty_child = Some (update (node_opt n.empty_child)) }
   else
-    match find_child n key with
-    | Some c -> c
-    | None ->
-        let c = make_node () in
-        n.children <- ChildKeyMap.add key c n.children;
-        c
+    let child = ChildKeyMap.find_opt key n.children in
+    {
+      n with
+      children = ChildKeyMap.add key (update (node_opt child)) n.children;
+    }
 
 (* addSegments adds the given segments to the tree rooted at n. *)
-let rec add_segments n (segs : Pattern.Segment.t list) p h =
+let rec add_segments (segs : Pattern.Segment.t list) p h (n : 'h t) =
   match segs with
-  | [] -> set n p h
+  | [] -> set p h n
   | seg :: rest -> (
       match seg with
       | Pattern.Segment.Multi _ ->
           if rest <> [] then failwith "multi wildcard not last";
-          let c = make_node () in
-          n.multi_child <- Some c;
-          set c p h
+          let c = make_node |> set p h in
+          { n with multi_child = Some c }
       | Pattern.Segment.Wild _ ->
-          add_segments (add_child n ChildKey.Empty) rest p h
+          upsert_child ChildKey.Empty (add_segments rest p h) n
       | Pattern.Segment.Lit s ->
-          add_segments (add_child n (ChildKey.of_string s)) rest p h)
+          upsert_child (ChildKey.of_string s) (add_segments rest p h) n)
 
 (* addPattern: host -> method -> path. *)
-let add_pattern root (p : Pattern.t) h =
-  let n = add_child root (ChildKey.of_host p.Pattern.host) in
-  let n = add_child n (ChildKey.of_method p.Pattern.method_) in
-  add_segments n p.Pattern.segments p h
+let add_pattern (p : Pattern.t) h root =
+  upsert_child
+    (ChildKey.of_host p.Pattern.host)
+    (upsert_child
+       (ChildKey.of_method p.Pattern.method_)
+       (add_segments p.Pattern.segments p h))
+    root
 
 (* firstSegment splits path into its first segment and the rest. *)
 let first_segment path =

@@ -8,6 +8,7 @@
 open Httpg
 
 let handle_func mux pattern f = Result.get_ok (Mux.handle mux pattern f)
+(* Returns the updated mux; the mux is immutable. *)
 
 (* Read everything until EOF (connection close). *)
 let read_to_eof (r : Eio.Buf_read.t) = Eio.Buf_read.take_all r
@@ -104,9 +105,10 @@ let hello_handler_test () =
   Alcotest.(check string) "body" "hello" (body_of resp)
 
 let not_found_test () =
-  let mux = Mux.create () in
-  handle_func mux "/known" (fun ~sw:_ _r ->
-      Response.with_body_string "ok" (Response.create ()));
+  let mux =
+    handle_func Mux.empty "/known" (fun ~sw:_ _r ->
+        Response.with_body_string "ok" (Response.create ()))
+  in
   let resp =
     with_raw_client (Mux.handler mux) (fun r w ->
         send w
@@ -124,13 +126,18 @@ let not_found_test () =
     (contains resp "404 page not found")
 
 let mux_routing_test () =
-  let mux = Mux.create () in
-  handle_func mux "/a" (fun ~sw:_ _r ->
-      Response.with_body_string "handler-a" (Response.create ()));
-  handle_func mux "/b" (fun ~sw:_ _r ->
-      Response.with_body_string "handler-b" (Response.create ()));
-  handle_func mux "POST /c" (fun ~sw:_ _r ->
-      Response.with_body_string "handler-c-post" (Response.create ()));
+  let mux =
+    handle_func Mux.empty "/a" (fun ~sw:_ _r ->
+        Response.with_body_string "handler-a" (Response.create ()))
+  in
+  let mux =
+    handle_func mux "/b" (fun ~sw:_ _r ->
+        Response.with_body_string "handler-b" (Response.create ()))
+  in
+  let mux =
+    handle_func mux "POST /c" (fun ~sw:_ _r ->
+        Response.with_body_string "handler-c-post" (Response.create ()))
+  in
   let h = Mux.handler mux in
   let get path r w =
     send w
@@ -193,13 +200,14 @@ let http10_close_test () =
 
 (* Registering two conflicting patterns returns [Error (Register _)]. *)
 let handle_conflict_result () =
-  let mux = Mux.create () in
-  (match
-     Mux.handle mux "/a/{x}" (fun ~sw:_ _r ->
-         Response.with_body_string "a" (Response.create ()))
-   with
-  | Ok () -> ()
-  | Error _ -> Alcotest.fail "first registration should succeed");
+  let mux =
+    match
+      Mux.handle Mux.empty "/a/{x}" (fun ~sw:_ _r ->
+          Response.with_body_string "a" (Response.create ()))
+    with
+    | Ok mux -> mux
+    | Error _ -> Alcotest.fail "first registration should succeed"
+  in
   (match
      Mux.handle mux "/a/{y}" (fun ~sw:_ _r ->
          Response.with_body_string "b" (Response.create ()))
@@ -208,13 +216,13 @@ let handle_conflict_result () =
       Alcotest.(check bool)
         "conflict message" true
         (contains msg "conflicts with")
-  | Ok () -> Alcotest.fail "conflicting registration should be Error");
+  | Ok _ -> Alcotest.fail "conflicting registration should be Error");
   match
     Mux.handle mux "" (fun ~sw:_ _r ->
         Response.with_body_string "c" (Response.create ()))
   with
   | Error (Mux.Register _) -> ()
-  | Ok () -> Alcotest.fail "empty pattern should be Error"
+  | Ok _ -> Alcotest.fail "empty pattern should be Error"
 
 let tests =
   [

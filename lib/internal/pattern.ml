@@ -31,7 +31,14 @@ type t = {
 }
 
 let to_string p = p.str
-let last_segment p = List.nth p.segments (List.length p.segments - 1)
+
+let last_segment p =
+  let rec last = function
+    | [] -> failwith "last_segment: empty list"
+    | [ s ] -> s
+    | _ :: ls -> last ls
+  in
+  last p.segments
 
 (* --- helpers ported from Go --- *)
 

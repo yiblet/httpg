@@ -4,14 +4,12 @@ module Pattern = Httpg_internal.Pattern
 module Routing_tree = Httpg_internal.Routing_tree
 
 let build_tree pats =
-  let root = Routing_tree.create () in
-  List.iter
-    (fun p ->
+  List.fold_left
+    (fun tree p ->
       match Pattern.parse p with
-      | Ok pat -> Routing_tree.add_pattern root pat ()
+      | Ok pat -> Routing_tree.add_pattern pat () tree
       | Error e -> Alcotest.failf "parse %S: %s" p (Pattern.error_to_string e))
-    pats;
-  root
+    Routing_tree.empty pats
 
 let get_test_tree () =
   build_tree
