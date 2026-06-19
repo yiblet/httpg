@@ -206,6 +206,27 @@ let test_node_match () =
       ("GET", "", "/a/b/c/d", "/a/b/{w...}", Some [ "c/d" ]);
     ]
 
+(* A non-standard explicit method must match itself exactly, while a method-less
+   ("any method") pattern catches every other verb. This pins the distinction
+   between "method PROPFIND", "method GET", and "no method" — three states that a
+   single empty-string method key would conflate. *)
+let test_custom_method_match () =
+  let tree = build_tree [ "PROPFIND /x"; "/x"; "GET /y" ] in
+  run_match_cases "custom" tree
+    [
+      (* Exact custom-method match wins over the method-less sibling. *)
+      ("PROPFIND", "", "/x", "PROPFIND /x", None);
+      (* Any other verb falls back to the method-less pattern. *)
+      ("GET", "", "/x", "/x", None);
+      ("POST", "", "/x", "/x", None);
+      ("PROPFIND", "", "/x", "PROPFIND /x", None);
+      (* A method-specific pattern with no method-less sibling rejects other
+         verbs rather than matching them. *)
+      ("GET", "", "/y", "GET /y", None);
+      ("PROPFIND", "", "/y", "", None);
+      ("POST", "", "/y", "", None);
+    ]
+
 (* TestMatchingMethods. *)
 let test_matching_methods () =
   let host_tree = build_tree [ "GET a.com/"; "PUT b.com/"; "POST /foo/{x}" ] in
@@ -241,5 +262,6 @@ let tests =
     ("first_segment", `Quick, test_first_segment);
     ("add_pattern", `Quick, test_add_pattern);
     ("node_match", `Quick, test_node_match);
+    ("custom_method_match", `Quick, test_custom_method_match);
     ("matching_methods", `Quick, test_matching_methods);
   ]

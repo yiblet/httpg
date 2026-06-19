@@ -21,10 +21,12 @@ module Segment = struct
   let text = function Lit s | Wild s | Multi s -> s
 end
 
+module ZS = Httpg_base.Zero.String
+
 type t = {
   str : string;
-  method_ : Httpg_base.Method.t;
-  host : string;
+  method_ : Httpg_base.Method.t option;  (** [None] = any method *)
+  host : string option;  (** [None] = any host *)
   segments : Segment.t list;
 }
 
@@ -297,8 +299,13 @@ let parse s : (t, error) result =
         Ok
           {
             str = s;
-            method_ = Httpg_base.Method.of_string method_;
-            host = !host;
+            (* The parse boundary normalizes the zero values away: an absent
+               method/host (the empty token) becomes [None], so the sentinel
+               never enters the record. *)
+            method_ =
+              (if method_ = "" then None
+               else Some (Httpg_base.Method.of_string method_));
+            host = ZS.of_zero !host;
             segments = List.rev !segments;
           }
   end
@@ -338,11 +345,15 @@ let combine_relationships r1 r2 =
 let compare_methods p1 p2 =
   let open Httpg_base.Method in
   if p1.method_ = p2.method_ then Equivalent
-  else if p1.method_ = Custom "" then More_general
-  else if p2.method_ = Custom "" then More_specific
-  else if p1.method_ = Get && p2.method_ = Head then More_general
-  else if p2.method_ = Get && p1.method_ = Head then More_specific
-  else Disjoint
+  else
+    (* [None] is the "any method" pattern, so it is more general than any
+       explicit method; GET additionally subsumes HEAD. *)
+    match (p1.method_, p2.method_) with
+    | None, _ -> More_general
+    | _, None -> More_specific
+    | Some Get, Some Head -> More_general
+    | Some Head, Some Get -> More_specific
+    | _ -> Disjoint
 
 let compare_segments (s1 : Segment.t) (s2 : Segment.t) =
   if Segment.is_multi s1 && Segment.is_multi s2 then Equivalent

@@ -27,8 +27,8 @@ end
 
 type t = {
   str : string;  (** original string *)
-  method_ : Httpg_base.Method.t;  (** [Custom ""] means "any method" *)
-  host : string;
+  method_ : Httpg_base.Method.t option;  (** [None] = any method *)
+  host : string option;  (** [None] = any host *)
   segments : Segment.t list;
 }
 
