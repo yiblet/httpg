@@ -25,12 +25,11 @@ module Segment : sig
   (** The carried string — literal text or wildcard name (Go's [segment.s]). *)
 end
 
-type t = {
-  str : string;  (** original string *)
-  method_ : Httpg_base.Method.t option;  (** [None] = any method *)
-  host : string option;  (** [None] = any host *)
-  segments : Segment.t list;
-}
+type t
+
+val host : t -> string option
+val segments : t -> Segment.t list
+val method_ : t -> Httpg_base.Method.t option
 
 (** A parse failure (Go's [parsePattern] error cases). The [int] in the
     offset-bearing arms is the byte offset into the original pattern string
@@ -78,8 +77,14 @@ val path_unescape : string -> string
     escaping. Shared with the routing tree. *)
 
 val path_clean : string -> string
-(** Go's [cleanPath]/[path.Clean]: lexically clean a path, eliminating [.] and
-    [..] elements. Shared with [ServeMux] path canonicalization. *)
+(** Go's [path.Clean]: lexically clean a path, eliminating [.] and [..] elements
+    and repeated slashes. Does not preserve a trailing slash. *)
+
+val clean_path : string -> string
+(** Go's [cleanPath] (server.go): like {!path_clean} but preserves a trailing
+    slash, which is meaningful for routing. Used to reject non-CONNECT patterns
+    whose path can never match, and shared with [ServeMux] path
+    canonicalization. *)
 
 module Private : sig
   (** Helpers exposed only for the ported white-box tests; not part of the
@@ -102,4 +107,15 @@ module Private : sig
   val difference_path : t -> t -> string
   (** Go's [differencePath]: a path p1 matches and p2 doesn't (assumes one
       exists). *)
+
+  val to_string_canonical : t -> string
+
+  val make :
+    method_:Httpg_base.Method.t option ->
+    host:string option ->
+    Segment.t list ->
+    t
+  (** Construct a pattern from its components, for the ported tests. The
+      original-string field is left absent, so {!to_string} renders the
+      canonical form. *)
 end

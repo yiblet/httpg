@@ -103,10 +103,10 @@ let rec add_segments (segs : Pattern.Segment.t list) p h (n : 'h t) =
 (* addPattern: host -> method -> path. *)
 let add_pattern (p : Pattern.t) h root =
   upsert_child
-    (ChildKey.of_host p.Pattern.host)
+    (ChildKey.of_host (Pattern.host p))
     (upsert_child
-       (ChildKey.of_method p.Pattern.method_)
-       (add_segments p.Pattern.segments p h))
+       (ChildKey.of_method (Pattern.method_ p))
+       (add_segments (Pattern.segments p) p h))
     root
 
 (* firstSegment splits path into its first segment and the rest. *)

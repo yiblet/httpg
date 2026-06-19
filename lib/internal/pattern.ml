@@ -19,18 +19,50 @@ module Segment = struct
 
   (* The carried string: literal text or wildcard name (Go's [segment.s]). *)
   let text = function Lit s | Wild s | Multi s -> s
+
+  let add_buf b = function
+    | Lit "/" -> Buffer.add_string b "/{$}"
+    | Lit s ->
+        Buffer.add_char b '/';
+        Buffer.add_string b s
+    | Wild s -> begin
+        Buffer.add_string b "/{";
+        Buffer.add_string b s;
+        Buffer.add_char b '}'
+      end
+    | Multi "" -> begin Buffer.add_string b "/" end
+    | Multi s -> begin
+        Buffer.add_string b "/{";
+        Buffer.add_string b s;
+        Buffer.add_string b "...}"
+      end
 end
 
 module ZS = Httpg_base.Zero.String
 
 type t = {
-  str : string;
+  str : string option;
   method_ : Httpg_base.Method.t option;  (** [None] = any method *)
   host : string option;  (** [None] = any host *)
   segments : Segment.t list;
 }
 
-let to_string p = p.str
+let host p = p.host
+let method_ p = p.method_
+let segments p = p.segments
+
+let to_string_canonical p =
+  let buf = Buffer.create 32 in
+  (match p.method_ with
+  | Some m ->
+      Buffer.add_string buf (Httpg_base.Method.to_string m);
+      Buffer.add_char buf ' '
+  | None -> ());
+  (match p.host with Some h -> Buffer.add_string buf h | None -> ());
+  List.iter (Segment.add_buf buf) p.segments;
+  Buffer.contents buf
+
+let to_string p = match p.str with Some s -> s | None -> to_string_canonical p
 
 let last_segment p =
   let rec last = function
@@ -100,8 +132,8 @@ let path_unescape path =
   in
   match loop 0 with Some s -> s | None -> path
 
-(* cleanPath (server.go) via path.Clean, used to reject unclean non-CONNECT
-   patterns. path.Clean equivalent. *)
+(* path.Clean: lexically clean a path, eliminating [.]/[..] and repeated
+   slashes. A trailing slash is NOT preserved (see [clean_path] for that). *)
 let path_clean p =
   if p = "" then "."
   else begin
@@ -151,6 +183,23 @@ let path_clean p =
       end
     done;
     if Buffer.length out = 0 then "." else Buffer.contents out
+  end
+
+(* cleanPath (server.go): like [path_clean] but, unlike [path.Clean], a
+   trailing slash is preserved (a trailing slash is meaningful for routing). *)
+let clean_path p =
+  if p = "" then "/"
+  else begin
+    let p = if p.[0] <> '/' then "/" ^ p else p in
+    let np = path_clean p in
+    if p.[String.length p - 1] = '/' && np <> "/" then
+      (* Fast path for the common case of [p] being the string we want. *)
+      if
+        String.length p = String.length np + 1
+        && String.starts_with ~prefix:np p
+      then p
+      else np ^ "/"
+    else np
   end
 
 let index_any s chars =
@@ -237,8 +286,10 @@ let parse s : (t, error) result =
         end
         else begin
           off := !off + i;
-          (* An unclean path with a method other than CONNECT can never match. *)
-          if method_ <> "" && method_ <> "CONNECT" && !rest <> path_clean !rest
+          (* An unclean path with a method other than CONNECT can never match,
+             because paths are cleaned (via [clean_path], preserving any
+             trailing slash) before matching. *)
+          if method_ <> "" && method_ <> "CONNECT" && !rest <> clean_path !rest
           then fail (Unclean_path !off)
         end
       end
@@ -305,7 +356,7 @@ let parse s : (t, error) result =
     | None ->
         Ok
           {
-            str = s;
+            str = Some s;
             (* The parse boundary normalizes the zero values away: an absent
                method/host (the empty token) becomes [None], so the sentinel
                never enters the record. *)
@@ -529,4 +580,6 @@ module Private = struct
   let compare_paths = compare_paths
   let common_path = common_path
   let difference_path = difference_path
+  let to_string_canonical = to_string_canonical
+  let make ~method_ ~host segments = { str = None; method_; host; segments }
 end

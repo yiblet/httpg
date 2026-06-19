@@ -12,20 +12,7 @@ module Routing_tree = Httpg_internal.Routing_tree
 
 (* Go's cleanPath: canonical path, eliminating . and .. and preserving a
    trailing slash. *)
-let clean_path p =
-  if p = "" then "/"
-  else begin
-    let p = if p.[0] <> '/' then "/" ^ p else p in
-    let np = Pattern.path_clean p in
-    if p.[String.length p - 1] = '/' && np <> "/" then begin
-      if
-        String.length p = String.length np + 1
-        && String.starts_with ~prefix:np p
-      then p
-      else np ^ "/"
-    end
-    else np
-  end
+let clean_path = Pattern.clean_path
 
 (* Go's stripHostPort: drop a trailing ":<port>". *)
 let strip_host_port h =
@@ -89,7 +76,7 @@ let exact_match (pat : Pattern.t) path =
   else begin
     let count = ref 0 in
     String.iter (fun c -> if c = '/' then incr count) path;
-    List.length pat.segments = !count
+    List.length (Pattern.segments pat) = !count
   end
 
 (* Go's matchingMethods. *)

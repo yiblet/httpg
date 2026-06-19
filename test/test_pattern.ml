@@ -14,7 +14,9 @@ let must_parse s =
 
 (* equal: same as Go's pattern.equal — method, host, segments. *)
 let pat_equal (p1 : Pattern.t) (p2 : Pattern.t) =
-  p1.method_ = p2.method_ && p1.host = p2.host && p1.segments = p2.segments
+  Pattern.method_ p1 = Pattern.method_ p2
+  && Pattern.host p1 = Pattern.host p2
+  && Pattern.segments p1 = Pattern.segments p2
 
 let segs_str segs =
   String.concat ";"
@@ -27,148 +29,53 @@ let segs_str segs =
 
 (* TestParsePattern. *)
 let test_parse_pattern () =
+  let make = Pattern.Private.make in
+  let get = Some Httpg_base.Method.Get in
+  let post = Some Httpg_base.Method.Post in
+  let delete = Some Httpg_base.Method.Delete in
   let cases =
     [
-      ( "/",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ multi "" ];
-        } );
-      ( "/a",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "a" ];
-        } );
-      ( "/a/",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "a"; multi "" ];
-        } );
+      ("/", make ~method_:None ~host:None [ multi "" ]);
+      ("/a", make ~method_:None ~host:None [ lit "a" ]);
+      ("/a/", make ~method_:None ~host:None [ lit "a"; multi "" ]);
       ( "/path/to/something",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "path"; lit "to"; lit "something" ];
-        } );
+        make ~method_:None ~host:None [ lit "path"; lit "to"; lit "something" ]
+      );
       ( "/{w1}/lit/{w2}",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ wild "w1"; lit "lit"; wild "w2" ];
-        } );
+        make ~method_:None ~host:None [ wild "w1"; lit "lit"; wild "w2" ] );
       ( "/{w1}/lit/{w2}/",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ wild "w1"; lit "lit"; wild "w2"; multi "" ];
-        } );
+        make ~method_:None ~host:None
+          [ wild "w1"; lit "lit"; wild "w2"; multi "" ] );
       ( "example.com/",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = Some "example.com";
-          segments = [ multi "" ];
-        } );
-      ( "GET /",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Get;
-          host = None;
-          segments = [ multi "" ];
-        } );
+        make ~method_:None ~host:(Some "example.com") [ multi "" ] );
+      ("GET /", make ~method_:get ~host:None [ multi "" ]);
       ( "POST example.com/foo/{w}",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Post;
-          host = Some "example.com";
-          segments = [ lit "foo"; wild "w" ];
-        } );
-      ( "/{$}",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "/" ];
-        } );
+        make ~method_:post ~host:(Some "example.com") [ lit "foo"; wild "w" ] );
+      ("/{$}", make ~method_:None ~host:None [ lit "/" ]);
       ( "DELETE example.com/a/{foo12}/{$}",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Delete;
-          host = Some "example.com";
-          segments = [ lit "a"; wild "foo12"; lit "/" ];
-        } );
-      ( "/foo/{$}",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "foo"; lit "/" ];
-        } );
+        make ~method_:delete ~host:(Some "example.com")
+          [ lit "a"; wild "foo12"; lit "/" ] );
+      (* A bare trailing slash with a method is clean (cleanPath preserves
+         it), so it must parse rather than tripping the unclean-path check. *)
+      ("GET /foo/", make ~method_:get ~host:None [ lit "foo"; multi "" ]);
+      ("/foo/{$}", make ~method_:None ~host:None [ lit "foo"; lit "/" ]);
       ( "/{a}/foo/{rest...}",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ wild "a"; lit "foo"; multi "rest" ];
-        } );
-      ( "//",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit ""; multi "" ];
-        } );
+        make ~method_:None ~host:None [ wild "a"; lit "foo"; multi "rest" ] );
+      ("//", make ~method_:None ~host:None [ lit ""; multi "" ]);
       ( "/foo///./../bar",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "foo"; lit ""; lit ""; lit "."; lit ".."; lit "bar" ];
-        } );
+        make ~method_:None ~host:None
+          [ lit "foo"; lit ""; lit ""; lit "."; lit ".."; lit "bar" ] );
       ( "a.com/foo//",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = Some "a.com";
-          segments = [ lit "foo"; lit ""; multi "" ];
-        } );
+        make ~method_:None ~host:(Some "a.com") [ lit "foo"; lit ""; multi "" ]
+      );
       ( "/%61%62/%7b/%",
-        {
-          Pattern.str = "";
-          method_ = None;
-          host = None;
-          segments = [ lit "ab"; lit "{"; lit "%" ];
-        } );
-      ( "GET\t  /",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Get;
-          host = None;
-          segments = [ multi "" ];
-        } );
+        make ~method_:None ~host:None [ lit "ab"; lit "{"; lit "%" ] );
+      ("GET\t  /", make ~method_:get ~host:None [ multi "" ]);
       ( "POST \t  example.com/foo/{w}",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Post;
-          host = Some "example.com";
-          segments = [ lit "foo"; wild "w" ];
-        } );
+        make ~method_:post ~host:(Some "example.com") [ lit "foo"; wild "w" ] );
       ( "DELETE    \texample.com/a/{foo12}/{$}",
-        {
-          Pattern.str = "";
-          method_ = Some Httpg_base.Method.Delete;
-          host = Some "example.com";
-          segments = [ lit "a"; wild "foo12"; lit "/" ];
-        } );
+        make ~method_:delete ~host:(Some "example.com")
+          [ lit "a"; wild "foo12"; lit "/" ] );
     ]
   in
   List.iter
@@ -180,13 +87,47 @@ let test_parse_pattern () =
           \ got  method=%S host=%S segs=%s\n\
           \ want method=%S host=%S segs=%s"
           in_
-          (Option.fold ~none:"" ~some:Httpg_base.Method.to_string got.method_)
-          (Option.value ~default:"" got.host)
-          (segs_str got.segments)
           (Option.fold ~none:"" ~some:Httpg_base.Method.to_string
-             want.Pattern.method_)
-          (Option.value ~default:"" want.host)
-          (segs_str want.segments))
+             (Pattern.method_ got))
+          (Option.value ~default:"" (Pattern.host got))
+          (segs_str (Pattern.segments got))
+          (Option.fold ~none:"" ~some:Httpg_base.Method.to_string
+             (Pattern.method_ want))
+          (Option.value ~default:"" (Pattern.host want))
+          (segs_str (Pattern.segments want)))
+    cases
+
+let test_to_string () =
+  let open struct
+    type t = { in_ : string; want : string }
+  end in
+  let cases =
+    [
+      { in_ = "POST /"; want = "POST /" };
+      { in_ = "POST www.example.com/"; want = "POST www.example.com/" };
+      { in_ = "GET /foo"; want = "GET /foo" };
+      { in_ = "GET /foo/"; want = "GET /foo/" };
+      { in_ = "GET /foo/bar"; want = "GET /foo/bar" };
+      { in_ = "GET /foo/bar/"; want = "GET /foo/bar/" };
+      { in_ = "GET /foo/{bar}"; want = "GET /foo/{bar}" };
+      { in_ = "GET /foo/{bar}/"; want = "GET /foo/{bar}/" };
+      { in_ = "GET /foo/{bar}/baz"; want = "GET /foo/{bar}/baz" };
+      { in_ = "GET /foo/{bar}/baz/"; want = "GET /foo/{bar}/baz/" };
+      { in_ = "GET /foo/{bar...}"; want = "GET /foo/{bar...}" };
+    ]
+  in
+  List.iter
+    (fun { in_; _ } ->
+      let got = Pattern.to_string (must_parse in_) in
+      if not (got = in_) then
+        Alcotest.failf "%S:\n got  %S\n want %S" in_ got in_)
+    cases;
+
+  List.iter
+    (fun { in_; want } ->
+      let got = Pattern.Private.to_string_canonical (must_parse in_) in
+      if not (got = want) then
+        Alcotest.failf "v2 %S:\n got %S\n want %S" in_ got want)
     cases
 
 (* TestParsePatternError. *)
@@ -540,4 +481,5 @@ let tests =
     ("describe_conflict", `Quick, test_describe_conflict);
     ("common_path", `Quick, test_common_path);
     ("difference_path", `Quick, test_difference_path);
+    ("to_string", `Quick, test_to_string);
   ]
