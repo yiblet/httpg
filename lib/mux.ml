@@ -10,6 +10,10 @@
 module Pattern = Httpg_base.Pattern
 module Routing_tree = Httpg_internal.Routing_tree
 
+(* Captured wildcard values, keyed by wildcard name (Go exposes these through
+   [Request.PathValue]; we hand them to the registered builder instead). *)
+module StringMap = Map.Make (String)
+
 (* Go's cleanPath: canonical path, eliminating . and .. and preserving a
    trailing slash. *)
 let clean_path = Pattern.clean_path
@@ -29,15 +33,24 @@ let strip_host_port h =
         then String.sub host 1 (String.length host - 2)
         else host
 
-type t = { tree : Server.handler Routing_tree.t; patterns : Pattern.t list }
+(* Registrations are [StringMap.t -> Server.handler]: the routing match
+   resolves the wildcard captures, then applies the builder to obtain the
+   request handler. *)
+type path_handler = string StringMap.t -> Server.handler
 
-let empty = { tree = Routing_tree.empty; patterns = [] }
+type t = {
+  tree : path_handler Routing_tree.t;
+  patterns : Pattern.t list;
+  middlewares : Middleware.t list;
+}
+
+let empty = { tree = Routing_tree.empty; patterns = []; middlewares = [] }
 
 type error = Register of string
 
 let error_to_string = function Register s -> s
 
-let handle_pattern mux (pat : Pattern.t) handler =
+let handle_pattern (pat : Pattern.t) handler mux =
   let conflict =
     List.find_opt (fun pat2 -> Pattern.conflicts_with pat pat2) mux.patterns
   in
@@ -51,9 +64,9 @@ let handle_pattern mux (pat : Pattern.t) handler =
   | None ->
       let tree = Routing_tree.add_pattern pat handler mux.tree in
       let patterns = pat :: mux.patterns in
-      Ok { tree; patterns }
+      Ok { tree; patterns; middlewares = mux.middlewares }
 
-let handle mux patstr handler : (t, error) result =
+let handle patstr handler mux : (t, error) result =
   if patstr = "" then Error (Register "http: invalid pattern")
   else
     match Pattern.parse patstr with
@@ -62,7 +75,55 @@ let handle mux patstr handler : (t, error) result =
           (Register
              (Printf.sprintf "parsing %S: %s" patstr
                 (Pattern.error_to_string e)))
-    | Ok pat -> handle_pattern mux pat handler
+    | Ok pat -> handle_pattern pat handler mux
+
+let try_fold (type e) (f : 'b -> 'a -> ('b, e) result) (acc : 'b) ls =
+  let exception Stop of e in
+  try
+    Seq.fold_left
+      (fun acc x ->
+        match f acc x with Ok acc -> acc | Error err -> raise (Stop err))
+      acc ls
+    |> Result.ok
+  with Stop err -> Error err
+
+let add_middleware (middleware : Middleware.t) mux =
+  { mux with middlewares = middleware :: mux.middlewares }
+
+let mount_pattern (pat : Pattern.t) ~nested mux =
+  (* Mounting is purely a path-prefix operation: only the subtree's path
+     segments are prepended to the nested mux's patterns (see
+     [prepend_segments]). A method or host on the mount pattern has nowhere to go
+     and would be silently dropped, so reject it rather than mislead the
+     caller. *)
+  if Option.is_some (Pattern.method_ pat) || Option.is_some (Pattern.host pat)
+  then Error (Register "http: mount pattern must not have a method or host")
+  else
+    match Pattern.Private.subtree_segments pat with
+    | None ->
+        Error
+          (Register
+             "http: mount pattern must end in a slash segment to indicate a \
+              subtree")
+    | Some segments ->
+        let new_patterns =
+          nested.tree |> Routing_tree.to_seq
+          |> Seq.map (fun (p, h) ->
+              let pattern = Pattern.Private.prepend_segments segments p in
+              let handler ctx =
+                Middleware.chain_left nested.middlewares (h ctx)
+              in
+              (pattern, handler))
+        in
+        try_fold (fun acc (p, h) -> handle_pattern p h acc) mux new_patterns
+
+let mount (pat : string) ~nested mux =
+  match Pattern.parse pat with
+  | Error e ->
+      Error
+        (Register
+           (Printf.sprintf "parsing %S: %s" pat (Pattern.error_to_string e)))
+  | Ok pat -> mount_pattern pat ~nested mux
 
 (* Go's exactMatch. *)
 let exact_match (pat : Pattern.t) path =
@@ -111,9 +172,28 @@ let match_or_redirect mux ~host ~method_ ~path ~try_redirect ~raw_query =
   end
   else (m, None)
 
+(* Pair the pattern's wildcard segments with the captured values (both in
+   pattern order), keeping only the named ones. The anonymous trailing-slash
+   [{...}] wildcard contributes no capture and carries no name, so the
+   left-to-right zip stays aligned. Mirrors Go's [Request.patIndex], which
+   indexes only wildcards with a non-empty name. *)
+let path_values_of pat captures =
+  let wilds = List.filter Pattern.Segment.is_wild (Pattern.segments pat) in
+  let rec zip acc segs caps =
+    match (segs, caps) with
+    | seg :: segs', value :: caps' ->
+        let name = Pattern.Segment.text seg in
+        let acc = if name = "" then acc else StringMap.add name value acc in
+        zip acc segs' caps'
+    | _, _ -> acc
+  in
+  zip StringMap.empty wilds captures
+
 let find_handler_finish mux ~host ~path m =
   match m with
-  | Some ((_pat, h), _captures) -> h
+  | Some ((pat, build), captures) ->
+      let middleware = Middleware.chain_left mux.middlewares in
+      middleware (build (path_values_of pat captures))
   | None ->
       let allowed = matching_methods mux host path in
       if List.length allowed > 0 then fun ~sw:_ _r ->

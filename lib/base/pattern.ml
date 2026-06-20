@@ -624,4 +624,19 @@ module Private = struct
   let difference_path = difference_path
   let to_string_canonical = to_string_canonical
   let make = make
+  let prepend_segments ss p = { p with segments = ss @ p.segments; str = None }
+
+  let subtree_segments p =
+    let ( let* ) = Option.bind in
+    (*split_last returns a tuple (a list, a option) where the list is the prefix
+    of the list [l] up to and but explcuding, and the option is the last element. *)
+    let rec split_last = function
+      | [] -> None
+      | [ s ] -> Some ([], s)
+      | s :: ss ->
+          let* new_ss, last = split_last ss in
+          Some (s :: new_ss, last)
+    in
+    let* segments, last = split_last p.segments in
+    match last with Segment.Multi "" -> Some segments | _ -> None
 end

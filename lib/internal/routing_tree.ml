@@ -51,6 +51,27 @@ type 'h node = {
   empty_child : 'h node option; (* optimization: child with key "" *)
 }
 
+let rec map f n =
+  {
+    leaf = Option.map (fun (p, h) -> (p, f p h)) n.leaf;
+    children = ChildKeyMap.map (fun n -> map f n) n.children;
+    multi_child = Option.map (map f) n.multi_child;
+    empty_child = Option.map (map f) n.empty_child;
+  }
+
+let to_seq n =
+  let rec walk_children ck =
+    ChildKeyMap.to_seq ck |> Seq.flat_map (fun (_, child) -> walk child)
+  and walk (n : 'h node) : (Pattern.t * 'h) Seq.t =
+    let leaf = Option.map Seq.return n.leaf in
+    let children = Option.some (walk_children n.children) in
+    let multi_child = Option.map walk n.multi_child in
+    let empty_child = Option.map walk n.empty_child in
+    [ leaf; children; multi_child; empty_child ]
+    |> List.filter_map Fun.id |> List.to_seq |> Seq.concat
+  in
+  walk n
+
 type 'h t = 'h node
 
 let make_node =

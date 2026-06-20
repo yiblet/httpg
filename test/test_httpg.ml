@@ -33,6 +33,7 @@ let () =
       ("ResponseWrite", Test_responsewrite.tests);
       ("Clientserver", Test_clientserver.tests);
       ("Serve", Test_serve.tests);
+      ("Mux", Test_mux.tests);
       ("Stream_client", Test_stream_client.tests);
       ("Stream_read", Test_stream_read.tests);
       ("Stream_write", Test_stream_write.tests);

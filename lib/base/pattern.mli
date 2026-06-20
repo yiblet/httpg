@@ -182,4 +182,13 @@ module Private : sig
   (** Construct a pattern from its components, for the ported tests. The
       original-string field is left absent, so {!to_string} renders the
       canonical form. *)
+
+  val prepend_segments : Segment.t list -> t -> t
+  (** [prepend_segments ss p] returns a pattern with segments [ss @ p.segments].
+      The original-string field is left absent, so {!to_string} renders the
+      canonical form. *)
+
+  val subtree_segments : t -> Segment.t list option
+  (** [subtree_segments p] returns the segments (exluding the last element). if
+      the final segment is a [Multi ""]. *)
 end

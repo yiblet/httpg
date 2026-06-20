@@ -1,14 +1,12 @@
-(* Integration tests for the HTTP/1.x Server + ServeMux, a ported subset of
-   go/src/net/http/serve_test.go.
+(* Integration tests for the HTTP/1.x Server, a ported subset of
+   go/src/net/http/serve_test.go. (ServeMux routing tests live in {!Test_mux},
+   which exercises the mux in-process without a socket.)
 
    Each test starts a real loopback server on an ephemeral port, drives it with a
    raw client socket (raw bytes, since these assert on the wire) and asserts on
    the raw response bytes. Bounded by Test_harness.with_env. *)
 
 open Httpg
-
-let handle_func mux pattern f = Result.get_ok (Mux.handle mux pattern f)
-(* Returns the updated mux; the mux is immutable. *)
 
 (* Read everything until EOF (connection close). *)
 let read_to_eof (r : Eio.Buf_read.t) = Eio.Buf_read.take_all r
@@ -104,68 +102,6 @@ let hello_handler_test () =
     (contains (status_line resp) "200 OK");
   Alcotest.(check string) "body" "hello" (body_of resp)
 
-let not_found_test () =
-  let mux =
-    handle_func Mux.empty "/known" (fun ~sw:_ _r ->
-        Response.with_body_string "ok" (Response.create ()))
-  in
-  let resp =
-    with_raw_client (Mux.handler mux) (fun r w ->
-        send w
-          "GET /missing HTTP/1.1\r\n\
-           Host: localhost\r\n\
-           Connection: close\r\n\
-           \r\n";
-        read_to_eof r)
-  in
-  Alcotest.(check bool)
-    "404 status line" true
-    (contains (status_line resp) "404 Not Found");
-  Alcotest.(check bool)
-    "body mentions not found" true
-    (contains resp "404 page not found")
-
-let mux_routing_test () =
-  let mux =
-    handle_func Mux.empty "/a" (fun ~sw:_ _r ->
-        Response.with_body_string "handler-a" (Response.create ()))
-  in
-  let mux =
-    handle_func mux "/b" (fun ~sw:_ _r ->
-        Response.with_body_string "handler-b" (Response.create ()))
-  in
-  let mux =
-    handle_func mux "POST /c" (fun ~sw:_ _r ->
-        Response.with_body_string "handler-c-post" (Response.create ()))
-  in
-  let h = Mux.handler mux in
-  let get path r w =
-    send w
-      (Printf.sprintf
-         "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" path);
-    read_to_eof r
-  in
-  let ra = with_raw_client h (get "/a") in
-  Alcotest.(check string) "path /a" "handler-a" (body_of ra);
-  let rb = with_raw_client h (get "/b") in
-  Alcotest.(check string) "path /b" "handler-b" (body_of rb);
-  let rc_get = with_raw_client h (get "/c") in
-  Alcotest.(check bool)
-    "GET /c 405" true
-    (contains (status_line rc_get) "405 Method Not Allowed");
-  Alcotest.(check bool) "Allow header" true (contains rc_get "Allow: POST");
-  let rc_post =
-    with_raw_client h (fun r w ->
-        send w
-          "POST /c HTTP/1.1\r\n\
-           Host: localhost\r\n\
-           Content-Length: 0\r\n\
-           Connection: close\r\n\
-           \r\n";
-        read_to_eof r)
-  in
-  Alcotest.(check string) "POST /c" "handler-c-post" (body_of rc_post)
-
 (* HTTP/1.0: closes by default; keep-alive only when requested. *)
 let http10_close_test () =
   let resp =
@@ -198,37 +134,8 @@ let http10_close_test () =
   Alcotest.(check string) "keep-alive resp1 body" "hello" (body_of resp1);
   Alcotest.(check string) "keep-alive resp2 body" "hello" (body_of resp2)
 
-(* Registering two conflicting patterns returns [Error (Register _)]. *)
-let handle_conflict_result () =
-  let mux =
-    match
-      Mux.handle Mux.empty "/a/{x}" (fun ~sw:_ _r ->
-          Response.with_body_string "a" (Response.create ()))
-    with
-    | Ok mux -> mux
-    | Error _ -> Alcotest.fail "first registration should succeed"
-  in
-  (match
-     Mux.handle mux "/a/{y}" (fun ~sw:_ _r ->
-         Response.with_body_string "b" (Response.create ()))
-   with
-  | Error (Mux.Register msg) ->
-      Alcotest.(check bool)
-        "conflict message" true
-        (contains msg "conflicts with")
-  | Ok _ -> Alcotest.fail "conflicting registration should be Error");
-  match
-    Mux.handle mux "" (fun ~sw:_ _r ->
-        Response.with_body_string "c" (Response.create ()))
-  with
-  | Error (Mux.Register _) -> ()
-  | Ok _ -> Alcotest.fail "empty pattern should be Error"
-
 let tests =
   [
     Alcotest.test_case "hello_handler" `Quick hello_handler_test;
-    Alcotest.test_case "not_found" `Quick not_found_test;
-    Alcotest.test_case "mux_routing" `Quick mux_routing_test;
     Alcotest.test_case "http10_close" `Quick http10_close_test;
-    Alcotest.test_case "handle_conflict_result" `Quick handle_conflict_result;
   ]
