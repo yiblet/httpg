@@ -2,7 +2,7 @@
    the surface. Direct-style over Eio: file IO uses the [Eio.Path] capability. *)
 
 (* [path_clean] (Go's path.Clean) lives with the routing internals. *)
-module Pattern = Httpg_internal.Pattern
+module Pattern = Httpg_base.Pattern
 
 type file_info = {
   fi_name : string;

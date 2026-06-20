@@ -44,9 +44,11 @@ val handle : t -> string -> Server.handler -> (t, error) result
     and registration fails, except that a pattern with a host beats an
     otherwise-conflicting pattern without one. *)
 
-val serve_http : t -> sw:Eio.Switch.t -> Request.t -> Response.t
-(** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. *)
+val handle_pattern : t -> Pattern.t -> Server.handler -> (t, error) result
+(** Register [handler] for an already-parsed [pattern], returning an updated
+    mux. Equivalent to {!handle} but skipping the string parse; still fails with
+    [Error (Register _)] on a conflicting pattern. *)
 
-val handler : t -> Server.handler
-(** A {!t} viewed as a {!Server.handler} (Go's [ServeMux] implements [Handler]).
-*)
+val handler : t -> sw:Eio.Switch.t -> Request.t -> Response.t
+(** Go's [ServeMux.ServeHTTP]: dispatch a request to the matching handler. A
+    {!t} viewed as a {!Server.handler} ([ServeMux] implements [Handler]). *)

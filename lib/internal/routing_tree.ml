@@ -6,6 +6,7 @@
    is a single wildcard. *)
 
 module Method = Httpg_base.Method
+module Pattern = Httpg_base.Pattern
 
 module ChildKey = struct
   type t = Meth of Method.t | Literal of string | Empty

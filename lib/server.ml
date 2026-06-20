@@ -9,7 +9,7 @@
    pattern.go / routingNode / mapping.go unexported in net/http). [Pattern] is
    used by {!redirect}'s path cleaning; the ServeMux dispatch that uses the
    routing tree lives in {!Mux}. *)
-module Pattern = Httpg_internal.Pattern
+module Pattern = Httpg_base.Pattern
 
 (* Go's http.TimeFormat applied to the current time. Go's server.go reads the
    clock with [time.Now()] in [response.WriteHeader] / [extraHeaders] to set

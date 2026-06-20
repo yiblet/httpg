@@ -7,7 +7,7 @@
 
 (* Routing internals live in the private httpg_internal library (Go keeps
    pattern.go / routingNode / mapping.go unexported in net/http). *)
-module Pattern = Httpg_internal.Pattern
+module Pattern = Httpg_base.Pattern
 module Routing_tree = Httpg_internal.Routing_tree
 
 (* Go's cleanPath: canonical path, eliminating . and .. and preserving a
@@ -37,8 +37,23 @@ type error = Register of string
 
 let error_to_string = function Register s -> s
 
-(* Go's registerErr: parse, conflict-check, add to the tree. *)
-let register mux patstr handler : (t, error) result =
+let handle_pattern mux (pat : Pattern.t) handler =
+  let conflict =
+    List.find_opt (fun pat2 -> Pattern.conflicts_with pat pat2) mux.patterns
+  in
+  match conflict with
+  | Some pat2 ->
+      Error
+        (Register
+           (Printf.sprintf "pattern %S conflicts with pattern %S:\n%s"
+              (Pattern.to_string pat) (Pattern.to_string pat2)
+              (Pattern.describe_conflict pat pat2)))
+  | None ->
+      let tree = Routing_tree.add_pattern pat handler mux.tree in
+      let patterns = pat :: mux.patterns in
+      Ok { tree; patterns }
+
+let handle mux patstr handler : (t, error) result =
   if patstr = "" then Error (Register "http: invalid pattern")
   else
     match Pattern.parse patstr with
@@ -47,25 +62,7 @@ let register mux patstr handler : (t, error) result =
           (Register
              (Printf.sprintf "parsing %S: %s" patstr
                 (Pattern.error_to_string e)))
-    | Ok pat -> (
-        let conflict =
-          List.find_opt
-            (fun pat2 -> Pattern.conflicts_with pat pat2)
-            mux.patterns
-        in
-        match conflict with
-        | Some pat2 ->
-            Error
-              (Register
-                 (Printf.sprintf "pattern %S conflicts with pattern %S:\n%s"
-                    (Pattern.to_string pat) (Pattern.to_string pat2)
-                    (Pattern.describe_conflict pat pat2)))
-        | None ->
-            let tree = Routing_tree.add_pattern pat handler mux.tree in
-            let patterns = pat :: mux.patterns in
-            Ok { tree; patterns })
-
-let handle mux pattern handler = register mux pattern handler
+    | Ok pat -> handle_pattern mux pat handler
 
 (* Go's exactMatch. *)
 let exact_match (pat : Pattern.t) path =
@@ -166,7 +163,7 @@ let find_handler mux (r : Request.t) =
   end
 
 (* Go's ServeMux.ServeHTTP. *)
-let serve_http mux ~sw (r : Request.t) : Response.t =
+let handler mux ~sw (r : Request.t) : Response.t =
   if r.request_uri = "*" then begin
     let resp =
       Response.create () |> Response.with_status Httpg_base.Status.BadRequest
@@ -176,6 +173,3 @@ let serve_http mux ~sw (r : Request.t) : Response.t =
     else resp
   end
   else (find_handler mux r) ~sw r
-
-(* A mux viewed as a handler (Go's ServeMux implements Handler). *)
-let handler mux : Server.handler = serve_http mux

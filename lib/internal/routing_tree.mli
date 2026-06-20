@@ -5,6 +5,8 @@
    consecutive path segments. The handler is kept polymorphic ([_]) since the
    server is not wired yet (Ticket 9). *)
 
+module Pattern = Httpg_base.Pattern
+
 type 'h t
 
 val empty : 'h t

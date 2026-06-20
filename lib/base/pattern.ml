@@ -38,11 +38,11 @@ module Segment = struct
       end
 end
 
-module ZS = Httpg_base.Zero.String
+module ZS = Zero.String
 
 type t = {
   str : string option;
-  method_ : Httpg_base.Method.t option;  (** [None] = any method *)
+  method_ : Method.t option;  (** [None] = any method *)
   host : string option;  (** [None] = any host *)
   segments : Segment.t list;
 }
@@ -55,7 +55,7 @@ let to_string_canonical p =
   let buf = Buffer.create 32 in
   (match p.method_ with
   | Some m ->
-      Buffer.add_string buf (Httpg_base.Method.to_string m);
+      Buffer.add_string buf (Method.to_string m);
       Buffer.add_char buf ' '
   | None -> ());
   (match p.host with Some h -> Buffer.add_string buf h | None -> ());
@@ -103,8 +103,14 @@ let is_valid_wildcard_name s =
       s;
     !ok
 
-(* Single hex-nibble decode; the per-nibble primitive lives in [Ascii]. *)
-let hex_val = Ascii.hex_val
+(* Single hex-nibble decode: ['0'..'9'] -> [Some 0..9], ['a'..'f']/['A'..'F'] ->
+   [Some 10..15], [None] otherwise. (The HTTP/1 chunked parser keeps its own copy
+   in [Httpg_internal.Ascii]; this is inlined so [Pattern] stays base-only.) *)
+let hex_val c =
+  if c >= '0' && c <= '9' then Some (Char.code c - Char.code '0')
+  else if c >= 'a' && c <= 'f' then Some (Char.code c - Char.code 'a' + 10)
+  else if c >= 'A' && c <= 'F' then Some (Char.code c - Char.code 'A' + 10)
+  else None
 
 (* url.PathUnescape: decode %XX. On invalid escaping, return the original. *)
 let path_unescape path =
@@ -260,7 +266,7 @@ let parse s : (t, error) result =
       let i = index_any s " \t" in
       if i >= 0 then
         ( String.sub s 0 i,
-          Httpg_base.Textproto.trim_left ~chars:" \t"
+          Textproto.trim_left ~chars:" \t"
             (String.sub s (i + 1) (String.length s - i - 1)),
           true )
       else (s, "", false)
@@ -361,8 +367,7 @@ let parse s : (t, error) result =
                method/host (the empty token) becomes [None], so the sentinel
                never enters the record. *)
             method_ =
-              (if method_ = "" then None
-               else Some (Httpg_base.Method.of_string method_));
+              (if method_ = "" then None else Some (Method.of_string method_));
             host = ZS.of_zero !host;
             segments = List.rev !segments;
           }
@@ -401,7 +406,7 @@ let combine_relationships r1 r2 =
       | _ -> r2)
 
 let compare_methods p1 p2 =
-  let open Httpg_base.Method in
+  let open Method in
   if p1.method_ = p2.method_ then Equivalent
   else
     (* [None] is the "any method" pattern, so it is more general than any
@@ -573,6 +578,43 @@ let describe_conflict p1 p2 =
       (relationship_to_string mrel)
       (relationship_to_string prel)
 
+let make ~method_ ~host segments = { str = None; method_; host; segments }
+
+module Builder = struct
+  module Method = Method
+
+  let host h m : Method.t option * string option = (m, Some h)
+  let method_ m = Some m
+  let any = None
+  let get = method_ Method.Get
+  let head = method_ Method.Head
+  let post = method_ Method.Post
+  let put = method_ Method.Put
+  let patch = method_ Method.Patch
+  let delete = method_ Method.Delete
+  let connect = method_ Method.Connect
+  let options = method_ Method.Options
+  let trace = method_ Method.Trace
+  let lit x = Segment.Lit x
+  let wild x = Segment.Wild x
+
+  type segments = Segment.t list
+
+  (*finalizers*)
+  let build (m, h, ss) = make ~method_:m ~host:h ss
+  let end_spread x : segments = [ Segment.Multi x ]
+  let end_subtree : segments = [ Segment.Multi "" ]
+  let end_slash : segments = [ Segment.Lit "/" ]
+  let end_lit x : segments = [ Segment.Lit x ]
+  let end_wild x : segments = [ Segment.Wild x ]
+  (* (params -> params  *)
+
+  (*combinators*)
+  let ( @/ ) ((m, h) : Method.t option * string option) ss = (m, h, ss) |> build
+  let ( &/ ) (m : Method.t option) ss = (m, None, ss) |> build
+  let ( ^/ ) (s : Segment.t) ss = s :: ss
+end
+
 module Private = struct
   let relationship_to_string = relationship_to_string
   let inverse_relationship = inverse_relationship
@@ -581,5 +623,5 @@ module Private = struct
   let common_path = common_path
   let difference_path = difference_path
   let to_string_canonical = to_string_canonical
-  let make ~method_ ~host segments = { str = None; method_; host; segments }
+  let make = make
 end

@@ -81,7 +81,7 @@ let modules_with_type_error =
     "io";
     "internal/http2/hpack";
     "internal/http2/hpack_huffman";
-    "internal/pattern";
+    "base/pattern";
     "internal/httpcommon";
     "cookie";
     "fs";

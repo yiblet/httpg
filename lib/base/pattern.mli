@@ -29,7 +29,7 @@ type t
 
 val host : t -> string option
 val segments : t -> Segment.t list
-val method_ : t -> Httpg_base.Method.t option
+val method_ : t -> Method.t option
 
 (** A parse failure (Go's [parsePattern] error cases). The [int] in the
     offset-bearing arms is the byte offset into the original pattern string
@@ -86,6 +86,73 @@ val clean_path : string -> string
     whose path can never match, and shared with [ServeMux] path
     canonicalization. *)
 
+(** A combinator EDSL for building patterns directly in OCaml, as an alternative
+    to {!parse}-ing a string literal. A pattern built here carries no
+    original-string field, so {!to_string} renders its canonical form.
+
+    A path is assembled right-to-left with {!(^/)} and must terminate in one of
+    the [segments]-typed [end_*] finalizers; {!(&/)} finishes a host-less
+    pattern and {!(@/)} one with a {!host}. For example,
+    [get &/ lit "items" ^/ end_slash] builds [GET /items/{$}]. *)
+module Builder : sig
+  type segments = Segment.t list
+  (** A path: a segment list, terminated by an [end_*] finalizer. *)
+
+  val any : Method.t option
+  (** Matches any method (Go's empty method). *)
+
+  val get : Method.t option
+  val head : Method.t option
+  val post : Method.t option
+  val put : Method.t option
+  val patch : Method.t option
+  val delete : Method.t option
+  val connect : Method.t option
+  val options : Method.t option
+  val trace : Method.t option
+
+  val method_ : Method.t -> Method.t option
+  (** Lift an arbitrary method into a matcher. *)
+
+  val host : string -> Method.t option -> Method.t option * string option
+  (** [host h m] pairs method matcher [m] with host [h], for use with {!(@/)}.
+  *)
+
+  val lit : string -> Segment.t
+  (** A literal path element. *)
+
+  val wild : string -> Segment.t
+  (** A [{name}] wildcard matching one path segment. *)
+
+  val end_lit : string -> segments
+  (** Terminate a path with a literal element. *)
+
+  val end_wild : string -> segments
+  (** Terminate a path with a [{name}] single-segment wildcard. *)
+
+  val end_spread : string -> segments
+  (** Terminate a path with a trailing [{name...}] wildcard matching all
+      remaining segments. *)
+
+  val end_subtree : segments
+  (** Terminate a path with a trailing-slash subtree (a [Multi ""]). *)
+
+  val end_slash : segments
+  (** Terminate a path with the [/{$}] exact-match marker. *)
+
+  val build : Method.t option * string option * segments -> t
+  (** Assemble a (method, host, path) triple into a pattern. *)
+
+  val ( ^/ ) : Segment.t -> segments -> segments
+  (** Prepend a segment onto a path (right-associative). *)
+
+  val ( &/ ) : Method.t option -> segments -> t
+  (** [m &/ path] builds a host-less pattern. *)
+
+  val ( @/ ) : Method.t option * string option -> segments -> t
+  (** [host h m @/ path] builds a pattern carrying a host. *)
+end
+
 module Private : sig
   (** Helpers exposed only for the ported white-box tests; not part of the
       public API. *)
@@ -111,10 +178,7 @@ module Private : sig
   val to_string_canonical : t -> string
 
   val make :
-    method_:Httpg_base.Method.t option ->
-    host:string option ->
-    Segment.t list ->
-    t
+    method_:Method.t option -> host:string option -> Segment.t list -> t
   (** Construct a pattern from its components, for the ported tests. The
       original-string field is left absent, so {!to_string} renders the
       canonical form. *)

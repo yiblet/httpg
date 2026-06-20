@@ -1,6 +1,6 @@
 (* Ported from go/src/net/http/pattern_test.go. *)
 
-module Pattern = Httpg_internal.Pattern
+module Pattern = Httpg_base.Pattern
 
 let lit name = Pattern.Segment.Lit name
 let wild name = Pattern.Segment.Wild name
@@ -128,6 +128,37 @@ let test_to_string () =
       let got = Pattern.Private.to_string_canonical (must_parse in_) in
       if not (got = want) then
         Alcotest.failf "v2 %S:\n got %S\n want %S" in_ got want)
+    cases
+
+(* The Builder EDSL: each constructed pattern renders to its canonical string
+   via Pattern.to_string (str is absent, so it falls back to the canonical
+   form). Paths terminate in an end_* finalizer. *)
+let test_builder () =
+  let open Pattern.Builder in
+  let cases =
+    [
+      (any &/ end_subtree, "/");
+      (any &/ end_spread "rest", "/{rest...}");
+      (get &/ end_slash, "GET /{$}");
+      (get &/ end_lit "foo", "GET /foo");
+      (get &/ end_wild "id", "GET /{id}");
+      (get &/ lit "foo" ^/ end_subtree, "GET /foo/");
+      (get &/ lit "foo" ^/ end_slash, "GET /foo/{$}");
+      (get &/ lit "foo" ^/ end_wild "bar", "GET /foo/{bar}");
+      (post &/ lit "foo" ^/ end_spread "rest", "POST /foo/{rest...}");
+      (get &/ wild "id" ^/ end_slash, "GET /{id}/{$}");
+      (get &/ lit "items" ^/ wild "id" ^/ end_subtree, "GET /items/{id}/");
+      ( host "example.com" get @/ lit "foo" ^/ end_lit "bar",
+        "GET example.com/foo/bar" );
+      ( host "example.com" delete @/ lit "a" ^/ wild "foo12" ^/ end_slash,
+        "DELETE example.com/a/{foo12}/{$}" );
+    ]
+  in
+  List.iter
+    (fun (p, want) ->
+      let got = Pattern.to_string p in
+      if not (got = want) then
+        Alcotest.failf "builder:\n got  %S\n want %S" got want)
     cases
 
 (* TestParsePatternError. *)
@@ -482,4 +513,5 @@ let tests =
     ("common_path", `Quick, test_common_path);
     ("difference_path", `Quick, test_difference_path);
     ("to_string", `Quick, test_to_string);
+    ("builder", `Quick, test_builder);
   ]

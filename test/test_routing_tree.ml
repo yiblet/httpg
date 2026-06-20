@@ -1,6 +1,6 @@
 (* Ported from go/src/net/http/routing_tree_test.go. Handlers are () (Go's nil). *)
 
-module Pattern = Httpg_internal.Pattern
+module Pattern = Httpg_base.Pattern
 module Routing_tree = Httpg_internal.Routing_tree
 
 let build_tree pats =
