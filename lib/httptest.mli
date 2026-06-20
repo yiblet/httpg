@@ -1,14 +1,18 @@
-(* Port of go/src/net/http/httptest. [Server] is a loopback test HTTP/HTTPS
-   server (Go's [httptest.Server]) the httpg [Client] can round-trip against.
+(* Port of go/src/net/http/httptest. [Server] is a test HTTP/HTTPS server (Go's
+   [httptest.Server]) the httpg [Client] can round-trip against, over either a
+   loopback socket ({!Server.new_server}) or an in-memory socketpair network
+   ({!Server.new_test_server}, Go's [NewTestServer]).
    (Go's [ResponseRecorder] is omitted: with [Request -> Response] handlers a
    handler is tested by calling it directly and inspecting the returned
    {!Response.t}.) *)
 
-(** Go's [httptest.Server]: a loopback test server bound to an ephemeral
-    [127.0.0.1] port. Only the started, loopback-network path is supported (the
-    in-memory "fakenet" network and the [NewUnstartedServer]+[Start] split are
-    omitted). The server runs its accept loop in a fiber forked under the
-    caller-supplied [Eio.Switch]; {!Server.val-close} stops it. *)
+(** Go's [httptest.Server]: a test server reachable via the httpg [Client].
+    [new_server]/[new_tls_server] bind an ephemeral [127.0.0.1] port;
+    [new_test_server]/[new_test_tls_server] serve over an in-memory "fakenet"
+    network (no loopback/DNS/ports). Only the started path is supported (the
+    [NewUnstartedServer]+[Start] split is omitted). The server runs its accept
+    loop in a fiber forked under the caller-supplied [Eio.Switch];
+    {!Server.val-close} stops it. *)
 module Server : sig
   type t = {
     url : string;
@@ -56,11 +60,34 @@ module Server : sig
       ["https://..."]. The matching {!client} trusts the cert via [~insecure].
   *)
 
+  val new_test_server :
+    sw:Eio.Switch.t -> ?clock:_ Eio.Time.clock -> Server.handler -> t
+  (** Go's [NewTestServer]: serve [handler] over an in-memory network
+      ({!Httpg_internal.Socketpair_net}) instead of a loopback socket. No port,
+      DNS, or loopback is used; [url] is ["http://example.com"] and {!val-port}
+      is [0] (there is no real port). The matching {!client} dials the same
+      in-memory network. The serve fiber lives under [sw]; {!val-close} (or [sw]
+      finishing) stops it.
+
+      Unlike {!new_server} no [~net] is taken: the in-memory network is created
+      internally and shared between the server and its {!client}. The full HTTP
+      stack (request/response serialization, server parse loop, keep-alive)
+      still runs -- only the transport is in-memory. *)
+
+  val new_test_tls_server :
+    sw:Eio.Switch.t -> ?clock:_ Eio.Time.clock -> Server.handler -> t
+  (** Like {!new_test_server} but over TLS using the self-signed
+      {!Net.test_server_certificate} and advertising ALPN [["h2"; "http/1.1"]];
+      [url] is ["https://example.com"]. The matching {!client} trusts the cert
+      via [~insecure]. *)
+
   val client : t -> Client.t
   (** Go's [Server.Client]: a {!Client.t} configured to talk to this server. For
       a TLS server it is built with [~insecure:true] (the faithful analogue of
       Go pre-loading the server's self-signed certificate into the client's
-      [RootCAs]); for an HTTP server it is a plain default-shaped client. *)
+      [RootCAs]); for an HTTP server it is a plain default-shaped client. The
+      client captures the same network as the server, so an in-memory server
+      ({!new_test_server}) is dialed over its in-memory network. *)
 
   val close : t -> unit
   (** Go's [Server.Close]: stop accepting and close the listening socket. *)

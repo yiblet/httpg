@@ -1,12 +1,16 @@
-(* Port of go/src/net/http/httptest/server.go (Server), restricted to the
-   loopback-network path we support: [NewServer]/[NewTLSServer] bind an
-   ephemeral 127.0.0.1 port, [Close] tears the listener down, and [Client]
-   returns a [Client.t] suitable for hitting the server.
+(* Port of go/src/net/http/httptest/server.go (Server). Two transports are
+   supported:
+   - loopback: [new_server]/[new_tls_server] bind an ephemeral 127.0.0.1 port
+     (for tests that assert real wire/port behavior);
+   - in-memory: [new_test_server]/[new_test_tls_server] (Go's [NewTestServer])
+     serve over the socketpair "fakenet" ({!Httpg_internal.Socketpair_net}) --
+     no loopback, DNS, or ports, while still running the full HTTP/TLS/h2 stack.
+   [Close] tears the server down; [Client] returns a [Client.t] capturing the
+   same network, so it dials the server whichever transport it uses.
 
-   Go's in-memory ("fakenet") network and the [NewUnstartedServer]+[Start]
-   split are out of scope: httpg's [Server.listen_and_serve_started] binds and
-   begins serving in one step, so a started [Server] is the only useful shape
-   here (noted in the plan; [new_unstarted] omitted). *)
+   Only Go's [NewUnstartedServer]+[Start] split remains out of scope: httpg's
+   [Server.listen_and_serve_started] binds and begins serving in one step, so a
+   started [Server] is the only useful shape here ([new_unstarted] omitted). *)
 module Server = struct
   type t = {
     url : string;  (** Go's [Server.URL] ("http://127.0.0.1:PORT"). *)
@@ -19,12 +23,27 @@ module Server = struct
     clock : float Eio.Time.clock_ty Eio.Resource.t option;
   }
 
+  module Socketpair_net = Httpg_internal.Socketpair_net
+
   let url s = s.url
   let port s = s.port
   let coerce_net net = (net :> [ `Generic ] Eio.Net.ty Eio.Resource.t)
 
   let coerce_clock clock =
     Option.map (fun c -> (c :> float Eio.Time.clock_ty Eio.Resource.t)) clock
+
+  (* Assemble the [t] record shared by every constructor, once the listener is
+     bound and the serve fiber forked. *)
+  let assemble ~tls ~url ~port ~srv ~net ~clock : t =
+    {
+      url;
+      port;
+      tls;
+      srv;
+      close = (fun () -> Server.close srv);
+      net = coerce_net net;
+      clock = coerce_clock clock;
+    }
 
   (* NewServer: bind 127.0.0.1:0, build the URL, serve in a fiber under [sw]. *)
   let new_server ~net ?clock ~sw (handler : Server.handler) : t =
@@ -40,15 +59,7 @@ module Server = struct
     | Ok (srv, port, serve_loop) ->
         Eio.Fiber.fork ~sw serve_loop;
         let url = Printf.sprintf "http://127.0.0.1:%d" port in
-        {
-          url;
-          port;
-          tls = false;
-          srv;
-          close = (fun () -> Server.close srv);
-          net = coerce_net net;
-          clock = coerce_clock clock;
-        }
+        assemble ~tls:false ~url ~port ~srv ~net ~clock
 
   (* NewTLSServer: like [new_server] but over TLS with the self-signed
      [Net.test_server_certificate]; URL is "https://...". The matching [client]
@@ -71,15 +82,43 @@ module Server = struct
     | Ok (srv, port, serve_loop) ->
         Eio.Fiber.fork ~sw serve_loop;
         let url = Printf.sprintf "https://127.0.0.1:%d" port in
-        {
-          url;
-          port;
-          tls = true;
-          srv;
-          close = (fun () -> Server.close srv);
-          net = coerce_net net;
-          clock = coerce_clock clock;
-        }
+        assemble ~tls:true ~url ~port ~srv ~net ~clock
+
+  (* NewTestServer: serve over an in-memory socketpair network instead of a
+     loopback socket (Go's httptest fakenet). The network is created here and
+     shared with [client] (it is captured in the record), so the client dials
+     the same in-memory network. URL is "http://example.com" and [port] is 0:
+     there is no real port. The full HTTP stack still runs over the in-memory
+     connection. *)
+  let new_test_server ~sw ?clock (handler : Server.handler) : t =
+    let net = Socketpair_net.net (Socketpair_net.create ()) in
+    match
+      Server.listen_and_serve_started ~net ?clock ~sw ~addr:"example.com"
+        ~port:80 handler
+    with
+    (* Unreachable: the in-memory [listen] cannot fail to resolve or bind. *)
+    | Error e ->
+        invalid_arg ("httptest: new_test_server: " ^ Net.error_to_string e)
+    | Ok (srv, _port, serve_loop) ->
+        Eio.Fiber.fork ~sw serve_loop;
+        assemble ~tls:false ~url:"http://example.com" ~port:0 ~srv ~net ~clock
+
+  (* NewTestServer + StartTLS: the in-memory variant over TLS, ALPN h2+http/1.1.
+     URL is "https://example.com"; [client] trusts the self-signed cert via
+     [~insecure]. *)
+  let new_test_tls_server ~sw ?clock (handler : Server.handler) : t =
+    let net = Socketpair_net.net (Socketpair_net.create ()) in
+    let certificates = Net.test_server_certificate () in
+    match
+      Server.listen_and_serve_tls_started ~net ?clock ~certificates
+        ~alpn:[ "h2"; "http/1.1" ] ~sw ~addr:"example.com" ~port:443 handler
+    with
+    (* Unreachable: fixed-valid cert + in-memory bind cannot fail. *)
+    | Error e ->
+        invalid_arg ("httptest: new_test_tls_server: " ^ Net.error_to_string e)
+    | Ok (srv, _port, serve_loop) ->
+        Eio.Fiber.fork ~sw serve_loop;
+        assemble ~tls:true ~url:"https://example.com" ~port:0 ~srv ~net ~clock
 
   (* Server.Client: a client (capturing the same net/clock) configured to talk
      to this server. Go pre-loads the server's self-signed cert into the client's

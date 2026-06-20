@@ -90,9 +90,86 @@ let server_close () =
   Alcotest.(check int) "served 200 before close" 200 pre_status;
   Alcotest.(check bool) "connect refused after close" true refused
 
+(* ---- HttptestServer.in_memory_get ---- *)
+(* The in-memory server uses the socketpair fakenet: no loopback, no port. The
+   full HTTP/1 stack still round-trips client <-> server. *)
+let in_memory_get () =
+  let handler =
+   fun ~sw:_ r ->
+    Response.create () |> Response.with_body_string (Uri.path r.Request.url)
+  in
+  let status, body, url, port =
+    Test_harness.with_env (fun ~net:_ ~clock ~sw ->
+        let s = Ts.new_test_server ~sw ~clock handler in
+        Fun.protect
+          ~finally:(fun () -> Ts.close s)
+          (fun () ->
+            let c = Ts.client s in
+            let resp = ok_resp (Client.get ~sw c (Ts.url s ^ "/echo")) in
+            ( Httpg_base.Status.to_int resp.Response.status,
+              read_body resp.Response.body,
+              Ts.url s,
+              Ts.port s )))
+  in
+  Alcotest.(check string)
+    "url is example.com (no port)" "http://example.com" url;
+  Alcotest.(check int) "no real port" 0 port;
+  Alcotest.(check int) "status 200" 200 status;
+  Alcotest.(check string) "body is request path" "/echo" body
+
+(* ---- HttptestServer.in_memory_tls_get ---- *)
+(* TLS (and ALPN) over the in-memory connection. *)
+let in_memory_tls_get () =
+  let handler =
+   fun ~sw:_ _r -> Response.with_body_string "hello" (Response.create ())
+  in
+  let status, body, url =
+    Test_harness.with_env ~secs:15. (fun ~net:_ ~clock ~sw ->
+        let s = Ts.new_test_tls_server ~sw ~clock handler in
+        Fun.protect
+          ~finally:(fun () -> Ts.close s)
+          (fun () ->
+            let c = Ts.client s in
+            let resp = ok_resp (Client.get ~sw c (Ts.url s)) in
+            ( Httpg_base.Status.to_int resp.Response.status,
+              read_body resp.Response.body,
+              Ts.url s )))
+  in
+  Alcotest.(check string) "url is https example.com" "https://example.com" url;
+  Alcotest.(check int) "status 200" 200 status;
+  Alcotest.(check string) "body" "hello" body
+
+(* ---- HttptestServer.in_memory_h2 ---- *)
+(* The TLS in-memory server advertises ALPN h2+http/1.1 and the default https
+   client offers the same, so the exchange runs over HTTP/2 -- proving the full
+   h2 stack works over the in-memory connection (Go enables h2 on its fakenet
+   test server). *)
+let in_memory_h2 () =
+  let handler =
+   fun ~sw:_ _r -> Response.with_body_string "h2 ok" (Response.create ())
+  in
+  let proto, status, body =
+    Test_harness.with_env ~secs:15. (fun ~net:_ ~clock ~sw ->
+        let s = Ts.new_test_tls_server ~sw ~clock handler in
+        Fun.protect
+          ~finally:(fun () -> Ts.close s)
+          (fun () ->
+            let c = Ts.client s in
+            let resp = ok_resp (Client.get ~sw c (Ts.url s)) in
+            ( Httpg_base.Protocol.to_string resp.Response.proto,
+              Httpg_base.Status.to_int resp.Response.status,
+              read_body resp.Response.body )))
+  in
+  Alcotest.(check string) "negotiated HTTP/2 over in-memory" "HTTP/2.0" proto;
+  Alcotest.(check int) "status 200" 200 status;
+  Alcotest.(check string) "body" "h2 ok" body
+
 let tests =
   [
     Alcotest.test_case "server_get" `Quick server_get;
     Alcotest.test_case "server_tls" `Slow server_tls;
     Alcotest.test_case "server_close" `Quick server_close;
+    Alcotest.test_case "in_memory_get" `Quick in_memory_get;
+    Alcotest.test_case "in_memory_tls_get" `Slow in_memory_tls_get;
+    Alcotest.test_case "in_memory_h2" `Slow in_memory_h2;
   ]

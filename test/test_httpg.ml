@@ -34,6 +34,7 @@ let () =
       ("Clientserver", Test_clientserver.tests);
       ("Serve", Test_serve.tests);
       ("Mux", Test_mux.tests);
+      ("Socketpair_net", Test_socketpair_net.tests);
       ("Stream_client", Test_stream_client.tests);
       ("Stream_read", Test_stream_read.tests);
       ("Stream_write", Test_stream_write.tests);
