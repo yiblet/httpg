@@ -18,8 +18,8 @@ type t
 val create : unit -> t
 (** A fresh, empty {!t}. *)
 
-val get : t -> string -> string
-(** [Values.Get]: the first value for the key, or "". *)
+val get : t -> string -> string option
+(** [Values.Get]: the first value for the key. *)
 
 val set : t -> string -> string -> t
 (** [Values.Set]: return [t] with any existing values for the key replaced. *)

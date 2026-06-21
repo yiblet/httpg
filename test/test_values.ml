@@ -16,7 +16,7 @@ let test_parse_query_typed () =
   | None -> ()
   | Some e ->
       Alcotest.failf "valid query returned Some %s" (Form.error_to_string e));
-  Alcotest.(check string) "a" "1" (Form.get m "a");
-  Alcotest.(check string) "b" "2" (Form.get m "b")
+  Alcotest.(check (option string)) "a" (Some "1") (Form.get m "a");
+  Alcotest.(check (option string)) "b" (Some "2") (Form.get m "b")
 
 let tests = [ ("parse_query_typed", `Quick, test_parse_query_typed) ]

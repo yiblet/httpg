@@ -19,8 +19,8 @@ let form_of_body () =
   with
   | Error e -> Alcotest.failf "of_body: %s" (Form.error_to_string e)
   | Ok v ->
-      Alcotest.(check string) "z" "post" (Form.get v "z");
-      Alcotest.(check string) "prio" "2" (Form.get v "prio");
+      Alcotest.(check (option string)) "z" (Some "post") (Form.get v "z");
+      Alcotest.(check (option string)) "prio" (Some "2") (Form.get v "prio");
       (* a key with no '=' has value "" *)
       Alcotest.(check (list string)) "orphan" [ "" ] (Form.find v "orphan");
       Alcotest.(check (list string)) "empty" [ "" ] (Form.find v "empty");
@@ -45,7 +45,7 @@ let form_query_body_merge () =
     "q (query only)" [ "foo"; "bar" ] (Form.find form "q");
   Alcotest.(check (list string))
     "both (body first)" [ "y"; "x" ] (Form.find form "both");
-  Alcotest.(check string) "z (body only)" "post" (Form.get form "z")
+  Alcotest.(check (option string)) "z (body only)" (Some "post") (Form.get form "z")
 
 (* A bare ';' separator in a urlencoded body is rejected (Form.parse_query). *)
 let form_semicolon_error () =
@@ -191,14 +191,15 @@ let encode_roundtrip () =
   Alcotest.(check string) "encoded" "k=a%20b%2Bc" encoded;
   let parsed, res = Form.parse_query encoded in
   Alcotest.(check bool) "no parse error" true (res = None);
-  Alcotest.(check string) "value round-trips" "a b+c" (Form.get parsed "k")
+  Alcotest.(check (option string)) "value round-trips" (Some "a b+c")
+    (Form.get parsed "k")
 
 (* Form.of_string: strict parse — Ok on a clean query, the typed error otherwise. *)
 let form_of_string () =
   (match Form.of_string "a=1&b=2" with
   | Ok v ->
-      Alcotest.(check string) "a" "1" (Form.get v "a");
-      Alcotest.(check string) "b" "2" (Form.get v "b")
+      Alcotest.(check (option string)) "a" (Some "1") (Form.get v "a");
+      Alcotest.(check (option string)) "b" (Some "2") (Form.get v "b")
   | Error e -> Alcotest.failf "of_string: %s" (Form.error_to_string e));
   match Form.of_string "a;b=c" with
   | Error Form.Invalid_semicolon_separator -> ()
@@ -213,7 +214,7 @@ let form_to_body_roundtrip () =
   | Error e -> Alcotest.failf "of_body: %s" (Form.error_to_string e)
   | Ok v' ->
       Alcotest.(check (list string)) "k" [ "a b"; "second" ] (Form.find v' "k");
-      Alcotest.(check string) "n" "x" (Form.get v' "n")
+      Alcotest.(check (option string)) "n" (Some "x") (Form.get v' "n")
 
 (* Multipart.to_body (streaming part Seq) |> of_body round-trips the parts. *)
 let multipart_to_body_roundtrip () =

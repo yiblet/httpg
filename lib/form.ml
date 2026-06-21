@@ -25,9 +25,9 @@ type t = string list M.t
 
 let create () : t = M.empty
 
-(* Values.Get: the first value for [key], or "". *)
+(* Values.Get: the first value for [key], or [None] if absent. *)
 let get (v : t) key =
-  match M.find_opt key v with Some (v0 :: _) -> v0 | Some [] | None -> ""
+  match M.find_opt key v with Some (v0 :: _) -> Some v0 | Some [] | None -> None
 
 (* Values.Set: replace any existing values for [key]. *)
 let set (v : t) key value = M.add key [ value ] v
