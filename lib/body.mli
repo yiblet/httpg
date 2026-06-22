@@ -88,8 +88,8 @@ val concat : t list -> t
     a composite body (e.g. the file server's multipart/byteranges output)
     without materializing it. *)
 
-val on_complete : t -> (unit -> unit) -> t
-(** [on_complete b f] is [b] with [f] scheduled to run once when the body is
+val on_complete : (unit -> unit) -> t -> t
+(** [on_complete f b] is [b] with [f] scheduled to run once when the body is
     read to clean EOF, passing chunks through unchanged and preserving the known
     length. [f] does {b not} run if the body terminates on a mid-stream [Error]
     (the analogue of releasing a connection only after a clean body read). *)

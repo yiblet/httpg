@@ -175,10 +175,10 @@ let multipart_large_in_memory () =
 (* ---- Form values unit: Encode sorts by key (url.Values.Encode). ---- *)
 let values_encode () =
   let v = Form.create () in
-  let v = Form.add v "foo" "quux" in
-  let v = Form.add v "bar" "baz" in
+  let v = Form.add "foo" "quux" v in
+  let v = Form.add "bar" "baz" v in
   Alcotest.(check string) "encode sorted" "bar=baz&foo=quux" (Form.to_string v);
-  let v = Form.set v "foo" "x y" in
+  let v = Form.set "foo" "x y" v in
   (* deviation from Go: space encodes as "%20", not '+'. *)
   Alcotest.(check string)
     "encode space->%20" "bar=baz&foo=x%20y" (Form.to_string v)
@@ -186,7 +186,7 @@ let values_encode () =
 (* Round-trip: a space and a literal '+' survive encode -> parse_query. The space
    encodes as "%20" and the '+' as "%2B"; decode accepts both '+' and "%2B". *)
 let encode_roundtrip () =
-  let v = Form.set (Form.create ()) "k" "a b+c" in
+  let v = Form.create () |> Form.set "k" "a b+c" in
   let encoded = Form.to_string v in
   Alcotest.(check string) "encoded" "k=a%20b%2Bc" encoded;
   let parsed, res = Form.parse_query encoded in
@@ -208,8 +208,8 @@ let form_of_string () =
 
 (* Form.to_body |> of_body round-trips the values (multi-value key + space). *)
 let form_to_body_roundtrip () =
-  let v = Form.add (Form.set (Form.create ()) "k" "a b") "k" "second" in
-  let v = Form.set v "n" "x" in
+  let v = Form.create () |> Form.set "k" "a b" |> Form.add "k" "second" in
+  let v = Form.set "n" "x" v in
   match Form.of_body (Form.to_body v) with
   | Error e -> Alcotest.failf "of_body: %s" (Form.error_to_string e)
   | Ok v' ->
@@ -224,13 +224,13 @@ let multipart_to_body_roundtrip () =
         {
           Multipart.name = Some "field1";
           filename = None;
-          header = Header.create ();
+          header = Header.empty;
           body = "value1";
         };
         {
           Multipart.name = Some "file";
           filename = Some "hello.txt";
-          header = Header.set (Header.create ()) "Content-Type" "text/plain";
+          header = Header.empty |> Header.set "Content-Type" "text/plain";
           body = "file-contents";
         };
       ]

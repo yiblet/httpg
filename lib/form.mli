@@ -21,14 +21,16 @@ val create : unit -> t
 val get : t -> string -> string option
 (** [Values.Get]: the first value for the key. *)
 
-val set : t -> string -> string -> t
-(** [Values.Set]: return [t] with any existing values for the key replaced. *)
+val set : string -> string -> t -> t
+(** [set key value form] returns [form] with any existing values for [key]
+    replaced (Go's [Values.Set]). *)
 
-val add : t -> string -> string -> t
-(** [Values.Add]: return [t] with [value] appended to the key's list. *)
+val add : string -> string -> t -> t
+(** [add key value form] returns [form] with [value] appended to [key]'s list
+    (Go's [Values.Add]). *)
 
-val del : t -> string -> t
-(** [Values.Del]: return [t] without the key. *)
+val del : string -> t -> t
+(** [del key form] returns [form] without [key] (Go's [Values.Del]). *)
 
 val has : t -> string -> bool
 (** [Values.Has]: whether the key is present. *)

@@ -212,13 +212,13 @@ let serve_one ~sw ~clock w (r : Request.t) (h : handler) : bool =
         if String.length leading > 512 then String.sub leading 0 512
         else leading
       in
-      Header.set header "Content-Type" (Sniff.detect_content_type src)
+      Header.set "Content-Type" (Sniff.detect_content_type src) header
     else header
   in
   let header =
     if not (Header.has header "Date") then
       match http_time_now clock with
-      | Some date -> Header.set header "Date" date
+      | Some date -> Header.set "Date" date header
       | None -> header
     else header
   in
@@ -636,8 +636,8 @@ let body_of_api_body (b : Httpg_http2.Api.Body.t) : Body.t =
 (* The decoupled Api.header (mutable Hashtbl) -> the public Header (Map). *)
 let header_of_api_header (t : Httpg_http2.Api.header) : Header.t =
   List.fold_left
-    (fun acc (k, vs) -> Header.set_values acc k vs)
-    (Header.create ())
+    (fun acc (k, vs) -> Header.set_values k vs acc)
+    Header.empty
     (Httpg_http2.Api.Header.to_list t)
 
 let request_of_server_request (r : Httpg_http2.Api.server_request) : Request.t =

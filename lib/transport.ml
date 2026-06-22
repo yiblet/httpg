@@ -249,7 +249,7 @@ let set_default_headers (req : Request.t) ~host =
   match Header.get req.Request.header "User-Agent" with
   | None ->
       req.Request.header <-
-        Header.set req.Request.header "User-Agent" default_user_agent
+        Header.set "User-Agent" default_user_agent req.Request.header
   | Some _ -> ()
 
 (* Run one request/response exchange over the buffered channels [r]/[w]. The
@@ -290,7 +290,7 @@ let exchange t pool key ~max_header_bytes ~released r w pc (req : Request.t) :
           (match resp.Response.content_length with
           | Some 0L -> on_eof ()
           | _ ->
-              resp.Response.body <- Body.on_complete resp.Response.body on_eof);
+              resp.Response.body <- Body.on_complete on_eof resp.Response.body);
           Ok resp)
 
 (* The per-connection fiber (Go's persistConn loops). Holds the channels open,
@@ -456,8 +456,8 @@ let api_header_of_header (h : Header.t) : Api.header =
 
 let header_of_api_header (t : Api.header) : Header.t =
   List.fold_left
-    (fun acc (k, vs) -> Header.set_values acc k vs)
-    (Header.create ()) (Api.Header.to_list t)
+    (fun acc (k, vs) -> Header.set_values k vs acc)
+    Header.empty (Api.Header.to_list t)
 
 let client_request_of_request (req : Request.t) : Api.client_request =
   {

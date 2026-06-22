@@ -62,8 +62,8 @@ let default_cookie_max_num = 3000
 
 let header_of pairs =
   List.fold_left
-    (fun h (k, vs) -> List.fold_left (fun h v -> Header.add h k v) h vs)
-    (Header.create ()) pairs
+    (fun h (k, vs) -> List.fold_left (fun h v -> Header.add k v h) h vs)
+    Header.empty pairs
 
 (* Reference epochs (Unix seconds, UTC), matching Go's time.Date values. *)
 let exp_2009 = 1257894000. (* Tue, 10 Nov 2009 23:00:00 GMT *)

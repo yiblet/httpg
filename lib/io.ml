@@ -140,16 +140,15 @@ let read_mime_header_threaded ?(limit : int ref option) (r : Eio.Buf_read.t) :
               done;
               String.sub v !j (n - !j)
             in
-            Ok (Header.add h key value))
-    (Ok (Header.create ()))
-    lines
+            Ok (Header.add key value h))
+    (Ok Header.empty) lines
 
 (* fixPragmaCacheControl (response.go). Returns the (possibly updated) header. *)
 let fix_pragma_cache_control (h : Header.t) : Header.t =
   match Header.values h "Pragma" with
   | hp :: _ when hp = "no-cache" ->
       if not (Header.has h "Cache-Control") then
-        Header.set h "Cache-Control" "no-cache"
+        Header.set "Cache-Control" "no-cache" h
       else h
   | _ -> h
 
@@ -163,7 +162,7 @@ let merge_trailer (declared : Header.t option) (hdr : Header.t) :
     Header.t option =
   match declared with
   | None -> if Header.is_empty hdr then None else Some hdr
-  | Some t -> Some (Header.fold (fun k v t -> Header.set_values t k v) hdr t)
+  | Some t -> Some (Header.fold (fun k v t -> Header.set_values k v t) hdr t)
 
 (* Go bounds the chunked trailer to its bufio buffer size (~4kB,
    transfer.go:932) via a peek-for-double-CRLF hack. We reproduce the effect:
@@ -352,7 +351,7 @@ let read_request_threaded ?(max_header_bytes : int option) (r : Eio.Buf_read.t)
         Transfer.read_transfer msg r |> Result.map_error (fun e -> Transfer e)
       in
       (* ReadRequest deletes Host from the post-framing header. *)
-      let header = Header.del res.Transfer.header "Host" in
+      let header = Header.del "Host" res.Transfer.header in
       let req =
         {
           Request.meth;

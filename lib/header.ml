@@ -105,7 +105,7 @@ end
 
 type t = string Semideq.t M.t
 
-let create () : t = M.empty
+let empty : t = M.empty
 
 (* Build a header from (key, values) entries (keys canonicalized). Later
    duplicate keys overwrite earlier ones. *)
@@ -138,19 +138,19 @@ let filter f (h : t) =
 
 (* MIMEHeader.Add: appends to any existing values associated with the canonical
    key. *)
-let add h key value =
+let add key value h =
   let key = Canonical.of_string key in
   match find_opt h key with
   | Some vs -> M.add key (Semideq.add value vs) h
   | None -> M.add key (Semideq.create value) h
 
 (* MIMEHeader.Set: replaces existing values with the single element value. *)
-let set h key value = M.add (Canonical.of_string key) (Semideq.create value) h
+let set key value h = M.add (Canonical.of_string key) (Semideq.create value) h
 
 (* Replace the whole value list for the canonical key (used to record a trailer
    key, possibly with [[]], and for header merges). [vs] is in insertion
    order. *)
-let set_values h key vs = M.add (Canonical.of_string key) (Semideq.of_list vs) h
+let set_values key vs h = M.add (Canonical.of_string key) (Semideq.of_list vs) h
 
 (* MIMEHeader.Get: Some first value or None. *)
 let get h key =
@@ -164,7 +164,7 @@ let values h key =
   | None -> []
 
 (* MIMEHeader.Del. *)
-let del h key = M.remove (Canonical.of_string key) h
+let del key h = M.remove (Canonical.of_string key) h
 
 (* Header.has: whether the key is defined. *)
 let has h key = M.mem (Canonical.of_string key) h

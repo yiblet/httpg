@@ -163,7 +163,7 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
                   referer_for_url ~last:req.Request.url ~next:loc_url
                     ~explicit:explicit_referer
                 with
-                | Some ref_ -> Header.set new_header "Referer" ref_
+                | Some ref_ -> Header.set "Referer" ref_ new_header
                 | None -> new_header
               in
               let new_req =

@@ -30,16 +30,16 @@ let get (v : t) key =
   match M.find_opt key v with Some (v0 :: _) -> Some v0 | Some [] | None -> None
 
 (* Values.Set: replace any existing values for [key]. *)
-let set (v : t) key value = M.add key [ value ] v
+let set key value (v : t) = M.add key [ value ] v
 
 (* Values.Add: append [value] to the list for [key]. *)
-let add (v : t) key value =
+let add key value (v : t) =
   match M.find_opt key v with
   | Some vs -> M.add key (vs @ [ value ]) v
   | None -> M.add key [ value ] v
 
 (* Values.Del: delete all values for [key]. *)
-let del (v : t) key = M.remove key v
+let del key (v : t) = M.remove key v
 
 (* Values.Has: whether [key] is set. *)
 let has (v : t) key = M.mem key v
@@ -108,7 +108,7 @@ let parse_query (query : string) : t * error option =
       else if key = "" then loop m rest
       else
         let k, value, _ = cut key '=' in
-        let m = add m (query_unescape k) (query_unescape value) in
+        let m = add (query_unescape k) (query_unescape value) m in
         loop m rest
   in
   let m = loop (create ()) query in

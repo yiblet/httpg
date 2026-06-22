@@ -10,7 +10,7 @@ type t
     form as produced by {!canonical_header_key}. Iteration is in sorted key
     order; {!write} relies on that. *)
 
-val create : unit -> t
+val empty : t
 (** An empty header. *)
 
 val of_list : (string * string list) list -> t
@@ -35,16 +35,16 @@ val filter_key : (string -> bool) -> t -> t
 (** [filter_key f h] returns a new header with all keys [k] for which [f k] is
     [true]. *)
 
-val add : t -> string -> string -> t
-(** [add h key value] returns [h] with [value] appended to any existing values
+val add : string -> string -> t -> t
+(** [add key value h] returns [h] with [value] appended to any existing values
     for the canonicalized key (Go's [Header.Add]). *)
 
-val set : t -> string -> string -> t
-(** [set h key value] returns [h] with existing values replaced by the single
+val set : string -> string -> t -> t
+(** [set key value h] returns [h] with existing values replaced by the single
     [value] (Go's [Header.Set]). *)
 
-val set_values : t -> string -> string list -> t
-(** [set_values h key vs] returns [h] with the whole value list for the
+val set_values : string -> string list -> t -> t
+(** [set_values key vs h] returns [h] with the whole value list for the
     canonicalized key replaced by [vs] (which may be [[]] — e.g. to record a
     trailer key). *)
 
@@ -57,8 +57,8 @@ val values : t -> string -> string list
 (** [values h key] returns all values for the key in insertion order, or [[]] if
     absent (Go's [Header.Values]). *)
 
-val del : t -> string -> t
-(** [del h key] returns [h] without the canonicalized key (Go's [Header.Del]).
+val del : string -> t -> t
+(** [del key h] returns [h] without the canonicalized key (Go's [Header.Del]).
 *)
 
 val has : t -> string -> bool

@@ -27,7 +27,7 @@ let default_user_agent = "Go-http-client/1.1"
    optional field. [host] defaults to the URL's host (Go sets [req.Host] from the
    parsed URL); pass [~host] to override. No zero-value record to start from. *)
 let make ?(meth = Httpg_base.Method.Get) ?(proto = Httpg_base.Protocol.Http11)
-    ?(header = Header.create ()) ?(body = Body.empty) ?content_length
+    ?(header = Header.empty) ?(body = Body.empty) ?content_length
     ?(transfer_encoding = []) ?(close = false) ?host ?(trailer = None)
     ?request_uri ?remote_addr url =
   {
@@ -95,9 +95,9 @@ let add_cookie (r : t) (c : Cookie.t) =
       (Cookie.sanitize_cookie_value c.Cookie.value ~quoted:c.Cookie.quoted)
   in
   match Header.get r.header "Cookie" with
-  | None -> r.header <- Header.set r.header "Cookie" s
+  | None -> r.header <- Header.set "Cookie" s r.header
   | Some existing ->
-      r.header <- Header.set r.header "Cookie" (existing ^ "; " ^ s)
+      r.header <- Header.set "Cookie" (existing ^ "; " ^ s) r.header
 
 (* The parsed Authorization header, or None if absent or malformed (subsumes
    Go's BasicAuth/SetBasicAuth, generalised over the scheme via {!Authorization}). *)
@@ -108,4 +108,4 @@ let auth (r : t) : Authorization.t option =
 
 (* Set the Authorization header from a typed {!Authorization.t}. *)
 let set_auth (r : t) (a : Authorization.t) =
-  r.header <- Header.set r.header "Authorization" (Authorization.to_string a)
+  r.header <- Header.set "Authorization" (Authorization.to_string a) r.header

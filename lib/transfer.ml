@@ -217,7 +217,7 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t)
                      headers; got %s"
                     (String.concat " " content_lens)))
           else
-            let header = Header.set header "Content-Length" first in
+            let header = Header.set "Content-Length" first header in
             Ok (header, Header.values header "Content-Length")
       | [] -> Ok (header, content_lens)
     end
@@ -233,12 +233,12 @@ let fix_length ~is_response ~status ~request_method ~(header : Header.t)
             Ok (0L, header)
           else if status / 100 = 1 then Ok (0L, header)
           else if status = 204 || status = 304 then Ok (0L, header)
-          else if is_chunked then Ok (-1L, Header.del header "Content-Length")
+          else if is_chunked then Ok (-1L, Header.del "Content-Length" header)
           else if content_lens <> [] then Ok (n, header)
           else
             Ok
               ( (if is_request then 0L else -1L),
-                Header.del header "Content-Length" )))
+                Header.del "Content-Length" header )))
 
 (* shouldClose: whether to hang up after this message. Version-sensitive.
    [remove_close_header] mutates [header] to drop a Connection: close. *)
@@ -252,7 +252,7 @@ let should_close ~major ~minor ~(header : Header.t) ~remove_close_header :
       (has_close || not (header_values_contains_token conv "keep-alive"), header)
     else
       let header =
-        if has_close && remove_close_header then Header.del header "Connection"
+        if has_close && remove_close_header then Header.del "Connection" header
         else header
       in
       (has_close, header)
@@ -267,8 +267,8 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
   | vv ->
       if not is_chunked then Ok (None, header)
       else begin
-        let header = Header.del header "Trailer" in
-        let trailer = ref (Header.create ()) in
+        let header = Header.del "Trailer" header in
+        let trailer = ref Header.empty in
         let err = ref None in
         List.iter
           (fun v ->
@@ -280,7 +280,7 @@ let fix_trailer ~(header : Header.t) ~chunked:is_chunked :
                       err := Some (Bad_header ("bad trailer key", key))
                 | _ -> ());
                 (* trailer[key] = nil : record the key with no values. *)
-                trailer := Header.set_values !trailer key []))
+                trailer := Header.set_values key [] !trailer))
           vv;
         match !err with
         | Some e -> Error e
@@ -300,7 +300,7 @@ let parse_transfer_encoding ~major ~minor ~(header : Header.t) :
   match Header.values header "Transfer-Encoding" with
   | [] -> Ok (false, header)
   | raw ->
-      let header = Header.del header "Transfer-Encoding" in
+      let header = Header.del "Transfer-Encoding" header in
       let proto_at_least m n = major > m || (major = m && minor >= n) in
       if not (proto_at_least 1 1) then Ok (false, header)
       else if List.length raw <> 1 then
@@ -550,7 +550,7 @@ let make_transfer_writer ?(is_response = false)
     ?(trailer = None) ?(at_least_http11 = true) ?(close = false) ?header
     ~(body : Body.t) ~(content_length : int64)
     ~(transfer_encoding : string list) () : transfer_writer =
-  let header = match header with Some h -> h | None -> Header.create () in
+  let header = match header with Some h -> h | None -> Header.empty in
   let te = ref transfer_encoding in
   let cl = ref content_length in
   let body = ref body in

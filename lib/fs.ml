@@ -215,7 +215,7 @@ let local_redirect (r : Request.t) new_path : Response.t =
     | Some q when q <> "" -> new_path ^ "?" ^ q
     | _ -> new_path
   in
-  let h = Header.set (Header.create ()) "Location" new_path in
+  let h = Header.empty |> Header.set "Location" new_path in
   respond ~header:h Httpg_base.Status.MovedPermanently
 
 (* ---- dirList ---- *)
@@ -262,7 +262,7 @@ let dir_list (_r : Request.t) (f : file) : Response.t =
         entries;
       Buffer.add_string buf "</pre>\n";
       let h =
-        Header.set (Header.create ()) "Content-Type" "text/html; charset=utf-8"
+        Header.empty |> Header.set "Content-Type" "text/html; charset=utf-8"
       in
       let body = Buffer.contents buf in
       respond ~header:h ~body:(Body.of_string body)
@@ -424,11 +424,11 @@ let check_if_range ~etag (r : Request.t) ~modtime =
    the response header built so far. *)
 let not_modified_response header : Response.t =
   let h = header in
-  let h = Header.del h "Content-Type" in
-  let h = Header.del h "Content-Length" in
-  let h = Header.del h "Content-Encoding" in
+  let h = Header.del "Content-Type" h in
+  let h = Header.del "Content-Length" h in
+  let h = Header.del "Content-Encoding" h in
   let h =
-    if Option.is_some (Header.get h "Etag") then Header.del h "Last-Modified"
+    if Option.is_some (Header.get h "Etag") then Header.del "Last-Modified" h
     else h
   in
   respond ~header:h Httpg_base.Status.NotModified
@@ -640,7 +640,7 @@ let ext_of name =
 (* Set Last-Modified on the response header being built (mutates [h]). *)
 let set_last_modified h modtime =
   if not (is_zero_time modtime) then
-    Header.set h "Last-Modified" (Http_time.format_gmt modtime)
+    Header.set "Last-Modified" (Http_time.format_gmt modtime) h
   else h
 
 (* Sniff probe length, mirroring internal.SniffLen (512). *)
@@ -672,7 +672,7 @@ let window_body ~read_window ~start ~length : Body.t =
 
 (* Full-body 200 path (no range, or range ignored). *)
 let serve_full (r : Request.t) ~h ~size ~read_window : Response.t =
-  let h = Header.set h "Accept-Ranges" "bytes" in
+  let h = Header.set "Accept-Ranges" "bytes" h in
   (* Go sends Content-Length only when there is no Content-Encoding. *)
   let content_length =
     match Header.get h "Content-Encoding" with None -> size | Some _ -> -1L
@@ -683,8 +683,8 @@ let serve_full (r : Request.t) ~h ~size ~read_window : Response.t =
   in
   respond ~header:h ~body ~content_length Httpg_base.Status.Ok
 
-let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
-    ~size ~read_window : Response.t =
+let serve_content ?(header = Header.empty) (r : Request.t) ~name ~modtime ~size
+    ~read_window : Response.t =
   (* [header] carries caller-set fields (e.g. Etag, an explicit Content-Type).
      [h] is the response header we build up (a persistent value held in a ref so
      the conditional sets below read naturally). *)
@@ -709,7 +709,7 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
                   let buf = read_window ~off:0L ~len:probe in
                   Sniff.detect_content_type buf
             in
-            h := Header.set !h "Content-Type" ctype;
+            h := Header.set "Content-Type" ctype !h;
             ctype
       in
       let is_head = r.Request.meth = Httpg_base.Method.Head in
@@ -734,12 +734,12 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
       | Ok ranges -> (
           (* If the total range size exceeds the file, treat as no range (Go). *)
           let ranges = if sum_ranges_size ranges > size then [] else ranges in
-          h := Header.set !h "Accept-Ranges" "bytes";
+          h := Header.set "Accept-Ranges" "bytes" !h;
           match ranges with
           | [] -> serve_full r ~h:!h ~size ~read_window
           | [ ra ] ->
               (* single range → 206 + Content-Range *)
-              h := Header.set !h "Content-Range" (content_range ra size);
+              h := Header.set "Content-Range" (content_range ra size) !h;
               let body =
                 if is_head then Body.empty
                 else window_body ~read_window ~start:ra.start ~length:ra.length
@@ -752,8 +752,9 @@ let serve_content ?(header = Header.create ()) (r : Request.t) ~name ~modtime
                 ranges_mime_size ranges ~content_type:ctype ~size
               in
               h :=
-                Header.set !h "Content-Type"
-                  ("multipart/byteranges; boundary=" ^ multipart_boundary);
+                Header.set "Content-Type"
+                  ("multipart/byteranges; boundary=" ^ multipart_boundary)
+                  !h;
               let body =
                 if is_head then Body.empty
                 else
@@ -887,7 +888,7 @@ let serve_file ~sw (r : Request.t) (fs : file_system) name ~redirect :
                     if
                       check_if_modified_since r ~modtime:d.fi_mod_time
                       = Cond_false
-                    then not_modified_response (Header.create ())
+                    then not_modified_response Header.empty
                     else begin
                       let resp = dir_list r f in
                       if is_zero_time d.fi_mod_time then resp

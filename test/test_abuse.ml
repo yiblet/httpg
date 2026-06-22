@@ -473,8 +473,8 @@ let stub_response req ?location () : Response.t =
   let header, status =
     match location with
     | Some loc ->
-        (Header.set (Header.create ()) "Location" loc, Httpg_base.Status.Found)
-    | None -> (Header.create (), Httpg_base.Status.Ok)
+        (Header.empty |> Header.set "Location" loc, Httpg_base.Status.Found)
+    | None -> (Header.empty, Httpg_base.Status.Ok)
   in
   {
     Response.status;
@@ -506,7 +506,7 @@ let drive_redirects ~start:start_url ~routes ~init_headers =
       in
       req.Request.header <-
         List.fold_left
-          (fun h (k, v) -> Header.set h k v)
+          (fun h (k, v) -> Header.set k v h)
           req.Request.header init_headers;
       let resp = ok_resp (Client.Private.do_one ~round_trip c req) in
       ignore (Body.drain resp.Response.body);
@@ -537,7 +537,7 @@ let redirect_strip_sticky_on_bounce_back () =
             (Uri.of_string "http://a.com/")
         in
         req.Request.header <-
-          Header.set req.Request.header "Authorization" "Bearer secret";
+          Header.set "Authorization" "Bearer secret" req.Request.header;
         let resp = ok_resp (Client.Private.do_one ~round_trip c req) in
         ignore (Body.drain resp.Response.body);
         !seen2)

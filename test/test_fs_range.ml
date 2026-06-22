@@ -39,7 +39,7 @@ let write_file dir name contents =
 let request_with_headers ~sw c url headers =
   let req = Request.make ~meth:Httpg_base.Method.Get (Uri.of_string url) in
   req.Request.header <-
-    List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
+    List.fold_left (fun h (k, v) -> Header.set k v h) req.Request.header headers;
   let resp = ok_resp (Client.send ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     read_body resp.Response.body,

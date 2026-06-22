@@ -113,13 +113,13 @@ let header_of_part (h : MF.Header.t) : Header.t =
       let name = (fname :> string) in
       match witness with
       | MF.Field.Content_type ->
-          Header.add acc name (value_only (MF.Content_type.to_string v))
+          Header.add name (value_only (MF.Content_type.to_string v)) acc
       | MF.Field.Content_encoding ->
-          Header.add acc name (value_only (MF.Content_encoding.to_string v))
+          Header.add name (value_only (MF.Content_encoding.to_string v)) acc
       | MF.Field.Content_disposition ->
-          Header.add acc name (value_only (MF.Content_disposition.to_string v))
+          Header.add name (value_only (MF.Content_disposition.to_string v)) acc
       | MF.Field.Field -> acc)
-    (Header.create ()) (MF.Header.to_list h)
+    Header.empty (MF.Header.to_list h)
 
 (* [of_body ~boundary body] parses [body] as multipart/form-data and returns its
    parts as a [(part, error) result Seq.t]. Each forced element drives the parser
@@ -223,9 +223,8 @@ let encode_part ~boundary (p : part) : string =
           | Some fn -> "; filename=\"" ^ escape_quotes fn ^ "\""
           | None -> ""
         in
-        Header.set
-          (Header.del p.header "Content-Disposition")
-          "Content-Disposition" cd
+        Header.del "Content-Disposition" p.header
+        |> Header.set "Content-Disposition" cd
     | None -> p.header
   in
   Header.write header buf;

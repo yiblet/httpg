@@ -10,11 +10,11 @@ let capture (f : Eio.Buf_write.t -> unit) : string =
 
 let header pairs =
   List.fold_left
-    (fun h (k, v) -> Httpg.Header.add h k v)
-    (Httpg.Header.create ()) pairs
+    (fun h (k, v) -> Httpg.Header.add k v h)
+    Httpg.Header.empty pairs
 
 let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
-    ?(header = Httpg.Header.create ()) ?(body = Httpg.Body.empty)
+    ?(header = Httpg.Header.empty) ?(body = Httpg.Body.empty)
     ?(content_length = 0L) ?(transfer_encoding = []) ?(close = false)
     ?(host = "") url : Httpg.Request.t =
   {
@@ -134,9 +134,7 @@ let row4 () =
    boundary must surface it as a typed [Error (Transfer (Bad_header _))], not
    let it escape as an exception. *)
 let invalid_trailer_key_is_error () =
-  let trailer =
-    Httpg.Header.set (Httpg.Header.create ()) "Content-Length" "5"
-  in
+  let trailer = Httpg.Header.empty |> Httpg.Header.set "Content-Length" "5" in
   (* An unknown-length, non-empty streaming body forces chunked framing, so the
      trailer section (and its key validation) is actually written. *)
   let sent = ref false in

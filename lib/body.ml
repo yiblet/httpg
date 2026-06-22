@@ -149,7 +149,7 @@ let concat (gens : t list) : t =
    a connection only after a clean body read. [f] runs at most once per forced
    traversal; [Seq.memoize] makes re-traversal of the cached nodes free, so the
    [Nil] node (and thus [f]) is reached again only by re-forcing past the tail. *)
-let on_complete (b : t) (f : unit -> unit) : t =
+let on_complete (f : unit -> unit) (b : t) : t =
   let rec wrap seq () =
     match seq () with
     | Seq.Nil ->

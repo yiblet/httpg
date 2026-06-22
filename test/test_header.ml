@@ -126,26 +126,26 @@ let canon_tests =
   ]
 
 let get_set_add_del () =
-  let h = Header.create () in
+  let h = Header.empty in
   Alcotest.(check (option string)) "missing -> None" None (Header.get h "Foo");
-  let h = Header.set h "foo" "bar" in
+  let h = Header.set "foo" "bar" h in
   Alcotest.(check (option string))
     "get canonicalizes" (Some "bar") (Header.get h "FOO");
-  let h = Header.set h "Foo" "baz" in
+  let h = Header.set "Foo" "baz" h in
   Alcotest.(check (option string))
     "set replaces" (Some "baz") (Header.get h "foo");
-  let h = Header.add h "foo" "qux" in
+  let h = Header.add "foo" "qux" h in
   Alcotest.(check (list string))
     "add appends" [ "baz"; "qux" ] (Header.values h "Foo");
-  let h = Header.del h "FOO" in
+  let h = Header.del "FOO" h in
   Alcotest.(check (list string)) "del removes" [] (Header.values h "foo");
   Alcotest.(check bool) "has after del" false (Header.has h "foo")
 
 let values_and_first () =
-  let h = Header.create () in
-  let h = Header.add h "X-Multi" "a" in
-  let h = Header.add h "X-Multi" "b" in
-  let h = Header.add h "X-Multi" "c" in
+  let h = Header.empty in
+  let h = Header.add "X-Multi" "a" h in
+  let h = Header.add "X-Multi" "b" h in
+  let h = Header.add "X-Multi" "c" h in
   Alcotest.(check (list string))
     "values returns all in insertion order" [ "a"; "b"; "c" ]
     (Header.values h "x-multi");
@@ -155,11 +155,11 @@ let values_and_first () =
 (* With a persistent header, deriving from a value never affects the original
    (Go's Header.Clone independence, free from structural sharing). *)
 let clone_independent () =
-  let h = Header.create () in
-  let h = Header.set h "A" "1" in
+  let h = Header.empty in
+  let h = Header.set "A" "1" h in
   let h2 = h in
-  let h2 = Header.set h2 "A" "2" in
-  let h2 = Header.add h2 "B" "3" in
+  let h2 = Header.set "A" "2" h2 in
+  let h2 = Header.add "B" "3" h2 in
   Alcotest.(check (option string))
     "original unchanged value" (Some "1") (Header.get h "A");
   Alcotest.(check bool) "original has no B" false (Header.has h "B");

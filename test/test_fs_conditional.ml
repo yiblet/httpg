@@ -69,8 +69,8 @@ let etag_file_handler ~dir ~name ~etag =
       let d = f.Fs.stat () in
       let header =
         match etag with
-        | Some e -> Header.set (Header.create ()) "Etag" e
-        | None -> Header.create ()
+        | Some e -> Header.empty |> Header.set "Etag" e
+        | None -> Header.empty
       in
       Fs.serve_content ~header r ~name:d.Fs.fi_name ~modtime:d.Fs.fi_mod_time
         ~size:d.Fs.fi_size ~read_window:f.Fs.read_window
@@ -80,7 +80,7 @@ let etag_file_handler ~dir ~name ~etag =
 let request_with_headers ~sw c url headers =
   let req = Request.make ~meth:Httpg_base.Method.Get (Uri.of_string url) in
   req.Request.header <-
-    List.fold_left (fun h (k, v) -> Header.set h k v) req.Request.header headers;
+    List.fold_left (fun h (k, v) -> Header.set k v h) req.Request.header headers;
   let resp = ok_resp (Client.send ~sw c req) in
   ( Httpg_base.Status.to_int resp.Response.status,
     read_body resp.Response.body,

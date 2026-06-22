@@ -21,7 +21,7 @@ val map : (Pattern.t -> 'h -> 'h2) -> 'h t -> 'h2 t
     each handler. *)
 
 val add_pattern : Pattern.t -> 'h -> 'h t -> 'h t
-(** [add_pattern root p h] adds pattern [p] and its handler [h] to the tree
+(** [add_pattern p h root] adds pattern [p] and its handler [h] to the tree
     (Go's [routingNode.addPattern]). *)
 
 val match_ :

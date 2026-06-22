@@ -31,7 +31,7 @@ let create () : t =
   {
     status = Httpg_base.Status.Ok;
     proto = Httpg_base.Protocol.Http11;
-    header = Header.create ();
+    header = Header.empty;
     body = Body.empty;
     content_length = Some 0L;
     transfer_encoding = [];
@@ -44,10 +44,10 @@ let create () : t =
 let with_status code (r : t) : t = { r with status = code }
 
 let with_header key value (r : t) : t =
-  { r with header = Header.add r.header key value }
+  { r with header = Header.add key value r.header }
 
 let with_set_header key value (r : t) : t =
-  { r with header = Header.set r.header key value }
+  { r with header = Header.set key value r.header }
 
 (* Inherit the body's known length when it has one (a string/in-memory body or
    a concatenation of known-length bodies); a streaming body of unknown length
