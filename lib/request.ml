@@ -16,8 +16,8 @@ type t = {
   mutable close : bool;
   mutable host : string option; (* None = derive from URL *)
   mutable trailer : Header.t option;
-  mutable request_uri : string;
-  mutable remote_addr : string;
+  mutable request_uri : string option;
+  mutable remote_addr : string option;
 }
 
 (* defaultUserAgent (request.go). *)
@@ -29,7 +29,7 @@ let default_user_agent = "Go-http-client/1.1"
 let make ?(meth = Httpg_base.Method.Get) ?(proto = Httpg_base.Protocol.Http11)
     ?(header = Header.create ()) ?(body = Body.empty) ?content_length
     ?(transfer_encoding = []) ?(close = false) ?host ?(trailer = None)
-    ?(request_uri = "") ?(remote_addr = "") url =
+    ?request_uri ?remote_addr url =
   {
     meth;
     url;

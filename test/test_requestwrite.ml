@@ -32,8 +32,8 @@ let req ?(meth = "GET") ?(proto_major = 1) ?(proto_minor = 1)
     close;
     host = (if host = "" then None else Some host);
     trailer = None;
-    request_uri = "";
-    remote_addr = "";
+    request_uri = None;
+    remote_addr = None;
   }
 
 let write r =

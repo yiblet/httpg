@@ -12,6 +12,18 @@ type same_site =
   | Same_site_strict_mode
   | Same_site_none_mode
 
+(** The present cases of a cookie's Max-Age attribute. [None] of
+    [max_age option] means no Max-Age attribute. *)
+type max_age =
+  | DeleteNow  (** emits "Max-Age=0" (delete immediately) *)
+  | Seconds of int  (** positive seconds *)
+
+val max_age_seconds : int -> max_age option
+(** Smart constructor folding Go's int overload: [n = 0 -> None] (unset);
+    [n < 0 -> Some DeleteNow]; [n > 0 -> Some (Seconds n)]. Keeps [Seconds]
+    always positive. NB: this differs from wire parsing, where Go's
+    [readSetCookies] maps a literal [Max-Age=0] to delete-now, not unset. *)
+
 type t = {
   name : string;
   value : string;
@@ -20,8 +32,9 @@ type t = {
   domain : string option;  (** [None] = no Domain attribute *)
   expires : float;  (** Unix seconds; 0. = unset *)
   raw_expires : string option;  (** for reading cookies only *)
-  max_age : int;
-      (** 0 = no Max-Age; <0 = delete now (Max-Age:0); >0 = seconds *)
+  max_age : max_age option;
+      (** [None] = no Max-Age attribute; [Some DeleteNow] = Max-Age:0
+          (delete now); [Some (Seconds n)] = Max-Age:n seconds *)
   secure : bool;
   http_only : bool;
   same_site : same_site;
@@ -42,7 +55,7 @@ val make :
   ?domain:string ->
   ?expires:float ->
   ?raw_expires:string ->
-  ?max_age:int ->
+  ?max_age:max_age ->
   ?secure:bool ->
   ?http_only:bool ->
   ?same_site:same_site ->

@@ -28,14 +28,18 @@ let same_site_to_string = function
 let cookie_to_string c =
   Printf.sprintf
     "{name=%S value=%S quoted=%b path=%S domain=%S expires=%g raw_expires=%S \
-     max_age=%d secure=%b http_only=%b same_site=%s partitioned=%b raw=%S \
+     max_age=%s secure=%b http_only=%b same_site=%s partitioned=%b raw=%S \
      unparsed=[%s]}"
     c.name c.value c.quoted
     (Option.value ~default:"" c.path)
     (Option.value ~default:"" c.domain)
     c.expires
     (Option.value ~default:"" c.raw_expires)
-    c.max_age c.secure c.http_only
+    (match c.max_age with
+    | None -> "none"
+    | Some DeleteNow -> "delete-now"
+    | Some (Seconds n) -> string_of_int n)
+    c.secure c.http_only
     (same_site_to_string c.same_site)
     c.partitioned
     (Option.value ~default:"" c.raw)
@@ -73,7 +77,7 @@ let exp_1600 = -11644556339. (* year 1600 -> invalid *)
 let write_set_cookies_tests =
   [
     (make ~name:"cookie-1" ~value:"v$1" (), "cookie-1=v$1");
-    ( make ~name:"cookie-2" ~value:"two" ~max_age:3600 (),
+    ( make ~name:"cookie-2" ~value:"two" ~max_age:(Seconds 3600) (),
       "cookie-2=two; Max-Age=3600" );
     ( make ~name:"cookie-3" ~value:"three" ~domain:".example.com" (),
       "cookie-3=three; Domain=example.com" );
@@ -397,10 +401,10 @@ let valid_tests =
         ~expires:1. (),
       true );
     ( make ~name:"valid-max-age" ~value:"foo" ~path:"/bar" ~domain:"example.com"
-        ~max_age:60 (),
+        ~max_age:(Seconds 60) (),
       true );
     ( make ~name:"valid-all-fields" ~value:"foo" ~path:"/bar"
-        ~domain:"example.com" ~expires:1. ~max_age:0 (),
+        ~domain:"example.com" ~expires:1. (),
       true );
     ( make ~name:"valid-partitioned" ~value:"foo" ~path:"/" ~secure:true
         ~partitioned:true (),
@@ -454,6 +458,72 @@ let valid_typed_cases =
         | Error e -> Alcotest.failf "expected Ok, got %s" (error_to_string e) );
   ]
 
+(* ---------- max_age variant (Ticket 4) ---------- *)
+
+let max_age_testable =
+  Alcotest.testable
+    (Fmt.of_to_string (function
+      | None -> "none"
+      | Some DeleteNow -> "delete-now"
+      | Some (Seconds n) -> Printf.sprintf "seconds=%d" n))
+    ( = )
+
+let max_age_cases =
+  [
+    ( "cookie_max_age_write_variants",
+      `Quick,
+      fun () ->
+        let s c = set_cookie c in
+        let contains ~affix str =
+          let re = Str.regexp_string affix in
+          try
+            ignore (Str.search_forward re str 0);
+            true
+          with Not_found -> false
+        in
+        let none = s (make ~name:"c" ~value:"v" ()) in
+        Alcotest.(check bool)
+          "None: no Max-Age" false
+          (contains ~affix:"Max-Age" none);
+        Alcotest.(check string)
+          "DeleteNow -> Max-Age=0" "c=v; Max-Age=0"
+          (s (make ~name:"c" ~value:"v" ~max_age:DeleteNow ()));
+        Alcotest.(check string)
+          "Seconds 3600 -> Max-Age=3600" "c=v; Max-Age=3600"
+          (s (make ~name:"c" ~value:"v" ~max_age:(Seconds 3600) ())) );
+    ( "cookie_max_age_parse_normalizes",
+      `Quick,
+      fun () ->
+        let parse v =
+          match
+            read_set_cookies (header_of [ ("Set-Cookie", [ "c=v; " ^ v ]) ])
+          with
+          | [ c ] -> c.max_age
+          | _ -> Alcotest.fail "expected exactly one parsed cookie"
+        in
+        (* Go's readSetCookies: a literal wire Max-Age=0 (and any <=0) is
+           delete-now, NOT unset. *)
+        Alcotest.check max_age_testable "Max-Age=0 -> delete-now"
+          (Some DeleteNow) (parse "Max-Age=0");
+        Alcotest.check max_age_testable "Max-Age=-7 -> delete-now"
+          (Some DeleteNow) (parse "Max-Age=-7");
+        Alcotest.check max_age_testable "Max-Age=3600 -> Seconds 3600"
+          (Some (Seconds 3600))
+          (parse "Max-Age=3600");
+        (* leading-zero is rejected/ignored -> attribute unset. *)
+        Alcotest.check max_age_testable "Max-Age=03 -> unset" None
+          (parse "Max-Age=03") );
+    ( "cookie_max_age_seconds_smart_ctor",
+      `Quick,
+      fun () ->
+        Alcotest.check max_age_testable "0 -> None" None (max_age_seconds 0);
+        Alcotest.check max_age_testable "-3 -> DeleteNow" (Some DeleteNow)
+          (max_age_seconds (-3));
+        Alcotest.check max_age_testable "5 -> Seconds 5" (Some (Seconds 5))
+          (max_age_seconds 5) );
+  ]
+
 let tests =
   write_set_cookies_cases @ read_set_cookies_cases @ read_cookies_cases
   @ sanitize_value_cases @ sanitize_path_cases @ valid_cases @ valid_typed_cases
+  @ max_age_cases

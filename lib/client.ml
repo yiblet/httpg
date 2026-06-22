@@ -181,8 +181,8 @@ let do_one ?round_trip ?(force_h2 = false) c (req : Request.t) :
                   close = false;
                   host = None;
                   trailer = None;
-                  request_uri = "";
-                  remote_addr = "";
+                  request_uri = None;
+                  remote_addr = None;
                 }
               in
               match c.check_redirect via with

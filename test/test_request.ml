@@ -40,8 +40,8 @@ let dummy_req () : Httpg.Request.t =
     close = false;
     host = None;
     trailer = None;
-    request_uri = "";
-    remote_addr = "";
+    request_uri = None;
+    remote_addr = None;
   }
 
 let auth_roundtrip () =
@@ -102,10 +102,33 @@ let make () =
     "meth POST" true
     (r2.Httpg.Request.meth = Httpg_base.Method.Post)
 
+let request_remote_addr_optional () =
+  let url = Uri.of_string "http://example.com/path" in
+  let r = Httpg.Request.make url in
+  Alcotest.(check (option string))
+    "remote_addr defaults to None" None r.Httpg.Request.remote_addr;
+  r.Httpg.Request.remote_addr <- Some "127.0.0.1:80";
+  Alcotest.(check (option string))
+    "remote_addr reads back Some" (Some "127.0.0.1:80")
+    r.Httpg.Request.remote_addr
+
+let request_uri_optional () =
+  let url = Uri.of_string "http://example.com/path" in
+  let r = Httpg.Request.make url in
+  Alcotest.(check (option string))
+    "request_uri defaults to None (client request)" None
+    r.Httpg.Request.request_uri;
+  let r2 = Httpg.Request.make ~request_uri:"/foo" url in
+  Alcotest.(check (option string))
+    "request_uri wraps the provided target" (Some "/foo")
+    r2.Httpg.Request.request_uri
+
 let tests =
   [
     ("parse_http_version", `Quick, parse_http_version);
     ("auth_roundtrip", `Quick, auth_roundtrip);
     ("add_cookie", `Quick, add_cookie);
     ("make", `Quick, make);
+    ("request_remote_addr_optional", `Quick, request_remote_addr_optional);
+    ("request_uri_optional", `Quick, request_uri_optional);
   ]

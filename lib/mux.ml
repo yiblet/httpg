@@ -244,7 +244,7 @@ let find_handler mux (r : Request.t) =
 
 (* Go's ServeMux.ServeHTTP. *)
 let handler mux ~sw (r : Request.t) : Response.t =
-  if r.request_uri = "*" then begin
+  if r.request_uri = Some "*" then begin
     let resp =
       Response.create () |> Response.with_status Httpg_base.Status.BadRequest
     in

@@ -85,8 +85,8 @@ let location () =
       close = false;
       host = None;
       trailer = None;
-      request_uri = "";
-      remote_addr = "";
+      request_uri = None;
+      remote_addr = None;
     }
   in
   let raw =

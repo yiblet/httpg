@@ -71,7 +71,8 @@ val create :
   t
 (** [create ~net ?clock ?domain_mgr ?addr ?port handler] builds a server bound
     to [addr]:[port], capturing the [net] capability (and optional [clock] for
-    the duration knobs) so the serve entry points don't re-thread them.
+    the duration knobs) so the serve entry points don't re-thread them. Omit
+    [?addr] to bind all interfaces (Go's empty [Addr]).
 
     [?domain_mgr] (Eio.Stdenv.domain_mgr) enables the multicore accept pool: the
     serve entry points pre-spawn one accept loop per domain (default

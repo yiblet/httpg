@@ -32,6 +32,7 @@ let () =
       ("Response", Test_response.tests);
       ("ResponseWrite", Test_responsewrite.tests);
       ("Clientserver", Test_clientserver.tests);
+      ("Server", Test_server.tests);
       ("Serve", Test_serve.tests);
       ("Mux", Test_mux.tests);
       ("Socketpair_net", Test_socketpair_net.tests);

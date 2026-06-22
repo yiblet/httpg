@@ -343,7 +343,7 @@ type t = {
   (* Optional domain manager (Eio.Stdenv.domain_mgr) for the multicore accept
      pool; [None] forces single-domain serving regardless of [?domains]. *)
   domain_mgr : Eio.Domain_manager.ty Eio.Resource.t option;
-  mutable addr : string;
+  mutable addr : string option;
   mutable port : int;
   handler : handler;
   (* Go's Server duration knobs (server.go:3717-3724); seconds, 0. = off.
@@ -380,7 +380,7 @@ type t = {
 
 let default_max_header_bytes = 1 lsl 20
 
-let create ~net ?clock ?domain_mgr ?(addr = "") ?(port = 0) ?(read_timeout = 0.)
+let create ~net ?clock ?domain_mgr ?addr ?(port = 0) ?(read_timeout = 0.)
     ?(read_header_timeout = 0.) ?(write_timeout = 0.) ?(idle_timeout = 0.)
     ?(max_header_bytes = default_max_header_bytes) ?(force_h2 = false) handler =
   {
@@ -581,7 +581,7 @@ let serve_loop ~clock ~timeouts ~max_header_bytes ~r ~w ~remote
     | `Timeout -> () (* header/idle deadline exceeded: hang up, no reply. *)
     | `Done (Error e) -> write_read_error_response w e
     | `Done (Ok req) ->
-        req.Request.remote_addr <- remote;
+        req.Request.remote_addr <- Some remote;
         (* Expect: 100-continue (server.go:2089-2101). *)
         let unknown_expect =
           if Request.expects_continue req then begin
@@ -656,8 +656,10 @@ let request_of_server_request (r : Httpg_http2.Api.server_request) : Request.t =
     trailer =
       (if Hashtbl.length r.sreq_trailer = 0 then None
        else Some (header_of_api_header r.sreq_trailer));
-    request_uri = r.sreq_request_uri;
-    remote_addr = r.sreq_remote_addr;
+    request_uri =
+      (if r.sreq_request_uri = "" then None else Some r.sreq_request_uri);
+    remote_addr =
+      (if r.sreq_remote_addr = "" then None else Some r.sreq_remote_addr);
   }
 
 (* Adapt a [Server.handler] into a {!Httpg_http2.Api.handler}: run the handler,

@@ -37,8 +37,8 @@ let baseline () =
   Alcotest.(check string)
     "host" "www.techcrunch.com"
     (Option.value ~default:"" r.host);
-  Alcotest.(check string)
-    "request_uri" "http://www.techcrunch.com/" r.request_uri;
+  Alcotest.(check (option string))
+    "request_uri" (Some "http://www.techcrunch.com/") r.request_uri;
   Alcotest.(check bool) "close" false r.close;
   Alcotest.(check (list (of_pp Fmt.string)))
     "content_length" [ "7" ]
@@ -55,7 +55,7 @@ let simple_get () =
   let r = read "GET / HTTP/1.1\r\nHost: foo.com\r\n\r\n" in
   Alcotest.(check string) "method" "GET" (Httpg_base.Method.to_string r.meth);
   Alcotest.(check string) "host" "foo.com" (Option.value ~default:"" r.host);
-  Alcotest.(check string) "request_uri" "/" r.request_uri;
+  Alcotest.(check (option string)) "request_uri" (Some "/") r.request_uri;
   Alcotest.(check string) "content_length" "0" (cl_str r.content_length);
   Alcotest.(check string) "body" "" (body_of r)
 

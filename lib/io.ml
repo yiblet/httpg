@@ -368,8 +368,8 @@ let read_request_threaded ?(max_header_bytes : int option) (r : Eio.Buf_read.t)
           close = res.Transfer.result_close;
           host = (if host = "" then None else Some host);
           trailer = res.Transfer.trailer;
-          request_uri;
-          remote_addr = "";
+          request_uri = Some request_uri;
+          remote_addr = None;
         }
       in
       req.Request.body <-

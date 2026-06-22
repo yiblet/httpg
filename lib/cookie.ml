@@ -20,6 +20,13 @@ type same_site =
   | Same_site_strict_mode
   | Same_site_none_mode
 
+type max_age =
+  | DeleteNow  (** emits "Max-Age=0" *)
+  | Seconds of int  (** positive seconds *)
+
+let max_age_seconds n =
+  if n = 0 then None else if n < 0 then Some DeleteNow else Some (Seconds n)
+
 type t = {
   name : string;
   value : string;
@@ -28,7 +35,7 @@ type t = {
   domain : string option;
   expires : float;
   raw_expires : string option;
-  max_age : int;
+  max_age : max_age option;
   secure : bool;
   http_only : bool;
   same_site : same_site;
@@ -39,7 +46,7 @@ type t = {
 
 (* [name]/[value] required; other fields optional (replaces the zero record). *)
 let make ~name ~value ?(quoted = false) ?(path = "") ?(domain = "")
-    ?(expires = 0.) ?(raw_expires = "") ?(max_age = 0) ?(secure = false)
+    ?(expires = 0.) ?(raw_expires = "") ?max_age ?(secure = false)
     ?(http_only = false) ?(same_site = Same_site_unset) ?(partitioned = false)
     ?(raw = "") ?(unparsed = []) () =
   {
@@ -358,8 +365,16 @@ let parse_set_cookie line =
                               | Some secs ->
                                   if secs <> 0 && v <> "" && v.[0] = '0' then ()
                                   else
-                                    let secs = if secs <= 0 then -1 else secs in
-                                    c := { !c with max_age = secs })
+                                    (* Go's readSetCookies: secs <= 0 -> delete
+                                       now. This diverges from [max_age_seconds],
+                                       which maps a programmatic 0 to [None]
+                                       (unset); on the wire Go treats a literal
+                                       Max-Age=0 as delete-now. *)
+                                    let max_age =
+                                      if secs <= 0 then Some DeleteNow
+                                      else Some (Seconds secs)
+                                    in
+                                    c := { !c with max_age })
                           | "expires" ->
                               let exp =
                                 match parse_expires v with
@@ -464,11 +479,12 @@ let set_cookie c =
       Buffer.add_string b "; Expires=";
       Buffer.add_string b (format_time c.expires)
     end;
-    if c.max_age > 0 then begin
-      Buffer.add_string b "; Max-Age=";
-      Buffer.add_string b (string_of_int c.max_age)
-    end
-    else if c.max_age < 0 then Buffer.add_string b "; Max-Age=0";
+    (match c.max_age with
+    | Some (Seconds n) ->
+        Buffer.add_string b "; Max-Age=";
+        Buffer.add_string b (string_of_int n)
+    | Some DeleteNow -> Buffer.add_string b "; Max-Age=0"
+    | None -> ());
     if c.http_only then Buffer.add_string b "; HttpOnly";
     if c.secure then Buffer.add_string b "; Secure";
     (match c.same_site with

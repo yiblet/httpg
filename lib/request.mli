@@ -20,8 +20,12 @@ type t = {
   mutable close : bool;
   mutable host : string option;  (** Go [Host]; [None] = derive from URL *)
   mutable trailer : Header.t option;
-  mutable request_uri : string;
-  mutable remote_addr : string;
+  mutable request_uri : string option;
+      (** Go [RequestURI]: [Some] the unmodified request-target on a
+          server-received request; [None] on client requests (Go's ""). *)
+  mutable remote_addr : string option;
+      (** Go [RemoteAddr]: [Some host:port] once the server assigns it; [None]
+          before that / on client requests (Go's ""). *)
 }
 (** A request mirroring Go's [Request] struct. *)
 

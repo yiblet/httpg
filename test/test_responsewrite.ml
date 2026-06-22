@@ -19,8 +19,8 @@ let dummy_req ?(meth = "GET") ?(proto_minor = 0) () : Httpg.Request.t =
     close = false;
     host = None;
     trailer = None;
-    request_uri = "";
-    remote_addr = "";
+    request_uri = None;
+    remote_addr = None;
   }
 
 let header pairs =

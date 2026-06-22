@@ -18,8 +18,8 @@ let req_no_host () : Request.t =
     close = false;
     host = None;
     trailer = None;
-    request_uri = "";
-    remote_addr = "";
+    request_uri = None;
+    remote_addr = None;
   }
 
 (* read_request: malformed request line and a bad header line both surface as
